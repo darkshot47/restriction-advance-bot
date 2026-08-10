@@ -599,4 +599,3 @@ if __name__ == "__main__":
     Thread(target=run_web, daemon=True).start()
     print("✅ Flask started")
     bot.run()
-    print("✅ Bot LIVE")
