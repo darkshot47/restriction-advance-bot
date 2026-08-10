@@ -1,4 +1,4 @@
-import os
+ import os
 import re
 import asyncio
 from flask import Flask
@@ -15,17 +15,9 @@ from pyrogram.errors import (
     ChannelPrivate
 )
 
-# ═══════════════════════════════════════
-#         CONFIGURATION
-# ═══════════════════════════════════════
-
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-
-# ═══════════════════════════════════════
-#         BOT CLIENT
-# ═══════════════════════════════════════
 
 bot = Client(
     "bot_session",
@@ -34,27 +26,17 @@ bot = Client(
     bot_token=BOT_TOKEN
 )
 
-# ═══════════════════════════════════════
-#   IN-MEMORY STORAGE
-# ═══════════════════════════════════════
-
 user_clients = {}
 login_pending = {}
 
 
-# ═══════════════════════════════════════
-#         HELPER FUNCTIONS
-# ═══════════════════════════════════════
-
 def parse_link(link: str):
     link = link.strip().rstrip("/")
     parts = link.split("/")
-
     try:
         msg_id = int(parts[-1])
     except ValueError:
         return None, None, None
-
     if "c" in parts:
         idx = parts.index("c")
         chat_id = int(f"-100{parts[idx + 1]}")
@@ -80,15 +62,12 @@ async def get_user_client(user_id: int):
             pass
         del user_clients[user_id]
     return None
-    # ═══════════════════════════════════════
-#         /start COMMAND
-# ═══════════════════════════════════════
+
 
 @bot.on_message(filters.command("start") & filters.private)
 async def start_handler(client: Client, message: Message):
     user = message.from_user
     name = user.first_name or "User"
-
     await message.reply(
         f"👋 **Hello {name}! Welcome to Restricted Content Saver Bot!**\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -117,10 +96,6 @@ async def start_handler(client: Client, message: Message):
     )
 
 
-# ═══════════════════════════════════════
-#         /help COMMAND
-# ═══════════════════════════════════════
-
 @bot.on_message(filters.command("help") & filters.private)
 async def help_handler(client: Client, message: Message):
     await message.reply(
@@ -147,7 +122,7 @@ async def help_handler(client: Client, message: Message):
         "2. Enter phone: `+91 9876543210`\n"
         "3. Enter OTP with spaces: `1 2 3 4 5`\n"
         "4. Enter 2FA password if enabled\n"
-        "5. Done! ✅\n\n"
+        "5. Done!\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "You must be a **member** of the\n"
         "private channel on your logged-in account.",
@@ -155,15 +130,10 @@ async def help_handler(client: Client, message: Message):
     )
 
 
-# ═══════════════════════════════════════
-#         /status COMMAND
-# ═══════════════════════════════════════
-
 @bot.on_message(filters.command("status") & filters.private)
 async def status_handler(client: Client, message: Message):
     user_id = message.from_user.id
     user_client = await get_user_client(user_id)
-
     if user_client:
         try:
             me = await user_client.get_me()
@@ -172,7 +142,6 @@ async def status_handler(client: Client, message: Message):
                 name += f" {me.last_name}"
             uname = f"@{me.username}" if me.username else "No username"
             phone = me.phone_number or "N/A"
-
             await message.reply(
                 "✅ **You are logged in!**\n\n"
                 f"👤 **Name:** {name}\n"
@@ -196,14 +165,9 @@ async def status_handler(client: Client, message: Message):
         )
 
 
-# ═══════════════════════════════════════
-#         /cancel COMMAND
-# ═══════════════════════════════════════
-
 @bot.on_message(filters.command("cancel") & filters.private)
 async def cancel_handler(client: Client, message: Message):
     user_id = message.from_user.id
-
     if user_id in login_pending:
         pending = login_pending[user_id]
         temp_client = pending.get("client")
@@ -223,14 +187,11 @@ async def cancel_handler(client: Client, message: Message):
             "ℹ️ No active login process to cancel.",
             quote=True
         )
-        # ═══════════════════════════════════════
-#         /login COMMAND
-# ═══════════════════════════════════════
+
 
 @bot.on_message(filters.command("login") & filters.private)
 async def login_handler(client: Client, message: Message):
     user_id = message.from_user.id
-
     if await get_user_client(user_id):
         await message.reply(
             "✅ **Already logged in!**\n\n"
@@ -239,7 +200,6 @@ async def login_handler(client: Client, message: Message):
             quote=True
         )
         return
-
     if user_id in login_pending:
         await message.reply(
             "⏳ **Login already in progress.**\n\n"
@@ -247,9 +207,7 @@ async def login_handler(client: Client, message: Message):
             quote=True
         )
         return
-
     login_pending[user_id] = {"step": "waiting_phone"}
-
     await message.reply(
         "🔐 **Login to Your Telegram Account**\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -274,15 +232,10 @@ async def login_handler(client: Client, message: Message):
     )
 
 
-# ═══════════════════════════════════════
-#         /logout COMMAND
-# ═══════════════════════════════════════
-
 @bot.on_message(filters.command("logout") & filters.private)
 async def logout_handler(client: Client, message: Message):
     user_id = message.from_user.id
     user_client = await get_user_client(user_id)
-
     if not user_client:
         await message.reply(
             "ℹ️ **You are not logged in.**\n\n"
@@ -290,30 +243,21 @@ async def logout_handler(client: Client, message: Message):
             quote=True
         )
         return
-
     try:
         me = await user_client.get_me()
         phone = me.phone_number or "Unknown"
         await user_client.stop()
     except:
         phone = "Unknown"
-
     if user_id in user_clients:
         del user_clients[user_id]
-
     await message.reply(
         "✅ **Logged out successfully!**\n\n"
         f"📱 **Phone:** `+{phone}`\n\n"
         "Your session has been removed from memory.\n"
         "Use /login to login again anytime.",
         quote=True
-    )
-
-
-# ═══════════════════════════════════════
-#   TEXT HANDLER (Login Flow + Links)
-# ═══════════════════════════════════════
-
+                )
 @bot.on_message(
     filters.text & filters.private & ~filters.command(
         ["start", "help", "login", "logout", "status", "cancel"]
@@ -323,12 +267,11 @@ async def text_handler(client: Client, message: Message):
     user_id = message.from_user.id
     text = message.text.strip()
 
-    # ─── LOGIN FLOW ───
     if user_id in login_pending:
         pending = login_pending[user_id]
         step = pending.get("step", "")
 
-        # ── STEP 1: Phone Number ──
+        # ── STEP 1: Phone ──
         if step == "waiting_phone":
             phone = text.replace(" ", "").replace("-", "")
             if not phone.startswith("+"):
@@ -337,7 +280,6 @@ async def text_handler(client: Client, message: Message):
             if not re.match(r"^\+\d{7,15}$", phone):
                 await message.reply(
                     "❌ **Invalid format!**\n\n"
-                    "Send with country code.\n"
                     "Example: `+91 9876543210`\n\n"
                     "Send /cancel to abort.",
                     quote=True
@@ -346,7 +288,7 @@ async def text_handler(client: Client, message: Message):
 
             await message.reply(
                 f"📱 Number received: `{phone}`\n"
-                "⏳ Sending OTP... Please wait.",
+                "⏳ Sending OTP...",
                 quote=True
             )
 
@@ -369,9 +311,9 @@ async def text_handler(client: Client, message: Message):
                 }
 
                 await message.reply(
-                    "✅ **OTP sent to your Telegram!**\n\n"
-                    "📩 Check your Telegram app for the code.\n\n"
-                    "⚠️ **Send OTP with spaces:**\n"
+                    "✅ **OTP sent!**\n\n"
+                    "📩 Check your Telegram app.\n\n"
+                    "⚠️ Send OTP with spaces:\n"
                     "If OTP is `12345` send as `1 2 3 4 5`\n\n"
                     "📲 **Send OTP now:**",
                     quote=True
@@ -380,7 +322,7 @@ async def text_handler(client: Client, message: Message):
             except PhoneNumberInvalid:
                 await message.reply(
                     "❌ **Invalid phone number!**\n"
-                    "Please check and try /login again.",
+                    "Try /login again.",
                     quote=True
                 )
                 try:
@@ -392,8 +334,7 @@ async def text_handler(client: Client, message: Message):
             except FloodWait as e:
                 await message.reply(
                     f"⚠️ **Flood wait!**\n"
-                    f"Try again after **{e.value} seconds**.\n\n"
-                    "Send /cancel and try /login later.",
+                    f"Try after **{e.value} seconds**.",
                     quote=True
                 )
                 try:
@@ -405,7 +346,7 @@ async def text_handler(client: Client, message: Message):
             except Exception as e:
                 await message.reply(
                     f"❌ **Error:** `{e}`\n\n"
-                    "Send /cancel and try /login again.",
+                    "Try /login again.",
                     quote=True
                 )
                 try:
@@ -421,7 +362,7 @@ async def text_handler(client: Client, message: Message):
 
             if not otp.isdigit():
                 await message.reply(
-                    "❌ **Invalid OTP!** Only digits allowed.\n"
+                    "❌ **Invalid OTP!**\n"
                     "Example: `1 2 3 4 5`\n\n"
                     "Send /cancel to abort.",
                     quote=True
@@ -449,8 +390,7 @@ async def text_handler(client: Client, message: Message):
                     "✅ **Login Successful!**\n\n"
                     f"👤 **Welcome, {name}!**\n"
                     f"📱 **Phone:** `+{me.phone_number}`\n\n"
-                    "You can now access **private channel** content!\n"
-                    "Send any private channel link now.\n\n"
+                    "Now send any private channel link!\n\n"
                     "Use /logout to logout anytime.",
                     quote=True
                 )
@@ -458,25 +398,23 @@ async def text_handler(client: Client, message: Message):
             except SessionPasswordNeeded:
                 login_pending[user_id]["step"] = "waiting_2fa"
                 await message.reply(
-                    "🔒 **2FA is enabled!**\n\n"
-                    "Please send your **cloud password** now.\n\n"
-                    "Password is not stored anywhere.\n"
+                    "🔒 **2FA enabled!**\n\n"
+                    "Send your **cloud password** now.\n\n"
                     "Send /cancel to abort.",
                     quote=True
                 )
 
             except PhoneCodeInvalid:
                 await message.reply(
-                    "❌ **Wrong OTP!** Please try again.\n\n"
-                    "📲 **Send the correct OTP:**",
+                    "❌ **Wrong OTP!**\n\n"
+                    "Send correct OTP:",
                     quote=True
                 )
 
             except FloodWait as e:
                 await message.reply(
                     f"⚠️ **Flood wait!**\n"
-                    f"Wait **{e.value} seconds**.\n\n"
-                    "Send /cancel and try /login later.",
+                    f"Wait **{e.value} seconds**.",
                     quote=True
                 )
                 try:
@@ -488,7 +426,7 @@ async def text_handler(client: Client, message: Message):
             except Exception as e:
                 await message.reply(
                     f"❌ **Error:** `{e}`\n\n"
-                    "Send /cancel and try /login again.",
+                    "Try /login again.",
                     quote=True
                 )
                 try:
@@ -498,7 +436,7 @@ async def text_handler(client: Client, message: Message):
                 del login_pending[user_id]
             return
 
-        # ── STEP 3: 2FA Password ──
+        # ── STEP 3: 2FA ──
         elif step == "waiting_2fa":
             password = text.strip()
             temp_client = pending.get("client")
@@ -516,24 +454,22 @@ async def text_handler(client: Client, message: Message):
                     "✅ **Login Successful!**\n\n"
                     f"👤 **Welcome, {name}!**\n"
                     f"📱 **Phone:** `+{me.phone_number}`\n\n"
-                    "You can now access **private channel** content!\n"
-                    "Send any private channel link now.\n\n"
+                    "Now send any private channel link!\n\n"
                     "Use /logout to logout anytime.",
                     quote=True
                 )
 
             except PasswordHashInvalid:
                 await message.reply(
-                    "❌ **Wrong password!** Try again.\n\n"
-                    "📲 **Send correct 2FA password:**",
+                    "❌ **Wrong password!**\n\n"
+                    "Send correct 2FA password:",
                     quote=True
                 )
 
             except FloodWait as e:
                 await message.reply(
                     f"⚠️ **Flood wait!**\n"
-                    f"Wait **{e.value} seconds**.\n\n"
-                    "Send /cancel and try /login later.",
+                    f"Wait **{e.value} seconds**.",
                     quote=True
                 )
                 try:
@@ -545,7 +481,7 @@ async def text_handler(client: Client, message: Message):
             except Exception as e:
                 await message.reply(
                     f"❌ **Error:** `{e}`\n\n"
-                    "Send /cancel and try /login again.",
+                    "Try /login again.",
                     quote=True
                 )
                 try:
@@ -555,14 +491,13 @@ async def text_handler(client: Client, message: Message):
                 del login_pending[user_id]
             return
 
-    # ─── LINK HANDLER ───
+    # ── LINK HANDLER ──
     if "t.me/" not in text:
         await message.reply(
-            "⚠️ **Send a valid Telegram link.**\n\n"
+            "⚠️ **Valid Telegram link bhejo.**\n\n"
             "Example:\n"
             "• `https://t.me/channelname/123`\n"
-            "• `https://t.me/c/1234567890/123`\n\n"
-            "Use /help for more info.",
+            "• `https://t.me/c/1234567890/123`",
             quote=True
         )
         return
@@ -571,83 +506,53 @@ async def text_handler(client: Client, message: Message):
 
     if chat_target is None:
         await message.reply(
-            "❌ **Could not parse this link.**\n\n"
-            "Make sure it is a valid message link.",
+            "❌ **Link parse nahi hua.**\n\n"
+            "Valid message link bhejo.",
             quote=True
         )
         return
 
-    # ── Private Link ──
     if is_private:
         user_client = await get_user_client(user_id)
-
         if not user_client:
             await message.reply(
-                "🔒 **This is a Private Channel Link!**\n\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                "To access private channel content,\n"
-                "you need to login first.\n\n"
-                "📌 **Steps:**\n"
-                "1️⃣ Send /login\n"
-                "2️⃣ Enter phone: `+91 9876543210`\n"
-                "3️⃣ Enter OTP: `1 2 3 4 5`\n"
-                "4️⃣ Enter 2FA password if enabled\n"
-                "5️⃣ Send the link again ✅\n\n"
-                "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-                "You must be a **member** of that\n"
-                "private channel on your account.",
+                "🔒 **Private Channel Link!**\n\n"
+                "Pehle /login karo.\n\n"
+                "📌 Steps:\n"
+                "1️⃣ /login bhejo\n"
+                "2️⃣ Phone number do: `+91 9876543210`\n"
+                "3️⃣ OTP do: `1 2 3 4 5`\n"
+                "4️⃣ 2FA password do agar ho\n"
+                "5️⃣ Phir link bhejo ✅",
                 quote=True
             )
             return
 
-        status = await message.reply(
-            "⏳ Fetching from private channel...",
-            quote=True
-        )
-        await fetch_and_send(
-            message, status, user_client, chat_target, msg_id
-        )
+        status = await message.reply("⏳ Fetching private content...", quote=True)
+        await fetch_and_send(message, status, user_client, chat_target, msg_id)
 
-    # ── Public Link ──
     else:
-        status = await message.reply(
-            "⏳ Fetching from public channel...",
-            quote=True
-        )
-
+        status = await message.reply("⏳ Fetching public content...", quote=True)
         try:
-            await fetch_and_send(
-                message, status, bot, chat_target, msg_id
-            )
-
+            await fetch_and_send(message, status, bot, chat_target, msg_id)
         except ChannelPrivate:
             user_client = await get_user_client(user_id)
             if user_client:
-                await status.edit(
-                    "🔒 Private channel detected,\n"
-                    "trying with your account..."
-                )
-                await fetch_and_send(
-                    message, status, user_client, chat_target, msg_id
-                )
+                await status.edit("🔒 Trying with your account...")
+                await fetch_and_send(message, status, user_client, chat_target, msg_id)
             else:
                 await status.edit(
-                    "🔒 **This channel is private!**\n\n"
-                    "Use /login to access private content."
+                    "🔒 **Private channel!**\n\n"
+                    "Use /login first."
                 )
-
         except Exception as e:
             user_client = await get_user_client(user_id)
             if user_client:
                 await status.edit("🔄 Retrying with your account...")
-                await fetch_and_send(
-                    message, status, user_client, chat_target, msg_id
-                )
+                await fetch_and_send(message, status, user_client, chat_target, msg_id)
             else:
                 await status.edit(f"❌ **Error:** `{e}`")
-                # ═══════════════════════════════════════
-#   CORE FETCH & SEND FUNCTION
-# ═══════════════════════════════════════
+
 
 async def fetch_and_send(
     message: Message,
@@ -661,24 +566,22 @@ async def fetch_and_send(
         msg = await fetch_client.get_messages(chat_target, msg_id)
 
         if not msg or msg.empty:
-            await status.edit("❌ **Message not found or deleted.**")
+            await status.edit("❌ Message not found.")
             return
 
-        # ── Text Only ──
         if not msg.media:
             if msg.text:
                 await message.reply(msg.text)
                 await status.delete()
             else:
-                await status.edit("❌ **No content in this message.**")
+                await status.edit("❌ No content.")
             return
 
-        # ── Media ──
         await status.edit("⬇️ Downloading...")
         file_path = await fetch_client.download_media(msg)
 
         if not file_path:
-            await status.edit("❌ **Failed to download media.**")
+            await status.edit("❌ Download failed.")
             return
 
         await status.edit("⬆️ Uploading...")
@@ -694,7 +597,7 @@ async def fetch_and_send(
         elif msg.audio:
             await bot.send_audio(chat_id, file_path, caption=caption)
         elif msg.voice:
-            await bot.send_voice(chat_id, file_path, caption=caption)
+            await bot.send_voice(chat_id, file_path)
         elif msg.video_note:
             await bot.send_video_note(chat_id, file_path)
         elif msg.sticker:
@@ -709,24 +612,17 @@ async def fetch_and_send(
     except ChannelPrivate:
         await status.edit(
             "🔒 **Private channel!**\n\n"
-            "Make sure your account is a\n"
-            "member of this channel."
+            "Apne account se join karo pehle."
         )
     except UserNotParticipant:
         await status.edit(
             "❌ **Not a member!**\n\n"
-            "Your account is not a member\n"
-            "of this channel.\n"
-            "Join the channel first, then try again."
+            "Pehle channel join karo."
         )
     except FloodWait as e:
-        await status.edit(
-            f"⚠️ **Flood wait!**\n"
-            f"Please wait **{e.value} seconds**."
-        )
+        await status.edit(f"⚠️ Wait **{e.value} seconds**.")
     except Exception as e:
         await status.edit(f"❌ **Error:** `{e}`")
-
     finally:
         if file_path and os.path.exists(file_path):
             try:
@@ -734,10 +630,6 @@ async def fetch_and_send(
             except:
                 pass
 
-
-# ═══════════════════════════════════════
-#         FLASK KEEP ALIVE
-# ═══════════════════════════════════════
 
 web = Flask("")
 
@@ -754,40 +646,26 @@ def run_web():
     )
 
 
-# ═══════════════════════════════════════
-#         MAIN ASYNC FUNCTION
-# ═══════════════════════════════════════
-
 async def main():
     os.makedirs("downloads", exist_ok=True)
-
-    # Flask alag thread me
     Thread(target=run_web, daemon=True).start()
-    print("Flask server started.")
-
-    # Bot start karo
+    print("✅ Flask started")
     await bot.start()
-    print("Bot is LIVE!")
-    print("Send any Telegram link to get content!")
-
-    # Bot ko chalta rakho
+    print("✅ Bot LIVE")
     await idle()
-
-    # Shutdown pe sab user sessions band karo
-    print("Stopping all user sessions...")
     for uid, uclient in list(user_clients.items()):
         try:
             await uclient.stop()
         except:
             pass
-
     await bot.stop()
-    print("Bot stopped.")
+    print("🛑 Bot stopped")
 
-
-# ═══════════════════════════════════════
-#         ENTRY POINT
-# ═══════════════════════════════════════
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        loop.run_until_complete(main())
+    finally:
+        loop.close()    
