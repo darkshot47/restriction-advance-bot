@@ -594,21 +594,9 @@ def run_web():
     )
 
 
-async def main():
+if __name__ == "__main__":
     os.makedirs("downloads", exist_ok=True)
     Thread(target=run_web, daemon=True).start()
     print("✅ Flask started")
-    await bot.start()
-    print("✅ Bot LIVE")
-    await idle()
-    for uid, uclient in list(user_clients.items()):
-        try:
-            await uclient.stop()
-        except:
-            pass
-    await bot.stop()
-    print("🛑 Bot stopped")
-
-
-if __name__ == "__main__":
     bot.run()
+    print("✅ Bot LIVE")
