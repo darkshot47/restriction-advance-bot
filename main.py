@@ -1,4 +1,4 @@
- import os
+import os
 import re
 import asyncio
 from flask import Flask
@@ -64,10 +64,66 @@ async def get_user_client(user_id: int):
     return None
 
 
+async def fetch_and_send(message, status, fetch_client, chat_target, msg_id):
+    file_path = None
+    try:
+        msg = await fetch_client.get_messages(chat_target, msg_id)
+        if not msg or msg.empty:
+            await status.edit("❌ Message not found.")
+            return
+        if not msg.media:
+            if msg.text:
+                await message.reply(msg.text)
+                await status.delete()
+            else:
+                await status.edit("❌ No content.")
+            return
+        await status.edit("⬇️ Downloading...")
+        file_path = await fetch_client.download_media(msg)
+        if not file_path:
+            await status.edit("❌ Download failed.")
+            return
+        await status.edit("⬆️ Uploading...")
+        caption = msg.caption or ""
+        chat_id = message.chat.id
+        if msg.photo:
+            await bot.send_photo(chat_id, file_path, caption=caption)
+        elif msg.video:
+            await bot.send_video(chat_id, file_path, caption=caption)
+        elif msg.document:
+            await bot.send_document(chat_id, file_path, caption=caption)
+        elif msg.audio:
+            await bot.send_audio(chat_id, file_path, caption=caption)
+        elif msg.voice:
+            await bot.send_voice(chat_id, file_path)
+        elif msg.video_note:
+            await bot.send_video_note(chat_id, file_path)
+        elif msg.sticker:
+            await bot.send_sticker(chat_id, file_path)
+        elif msg.animation:
+            await bot.send_animation(chat_id, file_path, caption=caption)
+        else:
+            await bot.send_document(chat_id, file_path, caption=caption)
+        await status.delete()
+    except ChannelPrivate:
+        await status.edit("🔒 Private channel! Pehle join karo.")
+    except UserNotParticipant:
+        await status.edit("❌ Not a member! Pehle channel join karo.")
+    except FloodWait as e:
+        await status.edit(f"⚠️ Wait {e.value} seconds.")
+    except Exception as e:
+        await status.edit(f"❌ Error: {e}")
+    finally:
+        if file_path and os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except:
+                pass
+
+
 @bot.on_message(filters.command("start") & filters.private)
 async def start_handler(client: Client, message: Message):
-    user = message.from_user
-    name = user.first_name or "User"
+    name = message.from_user.first_name or "User"
     await message.reply(
         f"👋 **Hello {name}! Welcome to Restricted Content Saver Bot!**\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -123,7 +179,6 @@ async def help_handler(client: Client, message: Message):
         "3. Enter OTP with spaces: `1 2 3 4 5`\n"
         "4. Enter 2FA password if enabled\n"
         "5. Done!\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "You must be a **member** of the\n"
         "private channel on your logged-in account.",
         quote=True
@@ -257,7 +312,9 @@ async def logout_handler(client: Client, message: Message):
         "Your session has been removed from memory.\n"
         "Use /login to login again anytime.",
         quote=True
-                )
+    )
+
+
 @bot.on_message(
     filters.text & filters.private & ~filters.command(
         ["start", "help", "login", "logout", "status", "cancel"]
@@ -271,12 +328,10 @@ async def text_handler(client: Client, message: Message):
         pending = login_pending[user_id]
         step = pending.get("step", "")
 
-        # ── STEP 1: Phone ──
         if step == "waiting_phone":
             phone = text.replace(" ", "").replace("-", "")
             if not phone.startswith("+"):
                 phone = "+" + phone
-
             if not re.match(r"^\+\d{7,15}$", phone):
                 await message.reply(
                     "❌ **Invalid format!**\n\n"
@@ -285,31 +340,26 @@ async def text_handler(client: Client, message: Message):
                     quote=True
                 )
                 return
-
             await message.reply(
                 f"📱 Number received: `{phone}`\n"
                 "⏳ Sending OTP...",
                 quote=True
             )
-
             temp_client = Client(
                 f"login_{user_id}",
                 api_id=API_ID,
                 api_hash=API_HASH,
                 in_memory=True
             )
-
             try:
                 await temp_client.connect()
                 sent = await temp_client.send_code(phone)
-
                 login_pending[user_id] = {
                     "step": "waiting_otp",
                     "phone": phone,
                     "phone_code_hash": sent.phone_code_hash,
                     "client": temp_client
                 }
-
                 await message.reply(
                     "✅ **OTP sent!**\n\n"
                     "📩 Check your Telegram app.\n\n"
@@ -318,7 +368,6 @@ async def text_handler(client: Client, message: Message):
                     "📲 **Send OTP now:**",
                     quote=True
                 )
-
             except PhoneNumberInvalid:
                 await message.reply(
                     "❌ **Invalid phone number!**\n"
@@ -330,7 +379,6 @@ async def text_handler(client: Client, message: Message):
                 except:
                     pass
                 del login_pending[user_id]
-
             except FloodWait as e:
                 await message.reply(
                     f"⚠️ **Flood wait!**\n"
@@ -342,7 +390,6 @@ async def text_handler(client: Client, message: Message):
                 except:
                     pass
                 del login_pending[user_id]
-
             except Exception as e:
                 await message.reply(
                     f"❌ **Error:** `{e}`\n\n"
@@ -356,10 +403,8 @@ async def text_handler(client: Client, message: Message):
                 del login_pending[user_id]
             return
 
-        # ── STEP 2: OTP ──
         elif step == "waiting_otp":
             otp = text.replace(" ", "").replace("-", "")
-
             if not otp.isdigit():
                 await message.reply(
                     "❌ **Invalid OTP!**\n"
@@ -368,24 +413,19 @@ async def text_handler(client: Client, message: Message):
                     quote=True
                 )
                 return
-
             temp_client = pending.get("client")
             phone = pending.get("phone")
             phone_code_hash = pending.get("phone_code_hash")
-
             try:
                 await temp_client.sign_in(
                     phone_number=phone,
                     phone_code_hash=phone_code_hash,
                     phone_code=otp
                 )
-
                 user_clients[user_id] = temp_client
                 del login_pending[user_id]
-
                 me = await temp_client.get_me()
                 name = me.first_name or "User"
-
                 await message.reply(
                     "✅ **Login Successful!**\n\n"
                     f"👤 **Welcome, {name}!**\n"
@@ -394,7 +434,6 @@ async def text_handler(client: Client, message: Message):
                     "Use /logout to logout anytime.",
                     quote=True
                 )
-
             except SessionPasswordNeeded:
                 login_pending[user_id]["step"] = "waiting_2fa"
                 await message.reply(
@@ -403,14 +442,12 @@ async def text_handler(client: Client, message: Message):
                     "Send /cancel to abort.",
                     quote=True
                 )
-
             except PhoneCodeInvalid:
                 await message.reply(
                     "❌ **Wrong OTP!**\n\n"
                     "Send correct OTP:",
                     quote=True
                 )
-
             except FloodWait as e:
                 await message.reply(
                     f"⚠️ **Flood wait!**\n"
@@ -422,7 +459,6 @@ async def text_handler(client: Client, message: Message):
                 except:
                     pass
                 del login_pending[user_id]
-
             except Exception as e:
                 await message.reply(
                     f"❌ **Error:** `{e}`\n\n"
@@ -436,20 +472,15 @@ async def text_handler(client: Client, message: Message):
                 del login_pending[user_id]
             return
 
-        # ── STEP 3: 2FA ──
         elif step == "waiting_2fa":
             password = text.strip()
             temp_client = pending.get("client")
-
             try:
                 await temp_client.check_password(password)
-
                 user_clients[user_id] = temp_client
                 del login_pending[user_id]
-
                 me = await temp_client.get_me()
                 name = me.first_name or "User"
-
                 await message.reply(
                     "✅ **Login Successful!**\n\n"
                     f"👤 **Welcome, {name}!**\n"
@@ -458,14 +489,12 @@ async def text_handler(client: Client, message: Message):
                     "Use /logout to logout anytime.",
                     quote=True
                 )
-
             except PasswordHashInvalid:
                 await message.reply(
                     "❌ **Wrong password!**\n\n"
                     "Send correct 2FA password:",
                     quote=True
                 )
-
             except FloodWait as e:
                 await message.reply(
                     f"⚠️ **Flood wait!**\n"
@@ -477,7 +506,6 @@ async def text_handler(client: Client, message: Message):
                 except:
                     pass
                 del login_pending[user_id]
-
             except Exception as e:
                 await message.reply(
                     f"❌ **Error:** `{e}`\n\n"
@@ -491,7 +519,6 @@ async def text_handler(client: Client, message: Message):
                 del login_pending[user_id]
             return
 
-    # ── LINK HANDLER ──
     if "t.me/" not in text:
         await message.reply(
             "⚠️ **Valid Telegram link bhejo.**\n\n"
@@ -527,10 +554,8 @@ async def text_handler(client: Client, message: Message):
                 quote=True
             )
             return
-
         status = await message.reply("⏳ Fetching private content...", quote=True)
         await fetch_and_send(message, status, user_client, chat_target, msg_id)
-
     else:
         status = await message.reply("⏳ Fetching public content...", quote=True)
         try:
@@ -552,83 +577,6 @@ async def text_handler(client: Client, message: Message):
                 await fetch_and_send(message, status, user_client, chat_target, msg_id)
             else:
                 await status.edit(f"❌ **Error:** `{e}`")
-
-
-async def fetch_and_send(
-    message: Message,
-    status,
-    fetch_client: Client,
-    chat_target,
-    msg_id: int
-):
-    file_path = None
-    try:
-        msg = await fetch_client.get_messages(chat_target, msg_id)
-
-        if not msg or msg.empty:
-            await status.edit("❌ Message not found.")
-            return
-
-        if not msg.media:
-            if msg.text:
-                await message.reply(msg.text)
-                await status.delete()
-            else:
-                await status.edit("❌ No content.")
-            return
-
-        await status.edit("⬇️ Downloading...")
-        file_path = await fetch_client.download_media(msg)
-
-        if not file_path:
-            await status.edit("❌ Download failed.")
-            return
-
-        await status.edit("⬆️ Uploading...")
-        caption = msg.caption or ""
-        chat_id = message.chat.id
-
-        if msg.photo:
-            await bot.send_photo(chat_id, file_path, caption=caption)
-        elif msg.video:
-            await bot.send_video(chat_id, file_path, caption=caption)
-        elif msg.document:
-            await bot.send_document(chat_id, file_path, caption=caption)
-        elif msg.audio:
-            await bot.send_audio(chat_id, file_path, caption=caption)
-        elif msg.voice:
-            await bot.send_voice(chat_id, file_path)
-        elif msg.video_note:
-            await bot.send_video_note(chat_id, file_path)
-        elif msg.sticker:
-            await bot.send_sticker(chat_id, file_path)
-        elif msg.animation:
-            await bot.send_animation(chat_id, file_path, caption=caption)
-        else:
-            await bot.send_document(chat_id, file_path, caption=caption)
-
-        await status.delete()
-
-    except ChannelPrivate:
-        await status.edit(
-            "🔒 **Private channel!**\n\n"
-            "Apne account se join karo pehle."
-        )
-    except UserNotParticipant:
-        await status.edit(
-            "❌ **Not a member!**\n\n"
-            "Pehle channel join karo."
-        )
-    except FloodWait as e:
-        await status.edit(f"⚠️ Wait **{e.value} seconds**.")
-    except Exception as e:
-        await status.edit(f"❌ **Error:** `{e}`")
-    finally:
-        if file_path and os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-            except:
-                pass
 
 
 web = Flask("")
@@ -668,4 +616,4 @@ if __name__ == "__main__":
     try:
         loop.run_until_complete(main())
     finally:
-        loop.close()    
+        loop.close()
