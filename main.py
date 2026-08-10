@@ -3,7 +3,7 @@ import re
 import asyncio
 from flask import Flask
 from threading import Thread
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import Message
 from pyrogram.errors import (
     SessionPasswordNeeded,
@@ -755,28 +755,39 @@ def run_web():
 
 
 # ═══════════════════════════════════════
-#         MAIN ENTRY POINT
+#         MAIN ASYNC FUNCTION
 # ═══════════════════════════════════════
 
-if __name__ == "__main__":
+async def main():
     os.makedirs("downloads", exist_ok=True)
 
+    # Flask alag thread me
     Thread(target=run_web, daemon=True).start()
     print("Flask server started.")
 
-    bot.start()
+    # Bot start karo
+    await bot.start()
     print("Bot is LIVE!")
+    print("Send any Telegram link to get content!")
 
-    from pyrogram import idle
-    idle()
+    # Bot ko chalta rakho
+    await idle()
 
+    # Shutdown pe sab user sessions band karo
     print("Stopping all user sessions...")
-    loop = asyncio.get_event_loop()
-    for uid, uclient in user_clients.items():
+    for uid, uclient in list(user_clients.items()):
         try:
-            loop.run_until_complete(uclient.stop())
+            await uclient.stop()
         except:
             pass
 
-    bot.stop()
+    await bot.stop()
     print("Bot stopped.")
+
+
+# ═══════════════════════════════════════
+#         ENTRY POINT
+# ═══════════════════════════════════════
+
+if __name__ == "__main__":
+    asyncio.run(main())
