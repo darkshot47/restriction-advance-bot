@@ -298,18 +298,27 @@ async def logout_handler(client: Client, message: Message):
             quote=True
         )
         return
+    phone = "Unknown"
     try:
         me = await user_client.get_me()
         phone = me.phone_number or "Unknown"
-        await user_client.stop()
     except:
-        phone = "Unknown"
+        pass
+    try:
+        await user_client.log_out()
+    except Exception as e:
+        print(f"Logout error: {e}")
+        try:
+            await user_client.stop()
+        except:
+            pass
     if user_id in user_clients:
         del user_clients[user_id]
     await message.reply(
         "✅ **Logged out successfully!**\n\n"
         f"📱 **Phone:** `+{phone}`\n\n"
-        "Your session has been removed from memory.\n"
+        "🔓 Session removed from bot **and** Telegram servers.\n"
+        "Check Settings → Devices to confirm.\n\n"
         "Use /login to login again anytime.",
         quote=True
     )
