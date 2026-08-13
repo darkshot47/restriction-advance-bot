@@ -1172,5 +1172,192 @@ async def text_handler(client, message):
                 del login_pending[user_id]
                 me = await temp.get_me()
                 await message.reply(f"✅ **Login Successful!**\n\n👤 {me.first_name}\n📱 +{me.phone_number}")
-            except SessionPasswordNeeded:
-                login_pending[user_  
+                        except SessionPasswordNeeded:
+                login_pending[user_id]["step"] = "waiting_2fa"
+                await message.reply("🔒 2FA enabled. Send password:")
+            except PhoneCodeInvalid:
+                await message.reply("❌ Wrong OTP!")
+            except Exception as e:
+                await message.reply(f"❌ Error: {e}")
+                try:
+                    await temp.stop()
+                except:
+                    pass
+                del login_pending[user_id]
+            return
+
+        elif step == "waiting_2fa":
+            temp = pending.get("client")
+            phone = pending.get("phone")
+            try:
+                await temp.check_password(text)
+                session_str = await temp.export_session_string()
+                await save_session(user_id, session_str, phone)
+                user_clients[user_id] = temp
+                del login_pending[user_id]
+                me = await temp.get_me()
+                await message.reply(f"✅ **Login Successful!**\n\n👤 {me.first_name}")
+            except PasswordHashInvalid:
+                await message.reply("❌ Wrong password!")
+            except Exception as e:
+                await message.reply(f"❌ Error: {e}")
+                try:
+                    await temp.stop()
+                except:
+                    pass
+                del login_pending[user_id]
+            return
+
+    if not await check_access(message):
+        return
+
+    lines = text.split("\n")
+    tg_links = [l.strip() for l in lines if "t.me/" in l]
+
+    if len(tg_links) > 1:
+        premium = await is_premium(user_id)
+        max_bulk = 50 if premium else 5
+        if len(tg_links) > max_bulk:
+            await message.reply(f"⚠️ Too many links!\n🆓 Free: 5\n💎 Premium: 50\nSent: {len(tg_links)}")
+            return
+        if not premium:
+            allowed, current = await check_daily_limit(user_id, 10)
+            if not allowed or current + len(tg_links) > 10:
+                await message.reply(f"⛔ Daily limit! Used: {current}/10")
+                return
+        status = await message.reply(f"⏳ Processing {len(tg_links)}...")
+        success = failed = 0
+        for i, link in enumerate(tg_links, 1):
+            try:
+                await status.edit(f"⏳ {i}/{len(tg_links)}...")
+                chat_target, mid, is_priv = parse_link(link)
+                if chat_target is None:
+                    failed += 1
+                    continue
+                ts = await message.reply(f"📥 {i}")
+                if is_priv:
+                    uc = await get_user_client(user_id)
+                    if not uc:
+                        await ts.edit("🔒 Login required")
+                        failed += 1
+                        continue
+                    ok = await fetch_and_send(message, ts, uc, chat_target, mid)
+                else:
+                    ok = await fetch_and_send(message, ts, bot, chat_target, mid)
+                if ok:
+                    success += 1
+                else:
+                    failed += 1
+                await asyncio.sleep(1)
+            except:
+                failed += 1
+        await status.edit(f"✅ Done!\n✅ {success} ❌ {failed}")
+        return
+
+    if "t.me/" not in text:
+        await message.reply(
+            "⚠️ Send valid Telegram link.\n\n"
+            "Examples:\n"
+            "• `t.me/channel/123`\n"
+            "• `t.me/c/123456789/50`\n"
+            "• Range: `t.me/channel/1-20`"
+        )
+        return
+
+    range_match = re.search(r"/(\d+)-(\d+)$", text)
+    if range_match:
+        start = int(range_match.group(1))
+        end = int(range_match.group(2))
+        total = end - start + 1
+        premium = await is_premium(user_id)
+        max_range = 1000 if premium else 20
+        if total > max_range:
+            await message.reply(f"⚠️ Range too large!\n🆓 Free: 20\n💎 Premium: 1000")
+            return
+        if not premium:
+            allowed, current = await check_daily_limit(user_id, 10)
+            if not allowed or current + total > 10:
+                await message.reply(f"⛔ Daily limit! Used: {current}/10")
+                return
+        base_link = text.rsplit("/", 1)[0]
+        status = await message.reply(f"⏳ Range: {total} messages")
+        success = failed = 0
+        for msg_id in range(start, end + 1):
+            try:
+                link = f"{base_link}/{msg_id}"
+                chat_target, mid, is_priv = parse_link(link)
+                if chat_target is None:
+                    failed += 1
+                    continue
+                ts = await message.reply(f"📥 {msg_id}")
+                if is_priv:
+                    uc = await get_user_client(user_id)
+                    if not uc:
+                        await ts.edit("🔒 Login required")
+                        failed += 1
+                        continue
+                    ok = await fetch_and_send(message, ts, uc, chat_target, mid)
+                else:
+                    ok = await fetch_and_send(message, ts, bot, chat_target, mid)
+                if ok:
+                    success += 1
+                else:
+                    failed += 1
+                await asyncio.sleep(1)
+            except:
+                failed += 1
+        await status.edit(f"✅ Done!\n✅ {success} ❌ {failed}")
+        return
+
+    chat_target, msg_id, is_private = parse_link(text)
+    if chat_target is None:
+        await message.reply("❌ Invalid link.")
+        return
+
+    premium = await is_premium(user_id)
+    if not premium:
+        allowed, current = await check_daily_limit(user_id, 10)
+        if not allowed:
+            await message.reply(f"⛔ **Daily limit!**\n\n🆓 Free: 10/day\n💎 Premium: Unlimited")
+            return
+
+    if is_private:
+        uc = await get_user_client(user_id)
+        if not uc:
+            await message.reply("🔒 **Private link!**\n\nPlease /login first.")
+            return
+        status = await message.reply("⏳ Fetching...")
+        await fetch_and_send(message, status, uc, chat_target, msg_id)
+    else:
+        status = await message.reply("⏳ Fetching...")
+        try:
+            await fetch_and_send(message, status, bot, chat_target, msg_id)
+        except ChannelPrivate:
+            uc = await get_user_client(user_id)
+            if uc:
+                await fetch_and_send(message, status, uc, chat_target, msg_id)
+            else:
+                await status.edit("🔒 Private. Use /login")
+
+
+web = Flask("")
+
+
+@web.route("/")
+def home():
+    return "Bot is alive!"
+
+
+def run_web():
+    web.run(host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
+
+
+if __name__ == "__main__":
+    os.makedirs("downloads", exist_ok=True)
+    Thread(target=run_web, daemon=True).start()
+    print("✅ Flask started")
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(test_connection())
+    print("✅ Bot starting...")
+    bot.run()
