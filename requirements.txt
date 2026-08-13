@@ -1,3 +1,6 @@
 pyrofork
 TgCrypto
 flask
+motor
+pymongo
+dnspython
