@@ -1340,6 +1340,7 @@ async def text_handler(client, message):
                 await status.edit("🔒 Private. Use /login")
         
 
+web = Flask("")
 
 @web.route("/")
 def home():
