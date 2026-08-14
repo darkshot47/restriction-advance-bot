@@ -20,7 +20,7 @@ from database import (
     delete_bookmark, add_favorite, get_favorites, remove_favorite,
     set_language, toggle_notifications, toggle_silent, reset_settings,
     add_referral, add_feedback, test_connection, total_users,
-    get_all_users_list, get_banned_users_list, get_premium_users_list,
+    get_all_users, get_banned_users_list, get_premium_users_list,
     get_active_users_today, get_new_users_today, get_top_users,
     total_downloads_count, total_bookmarks_count, get_all_feedback,
     search_user, set_maintenance, get_maintenance, set_fsub_channel,
@@ -632,7 +632,7 @@ async def stats_handler(client, message):
 @bot.on_message(filters.command("users") & filters.private)
 @admin_only
 async def users_handler(client, message):
-    users = await get_all_users_list()
+    users = await get_all_users()
     if not users:
         await message.reply("No users.")
         return
@@ -678,7 +678,7 @@ async def broadcast_handler(client, message):
     if not message.reply_to_message:
         await message.reply("📢 Reply to a message with /broadcast")
         return
-    users = await get_all_users_list()
+    users = await get_all_users()
     total = len(users)
     status = await message.reply(f"📢 Broadcasting to {total}...")
     success = failed = blocked = 0
@@ -981,7 +981,7 @@ async def clearlogs_handler(client, message):
 @bot.on_message(filters.command("export") & filters.private)
 @admin_only
 async def export_handler(client, message):
-    users = await get_all_users_list()
+    users = await get_all_users()
     if not users:
         await message.reply("No users.")
         return
