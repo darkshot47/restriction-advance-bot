@@ -1172,7 +1172,7 @@ async def text_handler(client, message):
                 del login_pending[user_id]
                 me = await temp.get_me()
                 await message.reply(f"✅ **Login Successful!**\n\n👤 {me.first_name}\n📱 +{me.phone_number}")
-                        except SessionPasswordNeeded:
+            except SessionPasswordNeeded:
                 login_pending[user_id]["step"] = "waiting_2fa"
                 await message.reply("🔒 2FA enabled. Send password:")
             except PhoneCodeInvalid:
@@ -1338,9 +1338,7 @@ async def text_handler(client, message):
                 await fetch_and_send(message, status, uc, chat_target, msg_id)
             else:
                 await status.edit("🔒 Private. Use /login")
-
-
-web = Flask("")
+        
 
 
 @web.route("/")
