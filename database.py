@@ -310,6 +310,20 @@ async def add_feedback(user_id, message):
     })
 
 
+async def get_banned_users_list():
+    users = []
+    async for user in users_col.find({"is_banned": True}):
+        users.append(user)
+    return users
+
+
+async def get_premium_users_list():
+    users = []
+    async for user in users_col.find({"is_premium": True}):
+        users.append(user)
+    return users
+
+
 async def test_connection():
     try:
         await mongo_client.admin.command('ping')
@@ -318,3 +332,4 @@ async def test_connection():
     except Exception as e:
         print(f"❌ MongoDB Failed: {e}")
         return False
+    
