@@ -1355,8 +1355,6 @@ if __name__ == "__main__":
     os.makedirs("downloads", exist_ok=True)
     Thread(target=run_web, daemon=True).start()
     print("✅ Flask started")
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(test_connection())
     print("✅ Bot starting...")
     bot.run()
+    
