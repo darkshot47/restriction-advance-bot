@@ -11,6 +11,7 @@ users_col = db["users"]
 downloads_col = db["downloads"]
 bookmarks_col = db["bookmarks"]
 feedback_col = db["feedback"]
+config_col = db["config"]
 
 
 async def add_user(user_id, name, username=None):
@@ -29,6 +30,7 @@ async def add_user(user_id, name, username=None):
             "language": "en",
             "is_banned": False,
             "is_premium": False,
+            "is_admin": False,
             "premium_expiry": None,
             "downloads": 0,
             "daily_downloads": 0,
@@ -61,6 +63,24 @@ async def total_users():
 async def get_all_users():
     users = []
     async for user in users_col.find({}):
+        users.append(user)
+    return users
+
+
+async def get_all_users_list():
+    return await get_all_users()
+
+
+async def get_banned_users_list():
+    users = []
+    async for user in users_col.find({"is_banned": True}):
+        users.append(user)
+    return users
+
+
+async def get_premium_users_list():
+    users = []
+    async for user in users_col.find({"is_premium": True}):
         users.append(user)
     return users
 
@@ -264,14 +284,14 @@ async def set_language(user_id, lang):
 
 async def toggle_notifications(user_id):
     user = await get_user(user_id)
-    new_val = not user.get("notifications", True)
+    new_val = not user.get("notifications", True) if user else True
     await users_col.update_one({"user_id": user_id}, {"$set": {"notifications": new_val}})
     return new_val
 
 
 async def toggle_silent(user_id):
     user = await get_user(user_id)
-    new_val = not user.get("silent_mode", False)
+    new_val = not user.get("silent_mode", False) if user else False
     await users_col.update_one({"user_id": user_id}, {"$set": {"silent_mode": new_val}})
     return new_val
 
@@ -310,18 +330,115 @@ async def add_feedback(user_id, message):
     })
 
 
-async def get_banned_users_list():
+async def get_all_feedback():
+    feedbacks = []
+    async for fb in feedback_col.find({}).sort("date", -1):
+        feedbacks.append(fb)
+    return feedbacks
+
+
+async def get_active_users_today():
+    today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    return await users_col.count_documents({"last_active": {"$gte": today_start}})
+
+
+async def get_new_users_today():
+    today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    return await users_col.count_documents({"joined_date": {"$gte": today_start}})
+
+
+async def get_top_users(limit=10):
     users = []
-    async for user in users_col.find({"is_banned": True}):
+    async for user in users_col.find({}).sort("downloads", -1).limit(limit):
         users.append(user)
     return users
 
 
-async def get_premium_users_list():
-    users = []
-    async for user in users_col.find({"is_premium": True}):
-        users.append(user)
-    return users
+async def total_downloads_count():
+    return await downloads_col.count_documents({})
+
+
+async def total_bookmarks_count():
+    return await bookmarks_col.count_documents({})
+
+
+async def search_user(query):
+    try:
+        q_int = int(query)
+        res = await users_col.find_one({"user_id": q_int})
+        if res:
+            return [res]
+    except:
+        pass
+    results = []
+    async for u in users_col.find({"$or": [{"name": {"$regex": query, "$options": "i"}}, {"username": {"$regex": query, "$options": "i"}}]}).limit(10):
+        results.append(u)
+    return results
+
+
+async def set_maintenance(status: bool):
+    await config_col.update_one({"type": "maintenance"}, {"$set": {"status": status}}, upsert=True)
+
+
+async def get_maintenance():
+    res = await config_col.find_one({"type": "maintenance"})
+    return res.get("status", False) if res else False
+
+
+async def set_fsub_channel(channel: str):
+    await config_col.update_one({"type": "fsub"}, {"$set": {"channel": channel}}, upsert=True)
+
+
+async def get_fsub_channel():
+    res = await config_col.find_one({"type": "fsub"})
+    return res.get("channel") if res else None
+
+
+async def delete_fsub():
+    await config_col.delete_one({"type": "fsub"})
+
+
+async def add_admin(user_id):
+    await users_col.update_one({"user_id": user_id}, {"$set": {"is_admin": True}})
+
+
+async def remove_admin(user_id):
+    await users_col.update_one({"user_id": user_id}, {"$set": {"is_admin": False}})
+
+
+async def is_admin(user_id):
+    user = await users_col.find_one({"user_id": user_id})
+    return user.get("is_admin", False) if user else False
+
+
+async def get_admins_list():
+    admins = []
+    async for u in users_col.find({"is_admin": True}):
+        admins.append(u)
+    return admins
+
+
+async def clear_all_logs():
+    await downloads_col.delete_many({})
+
+
+async def get_bot_stats():
+    total = await total_users()
+    active_today = await get_active_users_today()
+    new_today = await get_new_users_today()
+    premium = await users_col.count_documents({"is_premium": True})
+    banned = await users_col.count_documents({"is_banned": True})
+    admins = await users_col.count_documents({"is_admin": True})
+    downloads = await total_downloads_count()
+    return {
+        "total": total,
+        "active_today": active_today,
+        "new_today": new_today,
+        "premium": premium,
+        "banned": banned,
+        "admins": admins,
+        "total_downloads": downloads
+    }
 
 
 async def test_connection():
