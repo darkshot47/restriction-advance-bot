@@ -103,6 +103,33 @@ async def apply_custom_caption(user_id, original):
     if suffix:
         result = f"{result}\n{suffix}"
     return result.strip()
+async def try_native_copy(message, fetch_client, chat_target, msg_id):
+    """Try native Telegram message copying before the existing media flow."""
+    user_id = message.from_user.id
+
+    try:
+        if await get_caption(user_id):
+            return False
+
+        if await get_prefix(user_id):
+            return False
+
+        if await get_suffix(user_id):
+            return False
+
+        if await get_thumbnail(user_id):
+            return False
+
+        await fetch_client.copy_message(
+            chat_id=message.chat.id,
+            from_chat_id=chat_target,
+            message_id=msg_id
+        )
+
+        return True
+
+    except Exception:
+        return False
 
 
 async def check_access(message):
@@ -138,6 +165,19 @@ async def fetch_and_send(message, status, fetch_client, chat_target, msg_id):
     file_path = None
     thumb_path = None
     try:
+               copied = await try_native_copy(
+            message,
+            fetch_client,
+            chat_target,
+            msg_id
+        )
+
+        if copied:
+            await status.delete()
+            await add_download(user_id, f"msg_{msg_id}", "copied")
+            await increment_daily(user_id)
+            return True 
+            
         msg = await fetch_client.get_messages(chat_target, msg_id)
         if not msg or msg.empty:
             await status.edit("❌ Message not found.")
