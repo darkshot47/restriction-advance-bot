@@ -164,7 +164,8 @@ async def fetch_and_send(message, status, fetch_client, chat_target, msg_id):
     user_id = message.from_user.id
     file_path = None
     thumb_path = None
-        try:
+
+    try:
         copied = await try_native_copy(
             message,
             fetch_client,
