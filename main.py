@@ -678,10 +678,8 @@ async def users_handler(client, message):
         await message.reply("No users.")
         return
     text = f"👥 **ALL USERS ({len(users)})**\n\n"
-    for i, u in enumerate(users[:30], 1):
+    for i, u in enumerate(users, 1):
         text += f"{i}. `{u['user_id']}` - {u.get('name', 'N/A')}\n"
-    if len(users) > 30:
-        text += f"\n...and {len(users) - 30} more"
     await message.reply(text)
 
 
