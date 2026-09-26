@@ -168,21 +168,6 @@ async def try_native_copy(message, fetch_client, chat_target, msg_id):
     )
 
     try:
-        if await get_caption(user_id):
-            print("[COPY SKIP] custom caption", flush=True)
-            return False
-
-        if await get_prefix(user_id):
-            print("[COPY SKIP] custom prefix", flush=True)
-            return False
-
-        if await get_suffix(user_id):
-            print("[COPY SKIP] custom suffix", flush=True)
-            return False
-
-        if await get_thumbnail(user_id):
-            print("[COPY SKIP] custom thumbnail", flush=True)
-            return False
 
         msg = await fetch_client.get_messages(chat_target, msg_id)
 
