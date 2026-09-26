@@ -184,8 +184,9 @@ async def try_native_copy(message, fetch_client, chat_target, msg_id):
         return True
 
     except Exception as e:
-    print(f"[COPY FAILED] {type(e).__name__}: {e}")
-    return False
+        print(f"[COPY FAILED]
+    {type(e).__name__}: {e}")
+        return False
 async def fetch_and_send(message, status, fetch_client, chat_target, msg_id):
     user_id = message.from_user.id
     file_path = None
