@@ -159,7 +159,32 @@ async def check_access(message):
             return False
     return True
 
+async def try_native_copy(message, fetch_client, chat_target, msg_id):
+    user_id = message.from_user.id
 
+    try:
+        if await get_caption(user_id):
+            return False
+
+        if await get_prefix(user_id):
+            return False
+
+        if await get_suffix(user_id):
+            return False
+
+        if await get_thumbnail(user_id):
+            return False
+
+        await fetch_client.copy_message(
+            chat_id=message.chat.id,
+            from_chat_id=chat_target,
+            message_id=msg_id
+        )
+
+        return True
+
+    except Exception:
+        return False
 async def fetch_and_send(message, status, fetch_client, chat_target, msg_id):
     user_id = message.from_user.id
     file_path = None
@@ -183,6 +208,7 @@ async def fetch_and_send(message, status, fetch_client, chat_target, msg_id):
         if not msg or msg.empty:
             await status.edit("❌ Message not found.")
             return False
+
         if not msg.media:
             if msg.text:
                 await message.reply(msg.text)
