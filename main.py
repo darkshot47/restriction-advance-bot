@@ -162,30 +162,49 @@ async def check_access(message):
 async def try_native_copy(message, fetch_client, chat_target, msg_id):
     user_id = message.from_user.id
 
+    print(
+        f"[COPY TRY] chat={chat_target}, msg_id={msg_id}, user={user_id}",
+        flush=True
+    )
+
     try:
         if await get_caption(user_id):
+            print("[COPY SKIP] custom caption", flush=True)
             return False
 
         if await get_prefix(user_id):
+            print("[COPY SKIP] custom prefix", flush=True)
             return False
 
         if await get_suffix(user_id):
+            print("[COPY SKIP] custom suffix", flush=True)
             return False
 
         if await get_thumbnail(user_id):
+            print("[COPY SKIP] custom thumbnail", flush=True)
             return False
 
-        msg = await fetch_client.get_messages(chat_target, msg_id) 
+        msg = await fetch_client.get_messages(chat_target, msg_id)
+
+        print(
+            f"[COPY MESSAGE] chat={msg.chat.id}, msg_id={msg.id}",
+            flush=True
+        )
+
         await fetch_client.copy_message(
             chat_id=message.chat.id,
             from_chat_id=msg.chat.id,
             message_id=msg.id
         )
 
+        print("[COPY SUCCESS]", flush=True)
         return True
 
     except Exception as e:
-        print(f"[COPY FAILED] {type(e).__name__}: {e}", flush=True)
+        print(
+            f"[COPY FAILED] {type(e).__name__}: {e}",
+            flush=True
+        )
         return False
 async def fetch_and_send(message, status, fetch_client, chat_target, msg_id):
     user_id = message.from_user.id
