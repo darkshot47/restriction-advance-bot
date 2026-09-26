@@ -177,10 +177,10 @@ async def try_native_copy(message, fetch_client, chat_target, msg_id):
 
         msg = await fetch_client.get_messages(chat_target, msg_id) 
         await fetch_client.copy_message(
-        chat_id=message.chat.id,
-        from_chat_id=msg.chat.id,
-        message_id=msg.id
-    )
+            chat_id=message.chat.id,
+            from_chat_id=msg.chat.id,
+            message_id=msg.id
+        )
 
         return True
 
