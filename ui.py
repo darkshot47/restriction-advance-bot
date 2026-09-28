@@ -379,7 +379,7 @@ def refer_text(link: str, count: int) -> str:
         "🎁 **REFERRAL**\n\n"
         f"👥 Your referrals: **{count}**\n\n"
         f"🔗 Your link:\n`{link}`\n\n"
-        "Earn 10 points for each new friend. Redeem 100 points for 30 months of public-only premium."
+        "Earn 10 points for each new friend. Redeem 100 points for 1 month of public-only premium."
     )
 
 

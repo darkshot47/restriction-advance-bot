@@ -283,7 +283,7 @@ class FakeDB:
         ref["points"] += points
         return True
 
-    async def redeem_points(self, user_id, points=100, days=None, *, months=30):
+    async def redeem_points(self, user_id, points=100, days=None, *, months=1):
         user = self.users.get(user_id)
         if not user or user.get("points", 0) < points or (user.get("is_premium") and user.get("premium_source") != "redeem"):
             return False

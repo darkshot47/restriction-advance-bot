@@ -205,6 +205,40 @@ def test_membership_enum_handling(member, expected):
 
 
 @pytest.mark.asyncio
+async def test_free_native_copy_edits_caption_after_copy(db):
+    source = SimpleNamespace(
+        chat=SimpleNamespace(id=-100123),
+        id=44,
+        caption="Original caption",
+        photo=object(),
+        video=None,
+        document=None,
+        audio=None,
+        voice=None,
+        animation=None,
+        text=None,
+    )
+    copied = SimpleNamespace(edit_caption=AsyncMock())
+    fetch_client = SimpleNamespace(
+        get_messages=AsyncMock(return_value=source),
+        copy_message=AsyncMock(return_value=copied),
+    )
+    message = FakeMessage()
+
+    assert await main.try_native_copy(message, fetch_client, "publicname", source.id)
+    fetch_client.copy_message.assert_awaited_once_with(
+        chat_id=message.chat.id,
+        from_chat_id=source.chat.id,
+        message_id=source.id,
+    )
+    copied.edit_caption.assert_awaited_once_with(
+        caption="Original caption\nExtracted by @wantedkar99bot",
+        parse_mode=main.ParseMode.DISABLED,
+    )
+    assert not message.replies
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("premium", [False, True])
 async def test_watermark_preserves_original_caption_and_is_free_only(db, monkeypatch, fake_bot, tmp_path, premium):
     await db.add_user(1001, "Tester")
@@ -241,13 +275,13 @@ def test_text_splitting_is_lossless_and_telegram_safe():
 
 
 @pytest.mark.asyncio
-async def test_redeem_command_requests_thirty_calendar_months(db, monkeypatch):
+async def test_redeem_command_requests_one_calendar_month(db, monkeypatch):
     redeem = AsyncMock(return_value=True)
     monkeypatch.setattr(main, "redeem_points", redeem)
     message = FakeMessage(text="/redeem")
     await main.redeem_handler(None, message)
-    redeem.assert_awaited_once_with(1001, 100, months=30)
-    assert "30 months" in message.shown_text
+    redeem.assert_awaited_once_with(1001, 100, months=1)
+    assert "1 month" in message.shown_text
 
 
 @pytest.mark.asyncio
@@ -317,11 +351,11 @@ async def test_slash_and_inline_admin_panel_match(db, press):
 
 
 @pytest.mark.asyncio
-async def test_redeem_callback_uses_same_calendar_duration(db, press, monkeypatch):
+async def test_redeem_callback_uses_one_calendar_month(db, press, monkeypatch):
     redeem = AsyncMock(return_value=True)
     monkeypatch.setattr(main, "redeem_points", redeem)
     await press(FakeMessage(), "redeem_points")
-    redeem.assert_awaited_once_with(1001, 100, months=30)
+    redeem.assert_awaited_once_with(1001, 100, months=1)
 
 
 @pytest.mark.asyncio

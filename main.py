@@ -130,6 +130,86 @@ async def apply_custom_caption(user_id, original):
     if suffix:
         result = f"{result}\n{suffix}"
     return result.strip()
+
+
+def attribution_text():
+    return WATERMARK.format(bot_username=BOT_USERNAME)
+
+
+async def add_copy_attribution(message, fetch_client, copied, source):
+    """Add free-tier attribution after Telegram copies the source message.
+
+    Copying first avoids downloading the media to the bot server.  Telegram
+    only allows captions on some media and limits them to 1,024 UTF-16 units,
+    so an attribution that cannot be edited onto the copied message is sent as
+    a separate reply instead of making the copy fail.
+    """
+    credit = attribution_text()
+    source_caption = getattr(source, "caption", None) or ""
+    caption_media = any(
+        getattr(source, kind, None)
+        for kind in ("photo", "video", "document", "audio", "voice", "animation")
+    )
+
+    if caption_media:
+        caption = f"{source_caption}\n{credit}" if source_caption else credit
+        if ui.utf16_length(caption) <= 1024:
+            editor = getattr(copied, "edit_caption", None)
+            if editor:
+                try:
+                    await editor(caption=caption, parse_mode=ParseMode.DISABLED)
+                    return
+                except MessageNotModified:
+                    return
+            client_editor = getattr(fetch_client, "edit_message_caption", None)
+            copied_id = getattr(copied, "id", None)
+            if client_editor and copied_id is not None:
+                try:
+                    await client_editor(
+                        chat_id=message.chat.id,
+                        message_id=copied_id,
+                        caption=caption,
+                        parse_mode=ParseMode.DISABLED,
+                    )
+                    return
+                except MessageNotModified:
+                    return
+        await message.reply(credit, parse_mode=ParseMode.DISABLED)
+        return
+
+    # Text messages do not have a media caption, but they can still be copied
+    # first and edited without downloading anything.
+    source_text = getattr(source, "text", None)
+    if source_text:
+        text = f"{source_text}\n{credit}"
+        if ui.utf16_length(text) <= 4096:
+            editor = getattr(copied, "edit_text", None)
+            if editor:
+                try:
+                    await editor(text, parse_mode=ParseMode.DISABLED)
+                    return
+                except MessageNotModified:
+                    return
+            client_editor = getattr(fetch_client, "edit_message_text", None)
+            copied_id = getattr(copied, "id", None)
+            if client_editor and copied_id is not None:
+                try:
+                    await client_editor(
+                        chat_id=message.chat.id,
+                        message_id=copied_id,
+                        text=text,
+                        parse_mode=ParseMode.DISABLED,
+                    )
+                    return
+                except MessageNotModified:
+                    return
+
+    # Stickers, video notes, empty messages and overlong captions have no safe
+    # inline edit path.  The copied content is already delivered, so do not
+    # fall back to a second server download.
+    await message.reply(credit, parse_mode=ParseMode.DISABLED)
+
+
 async def check_access(message):
     user_id = message.from_user.id
     if await is_banned(user_id):
@@ -160,9 +240,11 @@ async def try_native_copy(message, fetch_client, chat_target, msg_id):
         flush=True
     )
 
+    # A custom caption/prefix/suffix/thumbnail still needs the download path.
+    # Without those settings, free users can also use Telegram's server-side
+    # copy: attribution is applied by editing the copied message afterwards.
     try:
-        if user_id != OWNER_ID and not await is_premium(user_id):
-            return False
+        premium = user_id == OWNER_ID or await is_premium(user_id)
         if (await get_caption(user_id) or await get_prefix(user_id)
                 or await get_suffix(user_id) or await get_thumbnail(user_id)):
             return False
@@ -174,14 +256,11 @@ async def try_native_copy(message, fetch_client, chat_target, msg_id):
             flush=True
         )
 
-        await fetch_client.copy_message(
+        copied = await fetch_client.copy_message(
             chat_id=message.chat.id,
             from_chat_id=msg.chat.id,
             message_id=msg.id
         )
-
-        print("[COPY SUCCESS]", flush=True)
-        return True
 
     except Exception as e:
         print(
@@ -189,6 +268,26 @@ async def try_native_copy(message, fetch_client, chat_target, msg_id):
             flush=True
         )
         return False
+
+    if not premium:
+        try:
+            await add_copy_attribution(message, fetch_client, copied, msg)
+        except Exception as e:
+            # The copy has already been delivered.  Never download it a second
+            # time just because Telegram rejected an edit attempt.
+            print(
+                f"[COPY CAPTION FAILED] {type(e).__name__}: {e}",
+                flush=True
+            )
+            try:
+                await message.reply(attribution_text(), parse_mode=ParseMode.DISABLED)
+            except Exception:
+                pass
+
+    print("[COPY SUCCESS]", flush=True)
+    return True
+
+
 async def fetch_and_send(message, status, fetch_client, chat_target, msg_id):
     """Enforce access and atomically reserve a free slot on every extraction path."""
     uid = message.from_user.id
@@ -242,7 +341,7 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id):
         if not msg.media:
             if msg.text:
                 premium = await is_premium(user_id) or user_id == OWNER_ID
-                credited = msg.text if premium else f"{msg.text}\n{WATERMARK.format(bot_username=BOT_USERNAME)}"
+                credited = msg.text if premium else f"{msg.text}\n{attribution_text()}"
                 for chunk in ui.split_text(credited, 4096):
                     await message.reply(chunk, parse_mode=ParseMode.DISABLED)
                     delivered = True
@@ -315,7 +414,7 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id):
         premium = user_id == OWNER_ID or await is_premium(user_id)
         caption = await apply_custom_caption(user_id, msg.caption) if premium else (msg.caption or "")
         if not premium:
-            credit = WATERMARK.format(bot_username=BOT_USERNAME)
+            credit = attribution_text()
             caption = f"{caption}\n{credit}" if caption else credit
         chat_id = message.chat.id
         overflow_caption = caption if ui.utf16_length(caption) > 1024 else None
@@ -324,7 +423,7 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id):
                 # Telegram's caption cap leaves no room for the attribution:
                 # keep the complete original on the media, then send the credit.
                 caption = msg.caption or ""
-                overflow_caption = WATERMARK
+                overflow_caption = attribution_text()
             else:
                 caption = None
 
@@ -567,7 +666,7 @@ async def show_refer(source):
     text = (f"🎁 **REFERRALS & REWARDS**\n\n👥 Referrals: {user.get('referral_count', 0)}\n"
             f"⭐ **Points: {points} / {REDEEM_POINTS}**\n"
             f"🎉 Each new friend earns you **{REFER_POINTS} points**.\n"
-            f"💎 Redeem **{REDEEM_POINTS} points** for **{REDEEM_PREMIUM_MONTHS} months** of public-only premium.\n"
+            f"💎 Redeem **{REDEEM_POINTS} points** for **{REDEEM_PREMIUM_MONTHS} month** of public-only premium.\n"
             "Only new users joining through your link count, once each.\n"
             f"Progress: {'█' * min(10, points * 10 // REDEEM_POINTS)}{'░' * max(0, 10 - min(10, points * 10 // REDEEM_POINTS))}\n"
             f"Your link: {link}\n\n{REDEEM_LIMITATION}")
@@ -1495,7 +1594,7 @@ async def payments_handler(client, message):
 async def redeem_handler(client, message):
     uid = message.from_user.id
     if await redeem_points(uid, REDEEM_POINTS, months=REDEEM_PREMIUM_MONTHS):
-        await message.reply(f"✅ Redeemed {REDEEM_POINTS} points for {REDEEM_PREMIUM_MONTHS} months of public-only premium.\n\n{REDEEM_LIMITATION}")
+        await message.reply(f"✅ Redeemed {REDEEM_POINTS} points for {REDEEM_PREMIUM_MONTHS} month of public-only premium.\n\n{REDEEM_LIMITATION}")
     else:
         await message.reply(f"🔒 You need {REDEEM_POINTS} points. Active owner-granted premium cannot be replaced by points premium.")
 

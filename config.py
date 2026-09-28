@@ -5,9 +5,9 @@ FREE_PRIVATE_LINKS = False
 WATERMARK = "Extracted by @wantedkar99bot"
 REFER_POINTS = 10
 REDEEM_POINTS = 100
-REDEEM_PREMIUM_MONTHS = 30
+REDEEM_PREMIUM_MONTHS = 1
 # Kept for integrations that import the old constant; redemption uses calendar months.
-REDEEM_PREMIUM_DAYS = 900
+REDEEM_PREMIUM_DAYS = 30
 PAYMENT_CONTACT = "XyrDeveloper"
 PREMIUM_PLANS = {
     "month": {"title": "1 month", "price": 99, "days": 30},
