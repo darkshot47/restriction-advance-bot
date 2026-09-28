@@ -40,6 +40,7 @@ bot = Client("bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKE
 user_clients = {}
 login_pending = {}
 pending_action = {}
+active_downloads = {}
 
 
 def parse_link(link):
@@ -89,6 +90,17 @@ async def get_user_client(user_id):
         except:
             await delete_session(user_id)
     return None
+
+
+def download_controls(job_id, paused=False):
+    pause_button = InlineKeyboardButton(
+        "▶️ Resume" if paused else "⏸ Pause",
+        callback_data=f"dl:{'r' if paused else 'p'}:{job_id}"
+    )
+    return InlineKeyboardMarkup([[
+        pause_button,
+        InlineKeyboardButton("⛔ Stop", callback_data=f"dl:s:{job_id}")
+    ]])
 
 
 async def apply_custom_caption(user_id, original):
@@ -243,13 +255,46 @@ async def fetch_and_send(message, status, fetch_client, chat_target, msg_id):
             )
             return False
 
-        await status.edit("⬇️ Downloading...")
-        file_path = await fetch_client.download_media(msg)
+        job_id = str(status.id)
+        pause_event = asyncio.Event()
+        pause_event.set()
+        job = {
+            "user_id": user_id,
+            "event": pause_event,
+            "paused": False,
+            "task": asyncio.current_task(),
+            "last_update": 0,
+        }
+        active_downloads[job_id] = job
+        await status.edit("⬇️ Downloading...", reply_markup=download_controls(job_id))
+
+        async def download_progress(current, total):
+            if job.get("cancelled"):
+                raise asyncio.CancelledError()
+            await pause_event.wait()
+            if job.get("cancelled"):
+                raise asyncio.CancelledError()
+
+            now = asyncio.get_running_loop().time()
+            if now - job["last_update"] < 2 and current < total:
+                return
+            job["last_update"] = now
+            percent = int(current * 100 / total) if total else 0
+            paused_label = " (paused)" if job["paused"] else ""
+            try:
+                await status.edit(
+                    f"⬇️ Downloading... {percent}%{paused_label}",
+                    reply_markup=download_controls(job_id, job["paused"])
+                )
+            except Exception:
+                pass
+
+        file_path = await fetch_client.download_media(msg, progress=download_progress)
         if not file_path:
-            await status.edit("❌ Download failed.")
+            await status.edit("❌ Download failed.", reply_markup=None)
             return False
 
-        await status.edit("⬆️ Uploading...")
+        await status.edit("⬆️ Uploading...", reply_markup=None)
         caption = await apply_custom_caption(user_id, msg.caption)
         chat_id = message.chat.id
 
@@ -285,10 +330,18 @@ async def fetch_and_send(message, status, fetch_client, chat_target, msg_id):
         await increment_daily(user_id)
         return True
 
+    except asyncio.CancelledError:
+        try:
+            await status.edit("⛔ Download stopped.", reply_markup=None)
+        except Exception:
+            pass
+        return "cancelled"
     except Exception as e:
-        await status.edit(f"❌ Error: {e}")
+        await status.edit(f"❌ Error: {e}", reply_markup=None)
         return False
     finally:
+        if "job_id" in locals():
+            active_downloads.pop(job_id, None)
         for path in [file_path, thumb_path]:
             if path and os.path.exists(path):
                 try:
@@ -1104,6 +1157,34 @@ async def photo_handler(client, message):
 async def callback_handler(client, query):
     data = query.data
     user_id = query.from_user.id
+    if data.startswith("dl:"):
+        try:
+            _, action, job_id = data.split(":", 2)
+            job = active_downloads.get(job_id)
+            if not job or job["user_id"] != user_id:
+                await query.answer("This download is no longer active.", show_alert=True)
+                return
+            if action == "p":
+                job["paused"] = True
+                job["event"].clear()
+                await query.message.edit_reply_markup(download_controls(job_id, paused=True))
+                await query.answer("⏸ Download paused")
+            elif action == "r":
+                job["paused"] = False
+                job["event"].set()
+                await query.message.edit_reply_markup(download_controls(job_id))
+                await query.answer("▶️ Download resumed")
+            elif action == "s":
+                job["cancelled"] = True
+                job["paused"] = False
+                job["event"].set()
+                task = job.get("task")
+                if task and not task.done():
+                    task.cancel()
+                await query.answer("⛔ Stopping download...")
+        except Exception:
+            await query.answer("Could not control this download.", show_alert=True)
+        return
     if data == "close":
         await query.message.delete()
     elif data == "cmd_login":
@@ -1315,6 +1396,8 @@ async def text_handler(client, message):
                     ok = await fetch_and_send(message, ts, uc, chat_target, mid)
                 else:
                     ok = await fetch_and_send(message, ts, bot, chat_target, mid)
+                if ok == "cancelled":
+                    break
                 if ok:
                     success += 1
                 else:
@@ -1370,6 +1453,8 @@ async def text_handler(client, message):
                     ok = await fetch_and_send(message, ts, uc, chat_target, mid)
                 else:
                     ok = await fetch_and_send(message, ts, bot, chat_target, mid)
+                if ok == "cancelled":
+                    break
                 if ok:
                     success += 1
                 else:
