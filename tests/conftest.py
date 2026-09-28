@@ -167,6 +167,9 @@ class FakeDB:
             "joined_date": now,
             "last_active": now,
             "referral_count": 0,
+            "points": 0,
+            "premium_source": None,
+            "referred_by": None,
             "notifications": True,
             "silent_mode": False,
             "favorites": [],
@@ -262,6 +265,39 @@ class FakeDB:
         user = self.users.setdefault(referrer_id, self._new_user(referrer_id, "Tester", None))
         user["referral_count"] = user.get("referral_count", 0) + 1
 
+    async def get_points(self, user_id):
+        return (self.users.get(user_id) or {}).get("points", 0)
+
+    async def award_referral(self, referrer_id, new_user_id, points=10):
+        if referrer_id == new_user_id:
+            return False
+        ref = self.users.setdefault(referrer_id, self._new_user(referrer_id, "Tester", None))
+        new = self.users.setdefault(new_user_id, self._new_user(new_user_id, "Tester", None))
+        if new.get("referred_by") is not None:
+            return False
+        new["referred_by"] = referrer_id
+        ref["referral_count"] += 1
+        ref["points"] += points
+        return True
+
+    async def redeem_points(self, user_id, points=100, days=30):
+        user = self.users.get(user_id)
+        if not user or user.get("points", 0) < points:
+            return False
+        user["points"] -= points
+        user["is_premium"] = True
+        user["premium_source"] = "redeem"
+        user["premium_expiry"] = _dt.datetime.now() + _dt.timedelta(days=days)
+        return True
+
+    async def set_qr(self, file_id): self.qr = file_id
+    async def get_qr(self): return getattr(self, "qr", None)
+    async def delete_qr(self): self.qr = None
+    async def add_payment(self, user_id, proof, note=None):
+        self.payments = getattr(self, "payments", [])
+        self.payments.append({"user_id": user_id, "proof": proof, "note": note})
+    async def get_payments(self): return getattr(self, "payments", [])
+
     # config ---------------------------------------------------------------
     async def get_maintenance(self):
         return self.maintenance
@@ -304,7 +340,8 @@ DB_NAMES = [
     "search_user", "set_maintenance", "get_maintenance", "set_fsub_channel",
     "get_fsub_channel", "delete_fsub", "add_admin", "remove_admin", "is_admin",
     "get_admins_list", "clear_all_logs", "get_bot_stats", "add_premium",
-    "remove_premium", "ban_user", "unban_user",
+    "remove_premium", "ban_user", "unban_user", "get_points", "award_referral",
+    "redeem_points", "set_qr", "get_qr", "delete_qr", "add_payment", "get_payments",
 ]
 
 
@@ -341,6 +378,7 @@ def clean_state(monkeypatch):
     monkeypatch.setattr(main, "user_clients", {})
     monkeypatch.setattr(main, "login_pending", {})
     monkeypatch.setattr(main, "pending_action", {})
+    monkeypatch.setattr(main, "admin_pending", {})
     monkeypatch.setattr(main, "active_downloads", {})
     yield
 

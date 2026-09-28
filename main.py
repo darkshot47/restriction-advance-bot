@@ -8,10 +8,13 @@ from pyrogram import Client, filters
 from pyrogram.types import CallbackQuery
 from pyrogram.errors import (
     SessionPasswordNeeded, PhoneCodeInvalid, PhoneNumberInvalid,
-    PasswordHashInvalid, FloodWait, ChannelPrivate, MessageNotModified
+    PasswordHashInvalid, FloodWait, ChannelPrivate, MessageNotModified  # noqa: F401
 )
 
 import ui
+from config import (FREE_DAILY_LIMIT, FREE_PRIVATE_LINKS, WATERMARK, REFER_POINTS,
+                    REDEEM_POINTS, REDEEM_PREMIUM_DAYS, PAYMENT_CONTACT,
+                    PREMIUM_PLANS, PREMIUM_BENEFITS, REDEEM_LIMITATION, RUPEE)  # noqa: F401
 from database import (
     add_user, get_user, is_premium, is_banned, check_daily_limit,
     increment_daily, save_session, get_session, delete_session,
@@ -27,8 +30,9 @@ from database import (
     search_user, set_maintenance, get_maintenance, set_fsub_channel,
     get_fsub_channel, delete_fsub, add_admin, remove_admin, is_admin,
     get_admins_list, clear_all_logs, get_bot_stats, add_premium,
-    remove_premium, ban_user, unban_user
-)
+    remove_premium, ban_user, unban_user, get_points, award_referral,
+    redeem_points, set_qr, get_qr, delete_qr, add_payment, get_payments
+)  # noqa: F401
 
 API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
@@ -41,6 +45,7 @@ bot = Client("bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKE
 user_clients = {}
 login_pending = {}
 pending_action = {}
+admin_pending = {}
 active_downloads = {}
 
 
@@ -105,35 +110,6 @@ async def apply_custom_caption(user_id, original):
     if suffix:
         result = f"{result}\n{suffix}"
     return result.strip()
-async def try_native_copy(message, fetch_client, chat_target, msg_id):
-    """Try native Telegram message copying before the existing media flow."""
-    user_id = message.from_user.id
-
-    try:
-        if await get_caption(user_id):
-            return False
-
-        if await get_prefix(user_id):
-            return False
-
-        if await get_suffix(user_id):
-            return False
-
-        if await get_thumbnail(user_id):
-            return False
-
-        await fetch_client.copy_message(
-            chat_id=message.chat.id,
-            from_chat_id=chat_target,
-            message_id=msg_id
-        )
-
-        return True
-
-    except Exception:
-        return False
-
-
 async def check_access(message):
     user_id = message.from_user.id
     if await is_banned(user_id):
@@ -165,6 +141,11 @@ async def try_native_copy(message, fetch_client, chat_target, msg_id):
     )
 
     try:
+        if user_id != OWNER_ID and not await is_premium(user_id):
+            return False
+        if (await get_caption(user_id) or await get_prefix(user_id)
+                or await get_suffix(user_id) or await get_thumbnail(user_id)):
+            return False
 
         msg = await fetch_client.get_messages(chat_target, msg_id)
 
@@ -214,7 +195,11 @@ async def fetch_and_send(message, status, fetch_client, chat_target, msg_id):
 
         if not msg.media:
             if msg.text:
-                await message.reply(msg.text)
+                premium = await is_premium(user_id) or user_id == OWNER_ID
+                credited = msg.text if premium else f"{msg.text}\n{WATERMARK.format(bot_username=BOT_USERNAME)}"
+                await message.reply(credited)
+                await add_download(user_id, f"msg_{msg_id}", "text")
+                await increment_daily(user_id)
                 await status.delete()
                 return True
             else:
@@ -281,6 +266,9 @@ async def fetch_and_send(message, status, fetch_client, chat_target, msg_id):
 
         await status.edit("⬆️ Uploading...", reply_markup=None)
         caption = await apply_custom_caption(user_id, msg.caption)
+        if user_id != OWNER_ID and not await is_premium(user_id):
+            credit = WATERMARK.format(bot_username=BOT_USERNAME)
+            caption = f"{caption}\n{credit}" if caption else credit
         chat_id = message.chat.id
 
         thumb_id = await get_thumbnail(user_id)
@@ -418,7 +406,8 @@ async def show_start(source):
     user = source.from_user
     await add_user(user.id, user.first_name, user.username)
     premium = await is_premium(user.id)
-    await render(source, ui.start_text(user.first_name, premium), ui.start_keyboard())
+    show_admin = user.id == OWNER_ID or await is_admin(user.id)
+    await render(source, ui.start_text(user.first_name, premium), ui.start_keyboard(show_admin))
 
 
 async def show_help(source):
@@ -499,17 +488,32 @@ async def show_premium(source):
     if premium:
         user = await get_user(user_id) or {}
         expiry = user.get("premium_expiry")
-    await render(
-        source,
-        ui.premium_text(premium, expiry, OWNER_ID),
-        ui.premium_keyboard(premium, OWNER_ID),
-    )
+    user = await get_user(user_id) or {}
+    if premium:
+        text = f"💎 PREMIUM ACTIVE\nExpires: {expiry or 'Lifetime'}\nUnlimited downloads\nUnlimited public-channel extraction."
+        if user.get("premium_source") == "redeem":
+            text += f"\n\n{REDEEM_LIMITATION}"
+    else:
+        text = "💎 PREMIUM BENEFITS\n\nUnlimited downloads\n2 GB file size\nPriority support\n" + "\n".join(f"{RUPEE}{p['price']} / {p['title']}" for p in PREMIUM_PLANS.values())
+    keyboard = ui.keyboard([[ui.button(f"Buy {RUPEE}{p['price']} — {p['title']}", callback_data=f"buy:{key}", style="success")] for key,p in PREMIUM_PLANS.items()] + ([[ui.button("💬 Contact owner", url=f"tg://user?id={OWNER_ID}", style="primary")]] if OWNER_ID else []) + [[ui.button("🎁 Refer & earn", callback_data="cmd_refer", style="primary")], [ui.home_button()]])
+    await render(source, text, keyboard)
 
 
 async def show_refer(source):
     user = await ensure_user(source.from_user)
     link = f"https://t.me/{BOT_USERNAME}?start={source.from_user.id}"
-    await render(source, ui.refer_text(link, user.get("referral_count", 0)), ui.refer_keyboard(link))
+    points = await get_points(source.from_user.id)
+    text = (f"🎁 REFERRALS\n\nReferrals: {user.get('referral_count', 0)}\n"
+            f"Points: {points} / {REDEEM_POINTS}\n"
+            f"Progress: {'█' * min(10, points * 10 // REDEEM_POINTS)}{'░' * max(0, 10 - min(10, points * 10 // REDEEM_POINTS))}\n"
+            f"Your link: {link}\n\n{REDEEM_LIMITATION}")
+    keyboard = ui.keyboard([
+        [ui.button("📤 Share link", url=f"https://t.me/share/url?url={link}", style="success")],
+        [ui.button("📋 Copy link", copy_text=link, style="primary")],
+        [ui.button("🔒 Redeem" if points < REDEEM_POINTS else "💎 Redeem points", callback_data="redeem_points", style="primary" if points < REDEEM_POINTS else "success")],
+        [ui.home_button()],
+    ])
+    await render(source, text, keyboard)
 
 
 async def show_myinfo(source):
@@ -606,6 +610,20 @@ async def cb_refer(client, query):
 async def cb_help(client, query):
     await query.answer()
     await show_help(query)
+
+
+@callback_action("cmd_admin")
+async def cb_admin(client, query):
+    uid = query.from_user.id
+    if uid != OWNER_ID and not await is_admin(uid):
+        await query.answer("Admin only.", show_alert=True)
+        try:
+            await query.message.edit_text("🚫 Admin access only.", reply_markup=ui.back_keyboard())
+        except Exception:
+            pass
+        return
+    await query.message.edit_text("🛠 ADMIN PANEL", reply_markup=admin_panel_keyboard())
+    await query.answer()
 
 
 @callback_action("cmd_feedback")
@@ -712,6 +730,31 @@ async def cb_check_fsub(client, query):
         await query.answer("❌ You have not joined the channel yet!", show_alert=True)
 
 
+COMMAND_NAMES = ["start", "help", "login", "logout", "status", "cancel", "setcaption", "delcaption", "setthumb", "delthumb", "setprefix", "setsuffix", "mystats", "myinfo", "history", "settings", "language", "refer", "bookmark", "bookmarks", "favorite", "favorites", "share", "feedback", "premium", "stats", "users", "activeusers", "newusers", "topusers", "broadcast", "ban", "unban", "banlist", "finduser", "userinfo", "addpremium", "removepremium", "premiumlist", "addadmin", "removeadmin", "adminlist", "setfsub", "delfsub", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export", "adminhelp", "admin", "addqr", "delqr", "removeqr", "payments", "redeem"]
+ABORT_GROUP = -1
+
+
+@bot.on_message(filters.command(COMMAND_NAMES) & filters.private, group=ABORT_GROUP)
+async def abort_pending_on_command(client, message):
+    uid = message.from_user.id
+    aborted = False
+    if uid in pending_action:
+        pending_action.pop(uid, None)
+        aborted = True
+    if uid in admin_pending:
+        admin_pending.pop(uid, None)
+        aborted = True
+    if uid in login_pending:
+        pending = login_pending.pop(uid, {})
+        temp = pending.get("client")
+        if temp:
+            try: await temp.disconnect()
+            except Exception: pass
+        aborted = True
+    if aborted:
+        await message.reply("ℹ️ Previous input cancelled. Running your command.")
+
+
 @bot.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
     user = message.from_user
@@ -721,11 +764,12 @@ async def start_handler(client, message):
         try:
             ref_id = int(args[1])
             if ref_id != user.id:
-                await add_referral(ref_id, user.id)
+                await award_referral(ref_id, user.id, REFER_POINTS)
         except:
             pass
     premium = await is_premium(user.id)
-    await render(message, ui.start_text(user.first_name, premium), ui.start_keyboard())
+    show_admin = user.id == OWNER_ID or await is_admin(user.id)
+    await render(message, ui.start_text(user.first_name, premium), ui.start_keyboard(show_admin))
 
 
 @bot.on_message(filters.command("help") & filters.private)
@@ -1342,9 +1386,63 @@ async def adminhelp_handler(client, message):
     )
 
 
+@bot.on_message(filters.command("addqr") & filters.private)
+@owner_only
+async def addqr_handler(client, message):
+    pending_action[message.from_user.id] = "qr_upload"
+    await message.reply("Send the payment QR image as a photo.")
+
+
+@bot.on_message(filters.command(["delqr", "removeqr"]) & filters.private)
+@owner_only
+async def delqr_handler(client, message):
+    await delete_qr()
+    await message.reply("✅ Payment QR removed.")
+
+
+@bot.on_message(filters.command("payments") & filters.private)
+@admin_only
+async def payments_handler(client, message):
+    rows = await get_payments()
+    await message.reply("💳 Payments received: " + str(len(rows)) + "\n" + "\n".join(f"User {x.get('user_id')} — {x.get('date')}" for x in rows[-20:]))
+
+
+@bot.on_message(filters.command("redeem") & filters.private)
+async def redeem_handler(client, message):
+    uid = message.from_user.id
+    if await redeem_points(uid, REDEEM_POINTS, REDEEM_PREMIUM_DAYS):
+        await message.reply(f"✅ Redeemed {REDEEM_POINTS} points for {REDEEM_PREMIUM_DAYS} days of premium.\n\n{REDEEM_LIMITATION}")
+    else:
+        await message.reply(f"🔒 You need {REDEEM_POINTS} points to redeem.")
+
+
+@bot.on_message(filters.command("admin") & filters.private)
+@admin_only
+async def admin_handler(client, message):
+    await message.reply("🛠 ADMIN PANEL", reply_markup=admin_panel_keyboard())
+
+
 @bot.on_message(filters.photo & filters.private)
 async def photo_handler(client, message):
     user_id = message.from_user.id
+    if pending_action.get(user_id) == "payment_proof":
+        del pending_action[user_id]
+        await add_payment(user_id, message.photo.file_id, "photo")
+        try:
+            await bot.forward_messages(OWNER_ID, user_id, message.id)
+            await bot.send_message(PAYMENT_CONTACT, f"Payment proof received from {user_id}.")
+        except Exception:
+            pass
+        await message.reply("✅ Payment proof sent for review.")
+        return
+    if pending_action.get(user_id) == "qr_upload":
+        if user_id != OWNER_ID:
+            await message.reply("Only the owner can upload the payment QR.")
+            return
+        await set_qr(message.photo.file_id)
+        del pending_action[user_id]
+        await message.reply("✅ Payment QR saved.")
+        return
     if pending_action.get(user_id) == "thumbnail":
         await set_thumbnail(user_id, message.photo.file_id)
         del pending_action[user_id]
@@ -1383,12 +1481,69 @@ async def handle_download_controls(query):
         await query.answer("Could not control this download.", show_alert=True)
 
 
+def admin_panel_keyboard():
+    names = ["stats", "users", "newusers", "activeusers", "topusers", "broadcast", "sendmsg", "ban", "unban", "banlist", "finduser", "userinfo", "addpremium", "removepremium", "premiumlist", "feedbacks", "payments", "adminhelp", "addadmin", "removeadmin", "adminlist", "setfsub", "delfsub", "maintenance", "addqr", "delqr", "clearlogs", "export"]
+    rows = [[ui.button("/" + x, callback_data="admin:" + x, style="primary") for x in names[i:i+2]] for i in range(0,len(names),2)]
+    rows.append([ui.button("🏠 Main menu", callback_data="home", style="success")])
+    return ui.keyboard(rows)
+
+
+async def run_admin_inline(client, query, command):
+    # Adapt the real command handler to edit the panel message rather than post a new message.
+    handlers = {"stats": stats_handler, "users": users_handler, "newusers": new_users_handler, "activeusers": active_users_handler, "topusers": top_users_handler, "broadcast": broadcast_handler, "sendmsg": sendmsg_handler, "ban": ban_handler, "unban": unban_handler, "banlist": banlist_handler, "finduser": finduser_handler, "userinfo": userinfo_handler, "addpremium": addpremium_handler, "removepremium": removepremium_handler, "premiumlist": premiumlist_handler, "feedbacks": feedbacks_handler, "payments": payments_handler, "adminhelp": adminhelp_handler, "addadmin": addadmin_handler, "removeadmin": removeadmin_handler, "adminlist": adminlist_handler, "setfsub": setfsub_handler, "delfsub": delfsub_handler, "maintenance": maintenance_handler, "addqr": addqr_handler, "delqr": delqr_handler, "clearlogs": clearlogs_handler, "export": export_handler}
+    handler = handlers.get(command)
+    if not handler:
+        return
+    needs_value = {"broadcast", "sendmsg", "ban", "unban", "finduser", "userinfo", "addpremium", "removepremium", "addadmin", "removeadmin", "setfsub", "maintenance"}
+    if command in needs_value:
+        admin_pending[query.from_user.id] = command
+        await query.message.edit_text(f"Enter the details for /{command} in your next message. Send /cancel to abort.", reply_markup=admin_panel_keyboard())
+        return
+    class PanelProxy:
+        def __init__(self):
+            self.from_user = query.from_user
+            self.chat = query.message.chat
+            self.text = "/" + command
+            self.id = query.message.id
+        async def reply(self, text, reply_markup=None, **kwargs):
+            return await query.message.edit_text(text, reply_markup=reply_markup)
+    await handler(client, PanelProxy())
+
+
 @bot.on_callback_query()
 async def callback_handler(client, query):
     """Route every button press straight to its action."""
     data = query.data or ""
     if data.startswith("dl:"):
         await handle_download_controls(query)
+        return
+    if data.startswith("admin:"):
+        await run_admin_inline(client, query, data.split(":", 1)[1])
+        await query.answer()
+        return
+    if data == "redeem_points":
+        uid = query.from_user.id
+        if not await redeem_points(uid, REDEEM_POINTS, REDEEM_PREMIUM_DAYS):
+            await query.answer(f"You need {REDEEM_POINTS} points to redeem.", show_alert=True)
+            return
+        await query.answer("Premium redeemed!")
+        await show_premium(query)
+        return
+    if data.startswith("buy:"):
+        uid = query.from_user.id
+        plan_key = data.split(":", 1)[1]
+        plan = PREMIUM_PLANS.get(plan_key)
+        if not plan:
+            await query.answer("Unknown plan", show_alert=True); return
+        qr = await get_qr()
+        text = f"Payment for {plan['title']}: {RUPEE}{plan['price']}."
+        if qr:
+            await bot.send_photo(uid, qr, caption=text)
+        else:
+            await bot.send_message(uid, text + f"\nNo payment QR is available. Please contact @{PAYMENT_CONTACT}.")
+        pending_action[uid] = "payment_proof"
+        await bot.send_message(uid, "After paying, send your payment proof as a photo or text.")
+        await query.answer("Payment instructions sent.")
         return
     handler = CALLBACK_ACTIONS.get(data)
     if handler is None:
@@ -1414,7 +1569,7 @@ async def callback_handler(client, query):
     "userinfo", "addpremium", "removepremium", "premiumlist",
     "addadmin", "removeadmin", "adminlist", "setfsub", "delfsub",
     "maintenance", "feedbacks", "sendmsg", "clearlogs", "export",
-    "adminhelp"
+    "adminhelp", "admin", "addqr", "delqr", "removeqr", "payments", "redeem"
 ]))
 async def text_handler(client, message):
     user_id = message.from_user.id
@@ -1422,8 +1577,48 @@ async def text_handler(client, message):
 
     await add_user(user_id, message.from_user.first_name, message.from_user.username)
 
+    if user_id in admin_pending:
+        action = admin_pending.pop(user_id)
+        handlers = {"sendmsg": sendmsg_handler, "ban": ban_handler, "unban": unban_handler, "finduser": finduser_handler, "userinfo": userinfo_handler, "addpremium": addpremium_handler, "removepremium": removepremium_handler, "addadmin": addadmin_handler, "removeadmin": removeadmin_handler, "setfsub": setfsub_handler, "maintenance": maintenance_handler}
+        if action == "broadcast":
+            users = await get_all_users()
+            sent = 0
+            for entry in users:
+                try:
+                    await bot.send_message(entry["user_id"], text)
+                    sent += 1
+                except Exception:
+                    pass
+            await message.reply(f"Broadcast complete: sent to {sent} users.")
+            return
+        handler = handlers.get(action)
+        if handler:
+            class PromptProxy:
+                def __init__(self):
+                    self.from_user = message.from_user
+                    self.chat = message.chat
+                    self.id = message.id
+                    self.text = "/" + action + " " + text
+                async def reply(self, content, reply_markup=None, **kwargs):
+                    return await message.reply(content, reply_markup=reply_markup)
+            await handler(client, PromptProxy())
+            return
+
     if user_id in pending_action:
         action = pending_action[user_id]
+        if action == "payment_proof":
+            del pending_action[user_id]
+            await add_payment(user_id, text, text)
+            try:
+                await bot.send_message(OWNER_ID, f"Payment proof from {user_id}:\n{text}")
+                await bot.send_message(PAYMENT_CONTACT, f"Payment proof from {user_id}:\n{text}")
+            except Exception:
+                pass
+            await message.reply("✅ Payment proof sent for review.")
+            return
+        if action == "qr_upload":
+            await message.reply("Please upload the QR image as a photo.")
+            return
         if action == "caption":
             await set_caption(user_id, text)
             del pending_action[user_id]
@@ -1538,10 +1733,10 @@ async def text_handler(client, message):
         if len(tg_links) > max_bulk:
             await message.reply(f"⚠️ Too many links!\n🆓 Free: 5\n💎 Premium: 50\nSent: {len(tg_links)}")
             return
-        if not premium:
-            allowed, current = await check_daily_limit(user_id, 10)
-            if not allowed or current + len(tg_links) > 10:
-                await message.reply(f"⛔ Daily limit! Used: {current}/10")
+        if not premium and user_id != OWNER_ID:
+            allowed, current = await check_daily_limit(user_id, FREE_DAILY_LIMIT)
+            if not allowed or current + len(tg_links) > FREE_DAILY_LIMIT:
+                await message.reply(f"⛔ Daily limit! Used: {current}/{FREE_DAILY_LIMIT}")
                 return
         status = await message.reply(f"⏳ Processing {len(tg_links)}...")
         success = failed = 0
@@ -1554,6 +1749,11 @@ async def text_handler(client, message):
                     continue
                 ts = await message.reply(f"📥 {i}")
                 if is_priv:
+                    urow = await get_user(user_id) or {}
+                    if user_id != OWNER_ID and (not await is_premium(user_id) or urow.get("premium_source") != "manual"):
+                        await ts.edit("🔒 Private links are available only with premium granted manually by the owner.")
+                        failed += 1
+                        continue
                     uc = await get_user_client(user_id)
                     if not uc:
                         await ts.edit("🔒 Login required")
@@ -1594,10 +1794,10 @@ async def text_handler(client, message):
         if total > max_range:
             await message.reply("⚠️ Range too large!\n🆓 Free: 20\n💎 Premium: 1000")
             return
-        if not premium:
-            allowed, current = await check_daily_limit(user_id, 10)
-            if not allowed or current + total > 10:
-                await message.reply(f"⛔ Daily limit! Used: {current}/10")
+        if not premium and user_id != OWNER_ID:
+            allowed, current = await check_daily_limit(user_id, FREE_DAILY_LIMIT)
+            if not allowed or current + total > FREE_DAILY_LIMIT:
+                await message.reply(f"⛔ Daily limit! Used: {current}/{FREE_DAILY_LIMIT}")
                 return
         base_link = text.rsplit("/", 1)[0]
         status = await message.reply(f"⏳ Range: {total} messages")
@@ -1611,6 +1811,11 @@ async def text_handler(client, message):
                     continue
                 ts = await message.reply(f"📥 {msg_id}")
                 if is_priv:
+                    urow = await get_user(user_id) or {}
+                    if user_id != OWNER_ID and (not await is_premium(user_id) or urow.get("premium_source") != "manual"):
+                        await ts.edit("🔒 Private links are available only with premium granted manually by the owner.")
+                        failed += 1
+                        continue
                     uc = await get_user_client(user_id)
                     if not uc:
                         await ts.edit("🔒 Login required")
@@ -1637,13 +1842,18 @@ async def text_handler(client, message):
         return
 
     premium = await is_premium(user_id)
-    if not premium:
-        allowed, current = await check_daily_limit(user_id, 10)
+    if not premium and user_id != OWNER_ID:
+        allowed, current = await check_daily_limit(user_id, FREE_DAILY_LIMIT)
         if not allowed:
-            await message.reply("⛔ **Daily limit!**\n\n🆓 Free: 10/day\n💎 Premium: Unlimited")
+            await message.reply("⛔ **Daily limit!**\n\n🆓 Free: {FREE_DAILY_LIMIT}/day\n💎 Premium: Unlimited")
             return
 
     if is_private:
+        urow = await get_user(user_id) or {}
+        if user_id != OWNER_ID and (not premium or urow.get("premium_source") != "manual"):
+            msg = REDEEM_LIMITATION if premium and urow.get("premium_source") == "redeem" else "🔒 Private links are available only with premium granted manually by the owner."
+            await message.reply(msg)
+            return
         uc = await get_user_client(user_id)
         if not uc:
             await message.reply("🔒 **Private link!**\n\nPlease /login first.")
@@ -1681,3 +1891,10 @@ if __name__ == "__main__":
     print("✅ Bot starting...")
     bot.run()
     
+
+# Keep these imported database APIs exposed for backward compatibility with
+# existing integrations and the test harness, even where this module does not
+# call them directly.
+_COMPAT_EXPORTS = (FloodWait, FREE_PRIVATE_LINKS, PREMIUM_BENEFITS, clear_history,
+                   delete_bookmark, remove_favorite, add_referral, test_connection,
+                   total_users, total_downloads_count)
