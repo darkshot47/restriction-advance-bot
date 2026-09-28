@@ -169,7 +169,7 @@ def start_keyboard(show_admin: bool = False) -> InlineKeyboardMarkup:
             button("💬 Feedback", callback_data="cmd_feedback", style="primary"),
         ],
         [button("🌐 Language", callback_data="cmd_language", style="primary")],
-    ] + ([[button("🛠 Admin panel", callback_data="cmd_admin", style="primary")]] if show_admin else []))
+    ] + ([[button("🛠 Admins", callback_data="cmd_admin", style="primary")]] if show_admin else []))
 
 
 def settings_keyboard(notifications: bool, silent: bool) -> InlineKeyboardMarkup:
@@ -224,12 +224,8 @@ def stats_keyboard() -> InlineKeyboardMarkup:
 
 
 def premium_keyboard(is_premium: bool, owner_id: int | None = None) -> InlineKeyboardMarkup:
-    rows = []
-    if not is_premium and owner_id:
-        rows.append([button("💬 Contact owner", url=f"tg://user?id={owner_id}", style="success")])
-    rows.append([button("🎁 Refer & earn", callback_data="cmd_refer", style="primary")])
-    rows.append([home_button()])
-    return keyboard(rows)
+    """Compatibility entry point for the current benefits-first flow."""
+    return premium_overview_keyboard(owner_id)
 
 
 def refer_keyboard(link: str) -> InlineKeyboardMarkup:
@@ -286,7 +282,8 @@ def start_text(name: str, premium: bool) -> str:
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         f"🎖 **Status:** {badge}\n\n"
         f"📌 Send any Telegram link to save content!\n"
-        f"🔐 Private links: press **Login** below\n\n"
+        f"🆓 Free: **3 public extractions daily**. No referrals needed.\n"
+        f"🔐 Private links require **owner-granted premium** and login.\n\n"
         f"All buttons below work instantly — no commands needed.\n\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━"
     )
@@ -309,7 +306,8 @@ def help_text() -> str:
         "Notifications, silent mode and language\n\n"
         "**🎁 Extra:**\n"
         "/refer /bookmark /bookmarks\n"
-        "/favorite /favorites /share /feedback /premium"
+        "/favorite /favorites /share /feedback /premium /redeem\n\n"
+        "👑 Owner & admins: /admin or /admins. Commands and inline buttons both work."
     )
 
 
@@ -367,30 +365,13 @@ def feedback_text() -> str:
     return (
         "💬 **FEEDBACK**\n\n"
         "Send your feedback, bug report or suggestion as the next message.\n\n"
-        "Press ❌ Cancel to abort."
+        "Send any new command or tap another menu to cancel automatically. You can also press ❌ Cancel."
     )
 
 
 def premium_text(premium: bool, expiry=None, owner_id: int | None = None) -> str:
-    if premium:
-        exp = expiry.strftime("%d %b %Y") if expiry else "Lifetime"
-        return (
-            "💎 **PREMIUM ACTIVE!**\n\n"
-            f"📅 Expires: {exp}\n\n"
-            "✅ Unlimited downloads\n"
-            "✅ 2 GB file size\n"
-            "✅ 4x faster speed"
-        )
-    contact = "\n\nContact the owner to buy Premium!" if owner_id else ""
-    return (
-        "💎 **PREMIUM BENEFITS**\n\n"
-        "✅ Unlimited downloads\n"
-        "✅ 2 GB file size\n"
-        "✅ 4x faster speed\n"
-        "✅ Priority support\n"
-        "✅ No ads"
-        f"{contact}"
-    )
+    """Compatibility entry point; keep legacy screens consistent."""
+    return premium_overview(premium, {"premium_expiry": expiry})
 
 
 def refer_text(link: str, count: int) -> str:
@@ -398,7 +379,7 @@ def refer_text(link: str, count: int) -> str:
         "🎁 **REFERRAL**\n\n"
         f"👥 Your referrals: **{count}**\n\n"
         f"🔗 Your link:\n`{link}`\n\n"
-        "Share it with friends — you both get rewards!"
+        "Earn 10 points for each new friend. Redeem 100 points for 30 months of public-only premium."
     )
 
 
@@ -420,7 +401,8 @@ def personal_stats_text(user: dict, premium: bool) -> str:
 def fsub_text(channel: str) -> str:
     return (
         f"⚠️ **You must join {channel} first!**\n\n"
-        "Join the channel, then press ✅ I joined."
+        "You can use this bot only while you remain joined to the channel.\n\n"
+        "📢 Join now, then tap **I joined** to verify. Membership is checked again when you extract content."
     )
 
 
@@ -449,3 +431,89 @@ def stale_button_text() -> str:
         "⚠️ **This button is out of date.**\n\n"
         "Send /start to reload the menu."
     )
+
+
+# Keep headings styled with Telegram formatting rather than replacing letters
+# with inaccessible Unicode lookalikes. Button labels stay short on mobile.
+def premium_overview(premium, user):
+    from config import PREMIUM_PLANS, REDEEM_LIMITATION
+    title = "💎 **PREMIUM ACTIVE**" if premium else "💎 **PREMIUM BENEFITS**"
+    expiry = user.get("premium_expiry")
+    status = f"\n📅 Valid until: **{expiry:%d %b %Y}**" if premium and expiry else ""
+    access = (REDEEM_LIMITATION if user.get("premium_source") == "redeem" else
+              "Private-channel access requires premium manually granted by the owner and your own authorized Telegram session. Payment screenshots alone do not unlock it.")
+    prices = "\n".join(f"• **₹{p['price']}** / {p['title']}" for p in PREMIUM_PLANS.values())
+    return (f"{title}{status}\n\n"
+            "✨ **What you get**\n"
+            "✅ Unlimited downloads from public channels\n"
+            "✅ Up to 2 GB per file\n"
+            "✅ No extraction watermark\n"
+            "✅ Priority support\n\n"
+            f"💰 **Available plans**\n{prices}\n\n"
+            f"🔐 **Access policy**\n{access}\n\n"
+            "🆓 Free users get **3 public extractions daily** — no referrals required.\n\n"
+            "👇 Tap **Buy Plan** to choose a duration. You will see the payment QR before submitting proof.")
+
+
+def premium_overview_keyboard(owner_id=None):
+    return keyboard([
+        [button("🛍 Buy Plan", callback_data="premium_plans", style="success")],
+        [button("🎁 Earn Points", callback_data="cmd_refer", style="primary"), home_button()],
+    ] + ([[button("💬 Contact owner", url=f"tg://user?id={owner_id}", style="primary")]] if owner_id else []))
+
+
+def plans_text():
+    return ("🛍 **CHOOSE YOUR PLAN**\n\n"
+            "💎 **1 month — ₹99**\n"
+            "🌟 **3 months — ₹249**\n"
+            "👑 **1 year — ₹700**\n\n"
+            "📲 Select a plan to view the owner's QR. Pay the exact amount, tap **I've paid**, then upload a screenshot.\n\n"
+            "🔎 All payments are checked manually by @XyrDeveloper before activation.")
+
+
+def plans_keyboard():
+    from config import PREMIUM_PLANS
+    return keyboard([
+        [button(f"{p['title']} · ₹{p['price']}", callback_data=f"buy:{key}", style="success")]
+        for key, p in PREMIUM_PLANS.items()
+    ] + [[button("⬅️ Benefits", callback_data="cmd_premium", style="primary"), home_button()]])
+
+
+def payment_text(plan):
+    return (f"💳 **PAYMENT DETAILS**\n\n📦 Plan: **{plan['title']}**\n💰 Amount: **₹{plan['price']}**\n\n"
+            "① Scan this QR in your payment app.\n"
+            "② Check the recipient and pay the exact amount.\n"
+            "③ Save a screenshot showing the successful transaction.\n"
+            "④ Tap **I've paid** below, then send the screenshot here.\n\n"
+            "👤 Payment review: @XyrDeveloper\n"
+            "⏳ Premium starts only after owner verification. Never share your PIN or OTP.")
+
+
+def payment_keyboard(token):
+    return keyboard([
+        [button("✅ I've paid", callback_data=f"paid:{token}", style="success")],
+        [button("⬅️ Plans", callback_data="premium_plans", style="primary"),
+         button("❌ Cancel", callback_data="cancel_action", style="danger")],
+    ])
+
+
+def admin_back_keyboard():
+    return keyboard([[button("🛠 Admins", callback_data="cmd_admin", style="primary"), home_button()]])
+
+
+def utf16_length(text):
+    return len(text.encode("utf-16-le")) // 2
+
+
+def split_text(text, limit):
+    """Split Telegram text without losing content or breaking non-BMP characters."""
+    chunk, size = [], 0
+    for char in text:
+        width = 2 if ord(char) > 0xFFFF else 1
+        if size + width > limit:
+            yield "".join(chunk)
+            chunk, size = [], 0
+        chunk.append(char)
+        size += width
+    if chunk:
+        yield "".join(chunk)
