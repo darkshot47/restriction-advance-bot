@@ -1,4 +1,8 @@
-pyrofork
+# Kurigram is the maintained pyrogram fork that ships MTProto layer 229,
+# which is what makes the native blue/green/red inline button styles possible.
+# NOTE: it installs the `pyrogram` module, so pyrofork must be uninstalled
+#       first (`pip uninstall -y pyrofork`) when upgrading an existing deploy.
+Kurigram==2.2.26
 TgCrypto
 flask
 motor

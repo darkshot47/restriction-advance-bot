@@ -5,12 +5,13 @@ from flask import Flask
 from threading import Thread
 from datetime import datetime
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import CallbackQuery
 from pyrogram.errors import (
     SessionPasswordNeeded, PhoneCodeInvalid, PhoneNumberInvalid,
-    PasswordHashInvalid, FloodWait, ChannelPrivate
+    PasswordHashInvalid, FloodWait, ChannelPrivate, MessageNotModified
 )
 
+import ui
 from database import (
     add_user, get_user, is_premium, is_banned, check_daily_limit,
     increment_daily, save_session, get_session, delete_session,
@@ -92,17 +93,6 @@ async def get_user_client(user_id):
     return None
 
 
-def download_controls(job_id, paused=False):
-    pause_button = InlineKeyboardButton(
-        "▶️ Resume" if paused else "⏸ Pause",
-        callback_data=f"dl:{'r' if paused else 'p'}:{job_id}"
-    )
-    return InlineKeyboardMarkup([[
-        pause_button,
-        InlineKeyboardButton("⛔ Stop", callback_data=f"dl:s:{job_id}")
-    ]])
-
-
 async def apply_custom_caption(user_id, original):
     custom = await get_caption(user_id)
     prefix = await get_prefix(user_id)
@@ -159,14 +149,9 @@ async def check_access(message):
             if member.status in ["left", "kicked"]:
                 raise Exception("Not member")
         except:
-            buttons = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{fsub.replace('@', '')}")],
-                [InlineKeyboardButton("✅ I Joined", callback_data="check_fsub")]
-            ])
             await message.reply(
-                f"⚠️ **You must join {fsub} first!**\n\n"
-                f"Join the channel and click the button below.",
-                reply_markup=buttons
+                ui.fsub_text(fsub),
+                reply_markup=ui.fsub_keyboard(fsub)
             )
             return False
     return True
@@ -266,7 +251,7 @@ async def fetch_and_send(message, status, fetch_client, chat_target, msg_id):
             "last_update": 0,
         }
         active_downloads[job_id] = job
-        await status.edit("⬇️ Downloading...", reply_markup=download_controls(job_id))
+        await status.edit("⬇️ Downloading...", reply_markup=ui.download_controls(job_id))
 
         async def download_progress(current, total):
             if job.get("cancelled"):
@@ -284,7 +269,7 @@ async def fetch_and_send(message, status, fetch_client, chat_target, msg_id):
             try:
                 await status.edit(
                     f"⬇️ Downloading... {percent}%{paused_label}",
-                    reply_markup=download_controls(job_id, job["paused"])
+                    reply_markup=ui.download_controls(job_id, job["paused"])
                 )
             except Exception:
                 pass
@@ -369,6 +354,364 @@ def owner_only(func):
     return wrapper
 
 
+# --------------------------------------------------------------------------- #
+#  Shared plumbing
+#
+#  Every button press runs the exact same function as the matching /command, so
+#  no button ever answers with "send /command" anymore.
+# --------------------------------------------------------------------------- #
+
+#: callback_data -> handler(client, query)
+CALLBACK_ACTIONS = {}
+
+
+def callback_action(data):
+    """Register the coroutine that runs when a button with *data* is pressed."""
+    def decorator(func):
+        CALLBACK_ACTIONS[data] = func
+        return func
+    return decorator
+
+
+def is_callback(source):
+    """True when *source* is a button press (CallbackQuery) and not a command."""
+    return isinstance(source, CallbackQuery)
+
+
+async def render(source, text, keyboard=None):
+    """Show *text* — reply to a command, edit the message a button came from."""
+    if is_callback(source):
+        try:
+            return await source.message.edit_text(text, reply_markup=keyboard)
+        except MessageNotModified:
+            return source.message
+        except Exception:
+            # Media messages cannot be edited into text messages.
+            return await source.message.reply(text, reply_markup=keyboard)
+    return await source.reply(text, reply_markup=keyboard)
+
+
+async def ensure_user(user):
+    """Return the user document, creating it when it is missing."""
+    row = await get_user(user.id)
+    if row:
+        return row
+    await add_user(user.id, user.first_name, user.username)
+    row = await get_user(user.id)
+    return row or {
+        "user_id": user.id,
+        "name": user.first_name,
+        "downloads": 0,
+        "daily_downloads": 0,
+        "referral_count": 0,
+        "language": "en",
+        "notifications": True,
+        "silent_mode": False,
+    }
+
+
+# --------------------------------------------------------------------------- #
+#  Screens (shared by commands and buttons)
+# --------------------------------------------------------------------------- #
+
+async def show_start(source):
+    user = source.from_user
+    await add_user(user.id, user.first_name, user.username)
+    premium = await is_premium(user.id)
+    await render(source, ui.start_text(user.first_name, premium), ui.start_keyboard())
+
+
+async def show_help(source):
+    await render(source, ui.help_text(), ui.help_keyboard())
+
+
+async def start_login(source):
+    user_id = source.from_user.id
+    if await get_user_client(user_id):
+        await render(source, ui.already_logged_in_text(), ui.logout_keyboard())
+        return
+    if user_id in login_pending:
+        await render(source, ui.login_pending_text(), ui.login_keyboard())
+        return
+    login_pending[user_id] = {"step": "waiting_phone"}
+    await render(source, ui.login_text(), ui.login_keyboard())
+
+
+async def perform_logout(user_id):
+    """Drop the stored session. Returns the phone number or False when not logged in."""
+    user_client = await get_user_client(user_id)
+    if not user_client:
+        return False
+    phone = None
+    try:
+        me = await user_client.get_me()
+        phone = me.phone_number or None
+    except Exception:
+        phone = None
+    try:
+        await user_client.log_out()
+    except Exception:
+        try:
+            await user_client.stop()
+        except Exception:
+            pass
+    user_clients.pop(user_id, None)
+    await delete_session(user_id)
+    return phone
+
+
+async def show_logout(source):
+    phone = await perform_logout(source.from_user.id)
+    if phone is False:
+        await render(source, ui.logout_none_text(), ui.logout_keyboard())
+    else:
+        await render(source, ui.logout_done_text(phone), ui.logout_keyboard())
+
+
+async def show_settings(source):
+    user = await ensure_user(source.from_user)
+    await render(
+        source,
+        ui.settings_text(),
+        ui.settings_keyboard(
+            bool(user.get("notifications", True)),
+            bool(user.get("silent_mode", False)),
+        ),
+    )
+
+
+async def show_language(source):
+    user = await ensure_user(source.from_user)
+    lang = user.get("language", "en")
+    await render(source, ui.language_text(lang), ui.language_keyboard(lang))
+
+
+async def show_stats(source):
+    user = await ensure_user(source.from_user)
+    premium = await is_premium(source.from_user.id)
+    await render(source, ui.personal_stats_text(user, premium), ui.stats_keyboard())
+
+
+async def show_premium(source):
+    user_id = source.from_user.id
+    premium = await is_premium(user_id)
+    expiry = None
+    if premium:
+        user = await get_user(user_id) or {}
+        expiry = user.get("premium_expiry")
+    await render(
+        source,
+        ui.premium_text(premium, expiry, OWNER_ID),
+        ui.premium_keyboard(premium, OWNER_ID),
+    )
+
+
+async def show_refer(source):
+    user = await ensure_user(source.from_user)
+    link = f"https://t.me/{BOT_USERNAME}?start={source.from_user.id}"
+    await render(source, ui.refer_text(link, user.get("referral_count", 0)), ui.refer_keyboard(link))
+
+
+async def show_myinfo(source):
+    user = await ensure_user(source.from_user)
+    caption = user.get("caption") or "Not set"
+    prefix = user.get("prefix") or "Not set"
+    suffix = user.get("suffix") or "Not set"
+    thumb = "✅ Set" if user.get("thumbnail_id") else "❌ Not set"
+    text = (
+        f"ℹ️ **MY INFO**\n\n"
+        f"👤 {user.get('name')}\n"
+        f"🆔 `{source.from_user.id}`\n"
+        f"📱 {user.get('phone') or 'Not logged in'}\n\n"
+        f"✏️ Caption: {caption[:30]}\n"
+        f"🏷 Prefix: {prefix}\n"
+        f"🏷 Suffix: {suffix}\n"
+        f"🖼 Thumb: {thumb}\n"
+        f"🌐 Lang: {user.get('language', 'en')}"
+    )
+    await render(source, text, ui.back_keyboard())
+
+
+async def start_feedback(source):
+    pending_action[source.from_user.id] = "feedback"
+    await render(source, ui.feedback_text(), ui.feedback_keyboard())
+
+
+async def save_feedback(user_id, text):
+    """Store feedback and forward a copy to the owner."""
+    await add_feedback(user_id, text)
+    if OWNER_ID:
+        try:
+            await bot.send_message(OWNER_ID, f"💬 Feedback from {user_id}:\n\n{text}")
+        except Exception:
+            pass
+
+
+# --------------------------------------------------------------------------- #
+#  Button actions
+# --------------------------------------------------------------------------- #
+
+@callback_action("home")
+async def cb_home(client, query):
+    await query.answer()
+    await show_start(query)
+
+
+@callback_action("close")
+async def cb_close(client, query):
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+    await query.answer("❌ Menu closed")
+
+
+@callback_action("cmd_login")
+async def cb_login(client, query):
+    await query.answer()
+    await start_login(query)
+
+
+@callback_action("cmd_logout")
+async def cb_logout(client, query):
+    await query.answer()
+    await show_logout(query)
+
+
+@callback_action("cmd_settings")
+async def cb_settings(client, query):
+    await query.answer()
+    await show_settings(query)
+
+
+@callback_action("cmd_stats")
+async def cb_stats(client, query):
+    await query.answer()
+    await show_stats(query)
+
+
+@callback_action("cmd_premium")
+async def cb_premium(client, query):
+    await query.answer()
+    await show_premium(query)
+
+
+@callback_action("cmd_refer")
+async def cb_refer(client, query):
+    await query.answer()
+    await show_refer(query)
+
+
+@callback_action("cmd_help")
+async def cb_help(client, query):
+    await query.answer()
+    await show_help(query)
+
+
+@callback_action("cmd_feedback")
+async def cb_feedback(client, query):
+    await query.answer()
+    await start_feedback(query)
+
+
+@callback_action("cmd_language")
+async def cb_language(client, query):
+    await query.answer()
+    await show_language(query)
+
+
+@callback_action("cmd_myinfo")
+async def cb_myinfo(client, query):
+    await query.answer()
+    await show_myinfo(query)
+
+
+@callback_action("toggle_notif")
+async def cb_toggle_notif(client, query):
+    state = await toggle_notifications(query.from_user.id)
+    user = await ensure_user(query.from_user)
+    await query.answer(f"🔔 Notifications {'ON' if state else 'OFF'}")
+    await render(
+        query,
+        ui.settings_text(),
+        ui.settings_keyboard(state, bool(user.get("silent_mode", False))),
+    )
+
+
+@callback_action("toggle_silent")
+async def cb_toggle_silent(client, query):
+    state = await toggle_silent(query.from_user.id)
+    user = await ensure_user(query.from_user)
+    await query.answer(f"🌙 Silent mode {'ON' if state else 'OFF'}")
+    await render(
+        query,
+        ui.settings_text(),
+        ui.settings_keyboard(bool(user.get("notifications", True)), state),
+    )
+
+
+@callback_action("reset_settings")
+async def cb_reset_settings(client, query):
+    await reset_settings(query.from_user.id)
+    await query.answer("🔄 All settings were reset")
+    await show_settings(query)
+
+
+@callback_action("lang_en")
+async def cb_lang_en(client, query):
+    await query.answer("✅ Language set to English")
+    await set_language(query.from_user.id, "en")
+    await render(query, ui.language_text("en"), ui.language_keyboard("en"))
+
+
+@callback_action("lang_hi")
+async def cb_lang_hi(client, query):
+    await query.answer("✅ भाषा हिंदी में सेट हो गई")
+    await set_language(query.from_user.id, "hi")
+    await render(query, ui.language_text("hi"), ui.language_keyboard("hi"))
+
+
+@callback_action("cancel_login")
+async def cb_cancel_login(client, query):
+    pending = login_pending.pop(query.from_user.id, None)
+    temp = (pending or {}).get("client")
+    if temp:
+        try:
+            await temp.stop()
+        except Exception:
+            pass
+    await query.answer("❌ Login cancelled")
+    await render(query, ui.login_cancelled_text(), ui.back_keyboard())
+
+
+@callback_action("cancel_action")
+async def cb_cancel_action(client, query):
+    pending_action.pop(query.from_user.id, None)
+    await query.answer("❌ Cancelled")
+    await render(query, ui.action_cancelled_text(), ui.back_keyboard())
+
+
+@callback_action("check_fsub")
+async def cb_check_fsub(client, query):
+    fsub = await get_fsub_channel()
+    if not fsub:
+        await query.answer("✅ No channel to verify — send me a link!", show_alert=True)
+        return
+    try:
+        member = await bot.get_chat_member(fsub, query.from_user.id)
+        joined = member.status not in ["left", "kicked"]
+    except Exception:
+        joined = False
+    if joined:
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await query.answer("✅ Verified! Send me a link now.")
+    else:
+        await query.answer("❌ You have not joined the channel yet!", show_alert=True)
+
+
 @bot.on_message(filters.command("start") & filters.private)
 async def start_handler(client, message):
     user = message.from_user
@@ -382,83 +725,22 @@ async def start_handler(client, message):
         except:
             pass
     premium = await is_premium(user.id)
-    badge = "💎 Premium" if premium else "🆓 Free"
-    buttons = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔐 Login", callback_data="cmd_login"),
-         InlineKeyboardButton("🚪 Logout", callback_data="cmd_logout")],
-        [InlineKeyboardButton("⚙️ Settings", callback_data="cmd_settings"),
-         InlineKeyboardButton("📊 Stats", callback_data="cmd_stats")],
-        [InlineKeyboardButton("💎 Premium", callback_data="cmd_premium"),
-         InlineKeyboardButton("🎁 Refer", callback_data="cmd_refer")],
-        [InlineKeyboardButton("📖 Help", callback_data="cmd_help"),
-         InlineKeyboardButton("💬 Feedback", callback_data="cmd_feedback")]
-    ])
-    await message.reply(
-        f"👋 **Hello {user.first_name}!**\n\n"
-        f"🤖 **Restricted Content Saver Bot**\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"🎖 **Status:** {badge}\n\n"
-        f"📌 Send any Telegram link to save content!\n"
-        f"🔒 For private links: /login first\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━",
-        reply_markup=buttons
-    )
+    await render(message, ui.start_text(user.first_name, premium), ui.start_keyboard())
 
 
 @bot.on_message(filters.command("help") & filters.private)
 async def help_handler(client, message):
-    await message.reply(
-        "📖 **HELP MENU**\n\n"
-        "**🔐 Account:**\n/login /logout /status /cancel\n\n"
-        "**📥 Download:**\nSend link or range: `t.me/ch/1-20`\n\n"
-        "**🎨 Customization:**\n/setcaption /delcaption\n/setthumb /delthumb\n/setprefix /setsuffix\n\n"
-        "**📊 Info:**\n/mystats /myinfo /history\n\n"
-        "**⚙️ Settings:**\n/settings /language\n\n"
-        "**🎁 Extra:**\n/refer /bookmark /bookmarks\n/favorite /favorites /share /feedback /premium"
-    )
+    await show_help(message)
 
 
 @bot.on_message(filters.command("login") & filters.private)
 async def login_handler(client, message):
-    user_id = message.from_user.id
-    if await get_user_client(user_id):
-        await message.reply("✅ Already logged in! Use /logout first.")
-        return
-    if user_id in login_pending:
-        await message.reply("⏳ Login in progress. Send /cancel.")
-        return
-    login_pending[user_id] = {"step": "waiting_phone"}
-    await message.reply(
-        "🔐 **LOGIN**\n\n"
-        "Send phone with country code:\n"
-        "Example: `+91 9876543210`\n\n"
-        "Send /cancel to abort."
-    )
+    await start_login(message)
 
 
 @bot.on_message(filters.command("logout") & filters.private)
 async def logout_handler(client, message):
-    user_id = message.from_user.id
-    user_client = await get_user_client(user_id)
-    if not user_client:
-        await message.reply("ℹ️ Not logged in.")
-        return
-    try:
-        me = await user_client.get_me()
-        phone = me.phone_number or "Unknown"
-    except:
-        phone = "Unknown"
-    try:
-        await user_client.log_out()
-    except:
-        try:
-            await user_client.stop()
-        except:
-            pass
-    if user_id in user_clients:
-        del user_clients[user_id]
-    await delete_session(user_id)
-    await message.reply(f"✅ **Logged out!**\n📱 `+{phone}`")
+    await show_logout(message)
 
 
 @bot.on_message(filters.command("status") & filters.private)
@@ -552,47 +834,12 @@ async def setsuffix_handler(client, message):
 
 @bot.on_message(filters.command("mystats") & filters.private)
 async def mystats_handler(client, message):
-    user_id = message.from_user.id
-    user = await get_user(user_id)
-    if not user:
-        await message.reply("Send /start first!")
-        return
-    premium = await is_premium(user_id)
-    badge = "💎 Premium" if premium else "🆓 Free"
-    joined = user.get("joined_date", datetime.now()).strftime("%d %b %Y")
-    await message.reply(
-        f"📊 **YOUR STATS**\n\n"
-        f"👤 {user.get('name')}\n"
-        f"🎖 Status: {badge}\n"
-        f"📥 Total: {user.get('downloads', 0)}\n"
-        f"📅 Today: {user.get('daily_downloads', 0)}\n"
-        f"👥 Referrals: {user.get('referral_count', 0)}\n"
-        f"📆 Joined: {joined}"
-    )
+    await show_stats(message)
 
 
 @bot.on_message(filters.command("myinfo") & filters.private)
 async def myinfo_handler(client, message):
-    user_id = message.from_user.id
-    user = await get_user(user_id)
-    if not user:
-        await message.reply("Send /start first!")
-        return
-    caption = user.get("caption") or "Not set"
-    prefix = user.get("prefix") or "Not set"
-    suffix = user.get("suffix") or "Not set"
-    thumb = "✅ Set" if user.get("thumbnail_id") else "❌ Not set"
-    await message.reply(
-        f"ℹ️ **MY INFO**\n\n"
-        f"👤 {user.get('name')}\n"
-        f"🆔 `{user_id}`\n"
-        f"📱 {user.get('phone') or 'Not logged in'}\n\n"
-        f"✏️ Caption: {caption[:30] if caption != 'Not set' else caption}\n"
-        f"🏷 Prefix: {prefix}\n"
-        f"🏷 Suffix: {suffix}\n"
-        f"🖼 Thumb: {thumb}\n"
-        f"🌐 Lang: {user.get('language', 'en')}"
-    )
+    await show_myinfo(message)
 
 
 @bot.on_message(filters.command("history") & filters.private)
@@ -610,42 +857,17 @@ async def history_handler(client, message):
 
 @bot.on_message(filters.command("settings") & filters.private)
 async def settings_handler(client, message):
-    user = await get_user(message.from_user.id)
-    if not user:
-        await message.reply("Send /start first!")
-        return
-    notif = "🔔 ON" if user.get("notifications", True) else "🔕 OFF"
-    silent = "🌙 ON" if user.get("silent_mode", False) else "🔊 OFF"
-    buttons = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"Notifications: {notif}", callback_data="toggle_notif")],
-        [InlineKeyboardButton(f"Silent: {silent}", callback_data="toggle_silent")],
-        [InlineKeyboardButton("🌐 Language", callback_data="cmd_language")],
-        [InlineKeyboardButton("🔄 Reset All", callback_data="reset_settings")],
-        [InlineKeyboardButton("❌ Close", callback_data="close")]
-    ])
-    await message.reply("⚙️ **SETTINGS**", reply_markup=buttons)
+    await show_settings(message)
 
 
 @bot.on_message(filters.command("language") & filters.private)
 async def language_handler(client, message):
-    buttons = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")],
-        [InlineKeyboardButton("🇮🇳 Hindi", callback_data="lang_hi")]
-    ])
-    await message.reply("🌐 **Choose language:**", reply_markup=buttons)
+    await show_language(message)
 
 
 @bot.on_message(filters.command("refer") & filters.private)
 async def refer_handler(client, message):
-    user_id = message.from_user.id
-    user = await get_user(user_id)
-    count = user.get("referral_count", 0) if user else 0
-    link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
-    await message.reply(
-        f"🎁 **REFERRAL**\n\n"
-        f"👥 Your Referrals: {count}\n\n"
-        f"🔗 Link:\n`{link}`"
-    )
+    await show_refer(message)
 
 
 @bot.on_message(filters.command("bookmark") & filters.private)
@@ -699,41 +921,17 @@ async def share_handler(client, message):
 
 @bot.on_message(filters.command("feedback") & filters.private)
 async def feedback_handler(client, message):
-    user_id = message.from_user.id
-    if len(message.text.split()) < 2:
-        pending_action[user_id] = "feedback"
-        await message.reply("💬 **Send your feedback:**\n\nSend /cancel to abort.")
+    text = (message.text or "").split()
+    if len(text) < 2:
+        await start_feedback(message)
         return
-    fb = message.text.split(None, 1)[1]
-    await add_feedback(user_id, fb)
-    if OWNER_ID:
-        try:
-            await bot.send_message(OWNER_ID, f"💬 Feedback from {user_id}:\n\n{fb}")
-        except:
-            pass
-    await message.reply("✅ Feedback sent!")
+    await save_feedback(message.from_user.id, message.text.split(None, 1)[1])
+    await message.reply(ui.feedback_saved_text(), reply_markup=ui.back_keyboard())
 
 
 @bot.on_message(filters.command("premium") & filters.private)
 async def premium_handler(client, message):
-    user_id = message.from_user.id
-    premium = await is_premium(user_id)
-    if premium:
-        user = await get_user(user_id)
-        expiry = user.get("premium_expiry")
-        exp = expiry.strftime("%d %b %Y") if expiry else "Unknown"
-        await message.reply(f"💎 **PREMIUM ACTIVE!**\n\n📅 Expires: {exp}")
-    else:
-        await message.reply(
-            "💎 **PREMIUM BENEFITS**\n\n"
-            "✅ Unlimited downloads\n"
-            "✅ 2 GB file size\n"
-            "✅ 4x faster speed\n"
-            "✅ Priority support\n"
-            "✅ No ads\n\n"
-            f"Contact owner to buy!"
-        )
-      
+    await show_premium(message)
 
 @bot.on_message(filters.command("stats") & filters.private)
 @admin_only
@@ -1153,83 +1351,56 @@ async def photo_handler(client, message):
         await message.reply("✅ Thumbnail saved!")
 
 
-@bot.on_callback_query()
-async def callback_handler(client, query):
+async def handle_download_controls(query):
+    """Pause / resume / stop an active download."""
     data = query.data
     user_id = query.from_user.id
+    try:
+        _, action, job_id = data.split(":", 2)
+        job = active_downloads.get(job_id)
+        if not job or job["user_id"] != user_id:
+            await query.answer("This download is no longer active.", show_alert=True)
+            return
+        if action == "p":
+            job["paused"] = True
+            job["event"].clear()
+            await query.message.edit_reply_markup(ui.download_controls(job_id, paused=True))
+            await query.answer("⏸ Download paused")
+        elif action == "r":
+            job["paused"] = False
+            job["event"].set()
+            await query.message.edit_reply_markup(ui.download_controls(job_id))
+            await query.answer("▶️ Download resumed")
+        elif action == "s":
+            job["cancelled"] = True
+            job["paused"] = False
+            job["event"].set()
+            task = job.get("task")
+            if task and not task.done():
+                task.cancel()
+            await query.answer("⛔ Stopping download...")
+    except Exception:
+        await query.answer("Could not control this download.", show_alert=True)
+
+
+@bot.on_callback_query()
+async def callback_handler(client, query):
+    """Route every button press straight to its action."""
+    data = query.data or ""
     if data.startswith("dl:"):
-        try:
-            _, action, job_id = data.split(":", 2)
-            job = active_downloads.get(job_id)
-            if not job or job["user_id"] != user_id:
-                await query.answer("This download is no longer active.", show_alert=True)
-                return
-            if action == "p":
-                job["paused"] = True
-                job["event"].clear()
-                await query.message.edit_reply_markup(download_controls(job_id, paused=True))
-                await query.answer("⏸ Download paused")
-            elif action == "r":
-                job["paused"] = False
-                job["event"].set()
-                await query.message.edit_reply_markup(download_controls(job_id))
-                await query.answer("▶️ Download resumed")
-            elif action == "s":
-                job["cancelled"] = True
-                job["paused"] = False
-                job["event"].set()
-                task = job.get("task")
-                if task and not task.done():
-                    task.cancel()
-                await query.answer("⛔ Stopping download...")
-        except Exception:
-            await query.answer("Could not control this download.", show_alert=True)
+        await handle_download_controls(query)
         return
-    if data == "close":
-        await query.message.delete()
-    elif data == "cmd_login":
-        await query.answer("Send /login")
-    elif data == "cmd_logout":
-        await query.answer("Send /logout")
-    elif data == "cmd_settings":
-        await query.answer("Send /settings")
-    elif data == "cmd_stats":
-        await query.answer("Send /mystats")
-    elif data == "cmd_premium":
-        await query.answer("Send /premium")
-    elif data == "cmd_refer":
-        await query.answer("Send /refer")
-    elif data == "cmd_help":
-        await query.answer("Send /help")
-    elif data == "cmd_feedback":
-        await query.answer("Send /feedback")
-    elif data == "cmd_language":
-        await query.answer("Send /language")
-    elif data == "toggle_notif":
-        new = await toggle_notifications(user_id)
-        await query.answer(f"Notifications: {'ON' if new else 'OFF'}")
-    elif data == "toggle_silent":
-        new = await toggle_silent(user_id)
-        await query.answer(f"Silent: {'ON' if new else 'OFF'}")
-    elif data == "reset_settings":
-        await reset_settings(user_id)
-        await query.answer("✅ Reset done!")
-    elif data.startswith("lang_"):
-        lang = data.split("_")[1]
-        await set_language(user_id, lang)
-        await query.answer(f"Language: {lang.upper()}")
-    elif data == "check_fsub":
-        fsub = await get_fsub_channel()
-        if fsub:
-            try:
-                member = await bot.get_chat_member(fsub, user_id)
-                if member.status not in ["left", "kicked"]:
-                    await query.message.delete()
-                    await query.answer("✅ Verified! Send your link.")
-                else:
-                    await query.answer("❌ Not joined!", show_alert=True)
-            except:
-                await query.answer("❌ Please join!", show_alert=True)
+    handler = CALLBACK_ACTIONS.get(data)
+    if handler is None:
+        await query.answer(ui.stale_button_text(), show_alert=True)
+        return
+    try:
+        await handler(client, query)
+    except Exception as e:
+        try:
+            await query.answer(f"⚠️ Error: {e}", show_alert=True)
+        except Exception:
+            pass
 
 
 @bot.on_message(filters.text & filters.private & ~filters.command([
@@ -1259,14 +1430,9 @@ async def text_handler(client, message):
             await message.reply(f"✅ Caption set!\n\n`{text}`")
             return
         elif action == "feedback":
-            await add_feedback(user_id, text)
             del pending_action[user_id]
-            if OWNER_ID:
-                try:
-                    await bot.send_message(OWNER_ID, f"💬 Feedback from {user_id}:\n\n{text}")
-                except:
-                    pass
-            await message.reply("✅ Feedback sent!")
+            await save_feedback(user_id, text)
+            await message.reply(ui.feedback_saved_text(), reply_markup=ui.back_keyboard())
             return
 
     if user_id in login_pending:
@@ -1426,7 +1592,7 @@ async def text_handler(client, message):
         premium = await is_premium(user_id)
         max_range = 1000 if premium else 20
         if total > max_range:
-            await message.reply(f"⚠️ Range too large!\n🆓 Free: 20\n💎 Premium: 1000")
+            await message.reply("⚠️ Range too large!\n🆓 Free: 20\n💎 Premium: 1000")
             return
         if not premium:
             allowed, current = await check_daily_limit(user_id, 10)
@@ -1474,7 +1640,7 @@ async def text_handler(client, message):
     if not premium:
         allowed, current = await check_daily_limit(user_id, 10)
         if not allowed:
-            await message.reply(f"⛔ **Daily limit!**\n\n🆓 Free: 10/day\n💎 Premium: Unlimited")
+            await message.reply("⛔ **Daily limit!**\n\n🆓 Free: 10/day\n💎 Premium: Unlimited")
             return
 
     if is_private:
@@ -1511,6 +1677,7 @@ if __name__ == "__main__":
     os.makedirs("downloads", exist_ok=True)
     Thread(target=run_web, daemon=True).start()
     print("✅ Flask started")
+    print(f"🎨 Inline button styles: {ui.style_support_label()}")
     print("✅ Bot starting...")
     bot.run()
     
