@@ -39,6 +39,8 @@ async def add_user(user_id, name, username=None):
             "last_active": datetime.now(),
             "referred_by": None,
             "referral_count": 0,
+            "points": 0,
+            "premium_source": None,
             "notifications": True,
             "silent_mode": False,
             "favorites": []
@@ -99,11 +101,11 @@ async def is_premium(user_id):
     return True
 
 
-async def add_premium(user_id, days=30):
+async def add_premium(user_id, days=30, source="manual"):
     expiry = datetime.now() + timedelta(days=days)
     await users_col.update_one(
         {"user_id": user_id},
-        {"$set": {"is_premium": True, "premium_expiry": expiry}}
+        {"$set": {"is_premium": True, "premium_source": source, "premium_expiry": expiry}}
     )
 
 
@@ -450,3 +452,62 @@ async def test_connection():
         print(f"❌ MongoDB Failed: {e}")
         return False
     
+
+
+async def get_points(user_id):
+    user = await get_user(user_id)
+    return int((user or {}).get("points", 0))
+
+
+async def award_referral(referrer_id, new_user_id, points=10):
+    """Award once, only for a distinct user with no existing referrer."""
+    if int(referrer_id) == int(new_user_id):
+        return False
+    result = await users_col.update_one(
+        {"user_id": new_user_id, "referred_by": None},
+        {"$set": {"referred_by": referrer_id}},
+    )
+    if result.modified_count:
+        await users_col.update_one(
+            {"user_id": referrer_id},
+            {"$inc": {"referral_count": 1, "points": points}},
+        )
+        return True
+    return False
+
+
+async def redeem_points(user_id, points=100, days=30):
+    """Atomically spend points and grant time-limited redeem premium."""
+    user = await users_col.find_one_and_update(
+        {"user_id": user_id, "points": {"$gte": points}},
+        {"$inc": {"points": -points}, "$set": {
+            "is_premium": True, "premium_source": "redeem",
+            "premium_expiry": datetime.now() + timedelta(days=days),
+        }},
+        return_document=True,
+    )
+    return user is not None
+
+
+async def set_qr(file_id):
+    await config_col.update_one({"type": "payment_qr"}, {"$set": {"file_id": file_id}}, upsert=True)
+
+
+async def get_qr():
+    row = await config_col.find_one({"type": "payment_qr"})
+    return row.get("file_id") if row else None
+
+
+async def delete_qr():
+    await config_col.delete_one({"type": "payment_qr"})
+
+
+async def add_payment(user_id, proof, note=None):
+    return await db["payments"].insert_one({"user_id": user_id, "proof": proof, "note": note, "date": datetime.now()})
+
+
+async def get_payments():
+    rows = []
+    async for row in db["payments"].find({}).sort("date", -1):
+        rows.append(row)
+    return rows

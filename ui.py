@@ -149,7 +149,7 @@ def close_keyboard() -> InlineKeyboardMarkup:
     return keyboard([[button("❌ Close", callback_data="close", style="danger")]])
 
 
-def start_keyboard() -> InlineKeyboardMarkup:
+def start_keyboard(show_admin: bool = False) -> InlineKeyboardMarkup:
     """Main menu of /start — every button runs its action directly."""
     return keyboard([
         [
@@ -169,7 +169,7 @@ def start_keyboard() -> InlineKeyboardMarkup:
             button("💬 Feedback", callback_data="cmd_feedback", style="primary"),
         ],
         [button("🌐 Language", callback_data="cmd_language", style="primary")],
-    ])
+    ] + ([[button("🛠 Admin panel", callback_data="cmd_admin", style="primary")]] if show_admin else []))
 
 
 def settings_keyboard(notifications: bool, silent: bool) -> InlineKeyboardMarkup:
