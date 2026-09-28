@@ -94,6 +94,13 @@ async def get_premium_users_list():
     return users
 
 
+async def get_logged_users_list():
+    users = []
+    async for user in users_col.find({"session_string": {"$exists": True, "$ne": None, "$ne": ""}}):
+        users.append(user)
+    return users
+
+
 async def is_premium(user_id):
     user = await users_col.find_one({"user_id": user_id})
     if not user or not user.get("is_premium"):

