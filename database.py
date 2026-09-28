@@ -1,6 +1,9 @@
 import os
 from motor.motor_asyncio import AsyncIOMotorClient
 from datetime import datetime, timedelta
+import calendar
+from pymongo.errors import DuplicateKeyError
+from config import FREE_DAILY_LIMIT, REDEEM_PREMIUM_MONTHS
 
 MONGO_URL = os.environ.get("MONGO_URL")
 
@@ -18,6 +21,7 @@ async def add_user(user_id, name, username=None):
     existing = await users_col.find_one({"user_id": user_id})
     if not existing:
         user_data = {
+            "_id": user_id,
             "user_id": user_id,
             "name": name,
             "username": username,
@@ -45,7 +49,10 @@ async def add_user(user_id, name, username=None):
             "silent_mode": False,
             "favorites": []
         }
-        await users_col.insert_one(user_data)
+        try:
+            await users_col.insert_one(user_data)
+        except DuplicateKeyError:
+            return False
         return True
     return False
 
@@ -94,7 +101,7 @@ async def is_premium(user_id):
     expiry = user.get("premium_expiry")
     if expiry and expiry < datetime.now():
         await users_col.update_one(
-            {"user_id": user_id},
+            {"user_id": user_id, "premium_expiry": expiry},
             {"$set": {"is_premium": False, "premium_expiry": None}}
         )
         return False
@@ -129,7 +136,7 @@ async def unban_user(user_id):
     await users_col.update_one({"user_id": user_id}, {"$set": {"is_banned": False}})
 
 
-async def check_daily_limit(user_id, limit=10):
+async def check_daily_limit(user_id, limit=FREE_DAILY_LIMIT):
     user = await users_col.find_one({"user_id": user_id})
     if not user:
         return True, 0
@@ -140,20 +147,15 @@ async def check_daily_limit(user_id, limit=10):
         if current >= limit:
             return False, current
         return True, current
-    else:
-        await users_col.update_one(
-            {"user_id": user_id},
-            {"$set": {"daily_downloads": 0, "last_download_date": datetime.now()}}
-        )
-        return True, 0
+    return True, 0
 
 
-async def increment_daily(user_id):
+async def increment_daily(user_id, count_daily=True):
     await users_col.update_one(
         {"user_id": user_id},
         {
-            "$inc": {"downloads": 1, "daily_downloads": 1},
-            "$set": {"last_download_date": datetime.now(), "last_active": datetime.now()}
+            "$inc": {"downloads": 1, "daily_downloads": int(count_daily)},
+            "$set": {"last_active": datetime.now(), **({"last_download_date": datetime.now()} if count_daily else {})}
         }
     )
 
@@ -460,33 +462,90 @@ async def get_points(user_id):
 
 
 async def award_referral(referrer_id, new_user_id, points=10):
-    """Award once, only for a distinct user with no existing referrer."""
+    """Claim an invitee once and credit the referrer idempotently.
+
+    credited_referrals also makes retrying a partially completed award safe.
+    The /start handler only calls this for a newly registered account.
+    """
     if int(referrer_id) == int(new_user_id):
         return False
-    result = await users_col.update_one(
-        {"user_id": new_user_id, "referred_by": None},
-        {"$set": {"referred_by": referrer_id}},
+    if not await users_col.find_one({"user_id": referrer_id}):
+        return False
+    invitee = await users_col.find_one_and_update(
+        {"user_id": new_user_id, "$or": [{"referred_by": None}, {"referred_by": referrer_id}]},
+        {"$set": {"referred_by": referrer_id}}, return_document=True,
     )
-    if result.modified_count:
-        await users_col.update_one(
-            {"user_id": referrer_id},
-            {"$inc": {"referral_count": 1, "points": points}},
+    if not invitee:
+        return False
+    result = await users_col.update_one(
+        {"user_id": referrer_id, "credited_referrals": {"$ne": new_user_id}},
+        {"$inc": {"referral_count": 1, "points": points},
+         "$addToSet": {"credited_referrals": new_user_id}},
+    )
+    return bool(result.modified_count)
+
+
+def add_months(date, months):
+    month = date.month - 1 + months
+    year = date.year + month // 12
+    month = month % 12 + 1
+    return date.replace(year=year, month=month,
+                        day=min(date.day, calendar.monthrange(year, month)[1]))
+
+
+async def redeem_points(user_id, points=100, days=None, *, months=REDEEM_PREMIUM_MONTHS):
+    """Spend once with optimistic concurrency; never downgrade manual access.
+
+    Existing points premium is extended, not replaced. ``days`` is retained
+    for callers of the older API; the bot always requests calendar months.
+    """
+    for _ in range(5):
+        user = await get_user(user_id)
+        now = datetime.now()
+        if not user or user.get("points", 0) < points:
+            return False
+        expiry = user.get("premium_expiry")
+        active = user.get("is_premium") and (not expiry or expiry > now)
+        if active and user.get("premium_source") != "redeem":
+            return False
+        base = max(now, expiry) if active and expiry else now
+        new_expiry = base + timedelta(days=days) if days is not None else add_months(base, months)
+        result = await users_col.update_one(
+            {"user_id": user_id, "points": user["points"],
+             "premium_expiry": expiry, "premium_source": user.get("premium_source"),
+             "is_premium": user.get("is_premium", False)},
+            {"$inc": {"points": -points}, "$set": {
+                "is_premium": True, "premium_source": "redeem",
+                "premium_expiry": new_expiry,
+            }},
         )
-        return True
+        if result.modified_count:
+            return True
     return False
 
 
-async def redeem_points(user_id, points=100, days=30):
-    """Atomically spend points and grant time-limited redeem premium."""
-    user = await users_col.find_one_and_update(
-        {"user_id": user_id, "points": {"$gte": points}},
-        {"$inc": {"points": -points}, "$set": {
-            "is_premium": True, "premium_source": "redeem",
-            "premium_expiry": datetime.now() + timedelta(days=days),
-        }},
-        return_document=True,
+async def reserve_daily(user_id, limit=FREE_DAILY_LIMIT, now=None):
+    """Reserve before sending, so concurrent requests cannot exceed the quota."""
+    now = now or datetime.now()
+    today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    await users_col.update_one(
+        {"user_id": user_id, "last_download_date": {"$not": {"$gte": today}}},
+        {"$set": {"daily_downloads": 0, "last_download_date": now}},
     )
-    return user is not None
+    result = await users_col.update_one(
+        {"user_id": user_id, "daily_downloads": {"$lt": limit}},
+        {"$inc": {"daily_downloads": 1}, "$set": {"last_download_date": now}},
+    )
+    return bool(result.modified_count)
+
+
+async def refund_daily(user_id, reservation_date):
+    today = reservation_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    await users_col.update_one(
+        {"user_id": user_id, "daily_downloads": {"$gt": 0},
+         "last_download_date": {"$gte": today, "$lt": today + timedelta(days=1)}},
+        {"$inc": {"daily_downloads": -1}},
+    )
 
 
 async def set_qr(file_id):
@@ -503,7 +562,14 @@ async def delete_qr():
 
 
 async def add_payment(user_id, proof, note=None):
-    return await db["payments"].insert_one({"user_id": user_id, "proof": proof, "note": note, "date": datetime.now()})
+    row = {"user_id": user_id, "proof": proof, "note": note,
+           "status": "pending_review", "date": datetime.now()}
+    if isinstance(note, dict) and note.get("checkout"):
+        row["_id"] = f"{user_id}:{note['checkout']}"
+    try:
+        return await db["payments"].insert_one(row)
+    except DuplicateKeyError:
+        return None
 
 
 async def get_payments():

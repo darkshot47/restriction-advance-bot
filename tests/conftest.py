@@ -62,6 +62,9 @@ class FakeMessage:
         self.replies.append({"text": text, "reply_markup": reply_markup})
         return self
 
+    async def edit(self, text, reply_markup=None, **kwargs):
+        return await self.edit_text(text, reply_markup, **kwargs)
+
     async def edit_text(self, text, reply_markup=None, **kwargs):
         self.edits.append({"text": text, "reply_markup": reply_markup})
         return self
@@ -199,10 +202,10 @@ class FakeDB:
         user = self.users.get(user_id) or {}
         return (user.get("daily_downloads", 0) < limit, user.get("daily_downloads", 0))
 
-    async def increment_daily(self, user_id):
+    async def increment_daily(self, user_id, count_daily=True):
         user = self.users.get(user_id)
         if user:
-            user["daily_downloads"] = user.get("daily_downloads", 0) + 1
+            user["daily_downloads"] = user.get("daily_downloads", 0) + int(count_daily)
             user["downloads"] = user.get("downloads", 0) + 1
 
     # sessions --------------------------------------------------------------
@@ -280,15 +283,26 @@ class FakeDB:
         ref["points"] += points
         return True
 
-    async def redeem_points(self, user_id, points=100, days=30):
+    async def redeem_points(self, user_id, points=100, days=None, *, months=30):
         user = self.users.get(user_id)
-        if not user or user.get("points", 0) < points:
+        if not user or user.get("points", 0) < points or (user.get("is_premium") and user.get("premium_source") != "redeem"):
             return False
         user["points"] -= points
         user["is_premium"] = True
         user["premium_source"] = "redeem"
-        user["premium_expiry"] = _dt.datetime.now() + _dt.timedelta(days=days)
+        from database import add_months
+        user["premium_expiry"] = (_dt.datetime.now() + _dt.timedelta(days=days) if days is not None
+                                  else add_months(_dt.datetime.now(), months))
         return True
+
+    async def reserve_daily(self, user_id, limit=3, now=None):
+        allowed, _ = await self.check_daily_limit(user_id, limit)
+        if allowed:
+            self.users[user_id]["daily_downloads"] += 1
+        return allowed
+
+    async def refund_daily(self, user_id, reservation_date):
+        self.users[user_id]["daily_downloads"] -= 1
 
     async def set_qr(self, file_id): self.qr = file_id
     async def get_qr(self): return getattr(self, "qr", None)
@@ -296,6 +310,7 @@ class FakeDB:
     async def add_payment(self, user_id, proof, note=None):
         self.payments = getattr(self, "payments", [])
         self.payments.append({"user_id": user_id, "proof": proof, "note": note})
+        return True
     async def get_payments(self): return getattr(self, "payments", [])
 
     # config ---------------------------------------------------------------
@@ -342,6 +357,7 @@ DB_NAMES = [
     "get_admins_list", "clear_all_logs", "get_bot_stats", "add_premium",
     "remove_premium", "ban_user", "unban_user", "get_points", "award_referral",
     "redeem_points", "set_qr", "get_qr", "delete_qr", "add_payment", "get_payments",
+    "reserve_daily", "refund_daily",
 ]
 
 
@@ -380,6 +396,7 @@ def clean_state(monkeypatch):
     monkeypatch.setattr(main, "pending_action", {})
     monkeypatch.setattr(main, "admin_pending", {})
     monkeypatch.setattr(main, "active_downloads", {})
+    monkeypatch.setattr(main, "payment_pending", {})
     yield
 
 
@@ -393,6 +410,9 @@ class FakeBot:
     async def send_message(self, chat_id, text, **kwargs):
         self.sent.append({"chat_id": chat_id, "text": text})
         return None
+
+    async def send_photo(self, chat_id, photo, **kwargs):
+        self.sent.append({"chat_id": chat_id, "photo": photo, **kwargs})
 
     async def get_chat_member(self, chat_id, user_id):
         from types import SimpleNamespace
