@@ -19,5 +19,5 @@ PREMIUM_BENEFITS = (
     "Up to 2 GB files",
     "Priority support",
 )
-REDEEM_LIMITATION = "Points premium covers public channels only. Private-channel links do not work with redemption points. Only premium manually granted by the owner unlocks private access."
+REDEEM_LIMITATION = "This bot extracts restricted content from public channels only."
 RUPEE = "₹"

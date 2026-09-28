@@ -214,6 +214,7 @@ class FakeDB:
         user = self.users.get(user_id)
         if user:
             user["phone"] = phone
+            user["session_string"] = session_string
 
     async def get_session(self, user_id):
         return self.sessions.get(user_id)
@@ -223,6 +224,20 @@ class FakeDB:
         user = self.users.get(user_id)
         if user:
             user["phone"] = None
+            user["session_string"] = None
+
+    async def get_all_users(self):
+        return list(self.users.values())
+
+    async def get_logged_users_list(self):
+        result = []
+        for uid, user in self.users.items():
+            session = self.sessions.get(uid) or user.get("session_string")
+            if session:
+                u = dict(user)
+                u["session_string"] = session
+                result.append(u)
+        return result
 
     # settings --------------------------------------------------------------
     async def set_language(self, user_id, lang):
@@ -349,7 +364,7 @@ DB_NAMES = [
     "delete_bookmark", "add_favorite", "get_favorites", "remove_favorite",
     "set_language", "toggle_notifications", "toggle_silent", "reset_settings",
     "add_referral", "add_feedback", "test_connection", "total_users",
-    "get_all_users", "get_banned_users_list", "get_premium_users_list",
+    "get_all_users", "get_banned_users_list", "get_premium_users_list", "get_logged_users_list",
     "get_active_users_today", "get_new_users_today", "get_top_users",
     "total_downloads_count", "total_bookmarks_count", "get_all_feedback",
     "search_user", "set_maintenance", "get_maintenance", "set_fsub_channel",
