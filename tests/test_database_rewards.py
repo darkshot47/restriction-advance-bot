@@ -38,7 +38,7 @@ async def test_referrals_are_real_distinct_once_and_ten_points(store):
 
 
 @pytest.mark.asyncio
-async def test_threshold_and_thirty_calendar_months(store):
+async def test_threshold_and_one_calendar_month(store):
     await database.add_user(10, "Referrer")
     for uid in range(20, 29):
         await database.add_user(uid, "Friend")
@@ -51,7 +51,7 @@ async def test_threshold_and_thirty_calendar_months(store):
     assert results.count(True) == 1
     user = await database.get_user(10)
     assert user["points"] == 0 and user["premium_source"] == "redeem"
-    assert database.add_months(before, 30) - timedelta(milliseconds=1) <= user["premium_expiry"] <= database.add_months(datetime.now(), 30)
+    assert database.add_months(before, 1) - timedelta(milliseconds=1) <= user["premium_expiry"] <= database.add_months(datetime.now(), 1)
 
 
 @pytest.mark.asyncio
@@ -61,7 +61,7 @@ async def test_redemption_extends_points_but_never_downgrades_manual(store):
     assert await database.redeem_points(10)
     first = (await database.get_user(10))["premium_expiry"]
     assert await database.redeem_points(10)
-    assert (await database.get_user(10))["premium_expiry"] == database.add_months(first, 30)
+    assert (await database.get_user(10))["premium_expiry"] == database.add_months(first, 1)
     await database.add_premium(10, 30)
     assert not await database.redeem_points(10)
     user = await database.get_user(10)

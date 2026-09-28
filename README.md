@@ -11,11 +11,11 @@ A Telegram bot for saving messages from public channels and, **only for owner-gr
 | Owner-granted manual premium | Unlimited | Public + authorized private | None |
 
 - Each **new user** joining through `/refer`'s personal link awards the referrer **10 points**. Self-referrals, nonexistent referrers and repeat starts do not award extra points.
-- `/redeem` and the inline redeem button spend **100 points** for **30 calendar months** of public-only premium, immediately. This is intentionally **30 months, not 30 days**.
+- `/redeem` and the inline redeem button spend **100 points** for **1 calendar month** of public-only premium, immediately.
 - Repeat redemptions extend existing points premium. Redemption cannot overwrite active owner-granted premium or downgrade private access.
 - Private-link restrictions are checked before single, range or bulk work begins and at the extraction boundary. Logging in alone does not unlock private links.
 - Free daily slots are reserved atomically before extraction, including concurrent requests, and refunded on failure/cancellation. Days reset at server midnight; deploy in **UTC** for a UTC daily quota.
-- Free media retain the original caption, with attribution underneath. Premium custom-caption commands remain available; free extractions do not replace the source caption. If Telegram's 1,024-character caption limit leaves no room, the original stays on the media and attribution follows in a separate message. Sticker/video-note attribution is also sent separately because these media cannot have captions. Long text is split without truncation.
+- Free media are copied server-side first, then the original caption is edited to add attribution underneath. Premium custom-caption commands remain available; free extractions do not replace the source caption. If Telegram's 1,024-character caption limit leaves no room, the original stays on the media and attribution follows in a separate message. Sticker/video-note attribution is also sent separately because these media cannot have captions. Long text is split without truncation.
 
 ## Premium purchase flow
 
