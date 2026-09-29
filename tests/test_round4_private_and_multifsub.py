@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock
 import pytest
 from pyrogram import raw
 from pyrogram.enums import ChatMemberStatus
-from pyrogram.errors import ChatAdminRequired
+from pyrogram.errors import ChatAdminRequired, FloodWait
 from pyrogram.types import ChatAdministratorRights, ChatMember
 
 import main
@@ -249,6 +249,37 @@ async def test_join_request_state_swallows_chat_admin_required(db, fake_bot):
 
     fake_bot.get_chat_join_requests = boom
     assert await main.join_request_state(chat_id, user_id) == "none"
+
+
+@pytest.mark.asyncio
+async def test_join_request_state_sleeps_through_a_floodwait(db, fake_bot, monkeypatch):
+    """A FloodWait from the approve-list scan is paused, never raised."""
+    chat_id, user_id = -100555, 1001
+    fake_bot.not_members.add((chat_id, user_id))
+    calls = {"n": 0}
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    async def flaky(chat_id, limit=0, query=""):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise FloodWait(7)
+        yield make_joiner(user_id, pending=True)
+
+    fake_bot.get_chat_join_requests = flaky
+    real_guard = main.floodwait_guard
+
+    async def recording_guard(call, *args, **kwargs):
+        kwargs.setdefault("sleeper", fake_sleep)
+        return await real_guard(call, *args, **kwargs)
+
+    monkeypatch.setattr(main, "floodwait_guard", recording_guard)
+
+    assert await main.join_request_state(chat_id, user_id) == "pending"
+    # the guard slept for at least the requested 7 s and then retried once
+    assert slept and slept[0] >= 7 and calls["n"] == 2
 
 
 @pytest.mark.asyncio
@@ -603,6 +634,27 @@ async def test_fsubcheck_toggles_auto_approve(db):
 
 
 @pytest.mark.asyncio
+async def test_setfsub_also_requires_groups(db, fake_bot):
+    fake_bot.members[FAKE_BOT_ID] = make_member(ChatMemberStatus.ADMINISTRATOR,
+                                                can_post_messages=True)
+    fake_bot.chats[-100558] = SimpleNamespace(id=-100558, title="Chat Group",
+                                              username="group", type="supergroup")
+    message = FakeMessage(text="/setfsub -100558", user=FakeUser(main.OWNER_ID))
+    await main.setfsub_handler(None, message)
+    label = FakeMessage(text="Join Chat", user=FakeUser(main.OWNER_ID))
+    await main.text_handler(None, label)
+
+    items = await db.get_fsub_list()
+    assert len(items) == 1 and items[0]["kind"] == "group"
+    assert items[0]["chat_id"] == -100558
+    assert items[0]["username"] == "group"
+    screen = FakeMessage(user=FakeUser(1001))
+    fake_bot.not_members.add((-100558, 1001))
+    await main.check_access(screen, enforce_fsub=True)
+    assert "👥" in screen.shown_text
+
+
+@pytest.mark.asyncio
 async def test_setfsub_is_repeatable_without_a_limit(db, fake_bot):
     fake_bot.members[FAKE_BOT_ID] = make_member(ChatMemberStatus.ADMINISTRATOR,
                                                 can_post_messages=True)
@@ -789,6 +841,30 @@ async def test_rendered_fsub_and_setchat_screens_keep_links_in_buttons(db, fake_
     wizard = FakeMessage(text="/setchat @mychannel", user=FakeUser(1001))
     await main.setchat_handler(None, wizard)
     assert "t.me/" not in wizard.shown_text and "http" not in wizard.shown_text
+
+
+# --------------------------------------------------------------------------- #
+#  TASK 6 — callback_data is plain ASCII
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("markup", [
+    ui.fsub_keyboard([fsub_item(), fsub_item(chat_id=-100556, title="Two", order=1)]),
+    ui.fsub_list_keyboard([fsub_item(), fsub_item(chat_id=-100556, title="Two", order=1)]),
+    ui.fsub_request_keyboard(1001, -100555),
+    ui.fsub_delete_all_keyboard(),
+    ui.fsub_keyboard([fsub_item(button_text="📢 जुड़ें ✅ 𝟙𝟚𝟛")]),
+])
+def test_every_callback_payload_is_plain_ascii(markup):
+    payloads = [b.callback_data for b in flat(markup) if b.callback_data]
+    assert payloads, "keyboard without any callback button"
+    for payload in payloads:
+        assert payload.isascii(), payload
+    # the documented vocabulary only
+    allowed = ("fsub:check", "fsub_page:", "fsub_list_page:", "fsub_del:",
+               "fsub_rename:", "fsub_del_all", "fsub_del_all_confirm",
+               "fsub:approve:", "fsub:decline:", "home", "cancel_action")
+    for payload in payloads:
+        assert payload.startswith(allowed), payload
 
 
 # --------------------------------------------------------------------------- #
