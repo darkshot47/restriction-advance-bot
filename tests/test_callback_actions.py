@@ -43,7 +43,9 @@ def test_every_menu_button_is_wired_to_a_handler():
         ui.premium_keyboard(False, owner_id=1),
         ui.refer_keyboard("https://t.me/TestRestrictBot?start=1"),
         ui.help_keyboard(),
-        ui.fsub_keyboard("@channel"),
+        ui.fsub_keyboard([{"chat_id": -1001, "title": "Chan", "username": "chan",
+                           "invite_link": None, "button_text": "✅ Join Chan",
+                           "kind": "channel", "auto_approve": False, "order": 0}]),
         ui.back_keyboard(),
         ui.close_keyboard(),
     ]

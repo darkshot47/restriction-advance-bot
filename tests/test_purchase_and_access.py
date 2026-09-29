@@ -8,7 +8,7 @@ from pyrogram.enums import ChatMemberStatus
 
 import main
 import ui
-from conftest import FakeMessage, FakeUser, sc
+from conftest import FakeMessage, FakeUser, make_member, sc
 
 
 @pytest.mark.asyncio
@@ -202,8 +202,10 @@ async def test_manual_and_points_premium_have_no_daily_limit(db, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_membership_is_checked_again_on_each_extraction(db, fake_bot, monkeypatch):
-    db.fsub = "@channel"
-    fake_bot.members[1001] = SimpleNamespace(status=ChatMemberStatus.LEFT)
+    db.fsub_items = [{"chat_id": -100555, "title": "My Channel", "username": "mychannel",
+                      "invite_link": None, "button_text": "✅ Join My Channel",
+                      "kind": "channel", "auto_approve": False, "order": 0}]
+    fake_bot.members[1001] = make_member(ChatMemberStatus.LEFT)
     fetch = AsyncMock()
     monkeypatch.setattr(main, "_fetch_and_send", fetch)
     message = FakeMessage()

@@ -46,25 +46,62 @@ All existing slash commands are retained. Inline buttons and commands both work.
 - Premium & payments (add/remove premium, premium list, payment review, QR add/delete)
 - Community (broadcast, direct message, ban/unban, ban list, feedback)
 - **Channel dump** (`/setchat`, `/delchat`)
-- Administration (admins, force subscription, maintenance, logs, help)
+- **Force Sub** (`/setfsub`, `/fsublist`, `/delfsub`, `/fsublabel`, `/fsubcheck`)
+- Administration (admins, maintenance, logs, help)
 
 Every command in the panel also appears in the `/admins` list, and every panel button runs the same handler as its slash command. Parameterized actions prompt for details with examples. Authorization is checked for callbacks as well as typed commands; **only the owner** can run `/addpremium`. Regular admins cannot gain private-access grant permission through inline prompts.
 
 ## Channel dump (`/setchat`)
 
-`/setchat` (or **📡 Set channel** in the main menu / the panel) starts a three-step wizard:
+`/setchat` (or **📡 Set channel** in the main menu / the panel) starts a three-step wizard. Channels **and** supergroups/groups are accepted, and every chat reference form is understood:
 
-1. Send the channel as a link, `@username` or numeric ID — the wizard also accepts the command posted **inside** the channel itself.
-2. Tap **🔍 Check Admin Status**: the bot verifies it is an administrator there *and* has the **Post Messages** permission.
-3. Send one sample message link so the bot can prove it can read the channel; the link is then stored.
+| Reference | Example |
+| --- | --- |
+| numeric id | `-1001234567890` |
+| public username | `@mychannel` |
+| public link | `t.me/mychannel`, `t.me/mychannel/15` |
+| private link by id | `t.me/c/1234567890/15` |
+| private invite link | `t.me/+AbCdEf`, `t.me/joinchat/AbCdEf` |
+
+1. Send the chat in any of those forms — the wizard also accepts the command posted **inside** the channel or group itself.
+2. Tap **🔍 Check Admin Status**: the bot verifies it is an administrator there *and* has the **Post Messages** permission. Rights are read from `ChatMember.privileges.can_post_messages` (Kurigram `ChatMember` has no `can_post_messages` of its own), and every check logs a `[SETCHAT]` line with the raw status and rights. An expired or invalid invite link, or a chat the bot cannot see, is reported with a friendly reason instead of a crash.
+3. Send one sample message link — or, for a private channel where no public link exists, just the **bare message number** — so the bot can prove it can read the chat; the details are then stored.
+
+For an approval-only chat (invite requests instead of instant joins) the bot sends a join request, asks the owner of that chat to approve it, stores nothing and keeps the wizard alive so **🔍 Check Admin Status** can be pressed again after the approval.
 
 After that, any Telegram link posted in that channel is extracted straight into the channel, following the same public/premium-private rules as private chat. Requests are serialised per channel with a **3 s cooldown** and every Telegram `FloodWait` becomes a safe pause instead of a crash. In channel mode a "Message not found" notice deletes itself after **5 seconds** (`config.CHANNEL_CLEANUP_SECONDS`), and the bot ignores its own posts so it can never loop on its own status messages.
+
+## Force subscription (multi-channel, private chats, join requests)
+
+`/setfsub` takes a channel, supergroup or **private** chat in any of the reference forms listed above, and can be repeated as often as needed — there is no limit on the number of required chats. The wizard:
+
+1. resolves the reference (joining a private chat when that is allowed, or sending a join request and waiting for approval),
+2. verifies the bot is an administrator with posting rights there (the same `describe_channel_admin` check the `/setchat` wizard uses),
+3. asks what the **Join** button should say, then saves the entry at the end of the list.
+
+The custom label accepts 1–24 characters on a single line — emojis and digits welcome, links, `t.me/` references and `@`-mentions are not — and falls back to the default **✅ Join <title>** when the owner sends `-` or nothing. Labels are rendered through `ui.button()`, so the mobile budget (≤28 visible characters, ≤2 buttons per row) is never exceeded, and `callback_data` stays plain ASCII.
+
+Owner commands (all also on the **📢 Force Sub** panel page and in `/admins`):
+
+| Command | Effect |
+| --- | --- |
+| `/setfsub <link\|@user\|id>` | resolve a chat, ask for the button label, append it to the list |
+| `/fsublist` | numbered list with each entry's title, button label, id and **✏️ Rename** / **🗑 Delete** |
+| `/delfsub <number>` | remove one entry, `/delfsub all` (or the button) asks first, then removes everything |
+| `/fsublabel <number> <text>` | rename one entry's Join button, `/fsublabel verify <text>` renames the global **✅ I Joined** button |
+| `/fsubcheck <number\|all> on\|off` | toggle automatic approval of join requests for that entry |
+
+The user-facing screen lists the required chats by title only and offers one **Join** button per entry plus the **✅ I Joined** button; more than `config.FSUB_ITEMS_PER_PAGE` entries paginate with Previous / Next. Pressing **✅ I Joined** re-checks every entry and only clears the screen once all of them are satisfied; a pending or approved join request counts as joined, and an entry with auto-approve enabled has its pending request approved on the spot.
+
+**Join requests:** an incoming `@bot.on_chat_join_request` for a required chat is stored (`chat_id`, `user_id`, `date`, `status`). With auto-approve on, the request is approved and the user is told immediately. Otherwise the owner is notified with the joiner's fresh name and **✅ Approve** / **❌ Decline** buttons that only respond to `OWNER_ID`, exactly like the payment review actions.
+
+Force subscription is owner-granted and never applies to the owner. Telegram errors during a membership check are logged and fail **open** — a transient network problem never locks a valid user out — and the bot still needs to be an administrator of every required chat for the checks to be reliable.
+
+**Links never leak into copy:** invite links and usernames live inside the Join buttons (`url=`, or `copy_text`) only. No screen, list or confirmation ever prints a link back.
 
 ## Feedback
 
 `/feedback` accepts plain text, emojis and `@mentions`. Any URL or link-like text (`https://…`, `www.…`, `t.me/…`, `telegram.me/…`, `joinchat`, bare domains, e-mails) is rejected with a warning and the session stays open so the user can retry — nothing is stored and the owner is not notified.
-
-`/setfsub @channel` enables force subscription; `/delfsub` disables it. Make the bot an administrator of the required channel so membership checks work reliably. The join screen explains in English that users can use the bot only while they remain joined; membership is rechecked for each extraction.
 
 ## Presentation
 
@@ -90,4 +127,6 @@ Do not commit credentials or Telegram session files. Only extract content you ar
 .venv/bin/python -m compileall -q main.py database.py ui.py config.py tests
 ```
 
-Tests cover command/button compatibility, checkout sequencing, proof metadata and delivery failures, cancellation, private-access restrictions, attribution, concurrency-safe quotas, calendar-month redemption and actual database functions against a Mongo mock. They also cover the round-three requirements: the small-caps engine and its protected regions (no rendered screen may leak plain ASCII copy outside links/commands), private-access and daily-limit screens with the dual button row, feedback link rejection, the `/addpremium` tier choice, the owner payment review actions, the `/setchat` wizard (admin check, sample verification, in-channel mode), channel-dump rate limiting/FloodWait handling and the five-second "Message not found" cleanup, every admin command being reachable from both `/admins` and the panel, and name/username re-sync so a rename shows up everywhere. They do **not** contact Telegram or a live MongoDB instance; verify QR rendering, proof delivery and membership checks with the deployed bot before accepting payments.
+Tests cover command/button compatibility, checkout sequencing, proof metadata and delivery failures, cancellation, private-access restrictions, attribution, concurrency-safe quotas, calendar-month redemption and actual database functions against a Mongo mock. They also cover the round-three requirements: the small-caps engine and its protected regions (no rendered screen may leak plain ASCII copy outside links/commands), private-access and daily-limit screens with the dual button row, feedback link rejection, the `/addpremium` tier choice, the owner payment review actions, the `/setchat` wizard (admin check, sample verification, in-channel mode), channel-dump rate limiting/FloodWait handling and the five-second "Message not found" cleanup, every admin command being reachable from both `/admins` and the panel, and name/username re-sync so a rename shows up everywhere.
+
+The newest suite covers the admin-rights fix and the multi force-sub epic: the posting-rights check is asserted against **real `ChatMember` / `ChatAdministratorRights` objects** (including a `hasattr` guard, because a plain fake previously hid that the attribute does not exist on `ChatMember`), the `/setchat` wizard is exercised end to end with a private invite link, an approval-only `InviteRequestSent`, an expired hash, a supergroup, in-channel mode and a bare message number as the sample, `join_request_state` is checked for all five outcomes, the **✅ I Joined** button is checked for member, pending-with-auto-approve and not-joined, the join-request handler is checked for storage, the auto-approve DM and the owner-only Approve / Decline buttons, the multi force-sub list is checked for labels, ordering, pagination at twelve entries and deletion, `check_access` is checked for multiple entries with a fail-open on `ChatAdminRequired`, no fsub/setchat screen may contain a link while its keyboard keeps every link inside `url` buttons, and the new commands are checked in the panel, `/admins`, the inline handler map and the command-exclusion list. They do **not** contact Telegram or a live MongoDB instance; verify QR rendering, proof delivery and membership checks with the deployed bot before accepting payments.

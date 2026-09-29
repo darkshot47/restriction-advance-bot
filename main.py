@@ -8,13 +8,15 @@ from types import SimpleNamespace
 from flask import Flask
 from threading import Thread
 from datetime import datetime
-from pyrogram import Client, filters
+from pyrogram import Client, filters, raw, utils
 from pyrogram.types import CallbackQuery
 from pyrogram.enums import ParseMode
 from urllib.parse import urlparse
 from pyrogram.errors import (
     SessionPasswordNeeded, PhoneCodeInvalid, PhoneNumberInvalid,
-    PasswordHashInvalid, FloodWait, ChannelPrivate, MessageNotModified  # noqa: F401
+    PasswordHashInvalid, FloodWait, ChannelPrivate, MessageNotModified,  # noqa: F401
+    InviteHashExpired, InviteHashInvalid, InviteSlugExpired, InviteRequestSent,
+    UserAlreadyParticipant, ChatAdminRequired, PeerIdInvalid, UserNotParticipant
 )
 
 import ui
@@ -22,7 +24,9 @@ from config import (FREE_DAILY_LIMIT, FREE_PRIVATE_LINKS, WATERMARK, REFER_POINT
                     REDEEM_POINTS, REDEEM_PREMIUM_DAYS, REDEEM_PREMIUM_MONTHS, PAYMENT_CONTACT,
                     PREMIUM_PLANS, PREMIUM_BENEFITS, REDEEM_LIMITATION, RUPEE,
                     PREMIUM_SOURCE_MANUAL, PREMIUM_SOURCE_PUBLIC,
-                    PURCHASE_PREMIUM_SOURCE, CHANNEL_CLEANUP_SECONDS, CHANNEL_EXTRACT_COOLDOWN)  # noqa: F401
+                    PURCHASE_PREMIUM_SOURCE, CHANNEL_CLEANUP_SECONDS, CHANNEL_EXTRACT_COOLDOWN,
+                    FSUB_MAX_BUTTON_CHARS, FSUB_ITEMS_PER_PAGE, FSUB_JOINER_SCAN_LIMIT,
+                    FSUB_VERIFY_LABEL, CHANNEL_TITLE_FALLBACK)  # noqa: F401
 from database import (
     add_user, get_user, is_premium, is_banned, check_daily_limit,
     increment_daily, save_session, get_session, delete_session,
@@ -37,7 +41,11 @@ from database import (
     get_active_users_today, get_new_users_today, get_top_users,
     total_downloads_count, total_bookmarks_count, get_all_feedback,
     search_user, set_maintenance, get_maintenance, set_fsub_channel,
-    get_fsub_channel, delete_fsub, add_admin, remove_admin, is_admin,
+    get_fsub_channel, delete_fsub, get_fsub_list, add_fsub_item,
+    remove_fsub_item, update_fsub_item, clear_fsub_list,
+    get_fsub_verify_label, set_fsub_verify_label,
+    record_join_request, set_join_request_status, get_join_request,
+    add_admin, remove_admin, is_admin,
     get_admins_list, clear_all_logs, get_bot_stats, add_premium,
     remove_premium, ban_user, unban_user, get_points, award_referral,
     redeem_points, set_qr, get_qr, delete_qr, add_payment, get_payments,
@@ -63,6 +71,8 @@ payment_pending = {}
 premium_tier_pending = {}
 #: user_id -> {"chat_id", "title", "username", "step"} for the /setchat wizard.
 setchat_pending = {}
+#: user_id -> wizard state of the /setfsub flow (owner adds a chat to the list).
+fsub_pending = {}
 #: chat_id -> asyncio.Lock() — one extraction at a time per dump channel.
 channel_locks = {}
 #: chat_id -> loop time of the last channel extraction (anti-ban rate limiting).
@@ -213,6 +223,93 @@ def joined_channel(member):
     status = getattr(member.status, "value", member.status)
     return status in {"member", "administrator", "owner", "creator"} or (
         status == "restricted" and bool(getattr(member, "is_member", False)))
+
+
+async def chat_membership_state(chat_id, user_id):
+    """Membership probe that distinguishes "not a member" from "unknown".
+
+    Returns ``("member"|"not_member"|"error", detail)``.  A network hiccup or a
+    permission problem must never be reported as "not a member", otherwise a
+    transient Telegram error would lock a perfectly fine user out.
+    """
+    try:
+        member = await floodwait_guard(bot.get_chat_member, chat_id, user_id)
+    except UserNotParticipant:
+        return "not_member", "user is not a participant"
+    except Exception as exc:
+        return "error", f"{type(exc).__name__}: {exc}"
+    if joined_channel(member):
+        return "member", ""
+    return "not_member", f"status={getattr(member, 'status', None)!r}"
+
+
+async def fetch_join_requests(chat_id, limit: int = FSUB_JOINER_SCAN_LIMIT):
+    """Every pending/approved joiner of *chat_id* (empty list when unsupported)."""
+    getter = getattr(bot, "get_chat_join_requests", None)
+    if getter is None:  # pragma: no cover - fork without the high-level helper
+        return await raw_join_request_importers(chat_id)
+    joiners = []
+    async for joiner in getter(chat_id, limit=limit):
+        joiners.append(joiner)
+    return joiners
+
+
+async def raw_join_request_importers(chat_id, limit: int = FSUB_JOINER_SCAN_LIMIT):
+    """Raw MTProto fallback for forks without ``get_chat_join_requests``.
+
+    Kept as documentation of the underlying call as well as a working path.
+    Returns joiner-shaped objects so callers need no special casing.
+    """
+    peer = await bot.resolve_peer(chat_id)
+    result = await bot.invoke(raw.functions.messages.GetChatInviteImporters(
+        peer=peer,
+        offset_date=0,
+        offset_user=raw.types.InputUser(user_id=0, access_hash=0),
+        limit=limit,
+        requested=True,
+    ))
+    joiners = []
+    for importer in getattr(result, "importers", None) or []:
+        raw_user = getattr(importer, "user_id", None)
+        user_id = getattr(raw_user, "user_id", None)
+        if user_id is None:
+            user_id = getattr(raw_user, "id", None)
+        joiners.append(SimpleNamespace(
+            user=SimpleNamespace(id=user_id),
+            pending=True,
+            date=getattr(importer, "date", None),
+        ))
+    return joiners
+
+
+async def join_request_state(chat_id, user_id, *, skip_membership: bool = False) -> str:
+    """``'member' | 'pending' | 'approved' | 'none'`` for a force-sub chat.
+
+    Membership wins.  Otherwise the approve list is scanned: a request that is
+    still waiting is ``pending``, one that was already approved is ``approved``.
+    Any Telegram error (the bot not being an admin there, network problems)
+    degrades to ``"none"`` after being logged — it is never raised.
+    """
+    if not skip_membership:
+        state, detail = await chat_membership_state(chat_id, user_id)
+        if state == "member":
+            return "member"
+        if state == "error":
+            print(f"[FSUB] membership unknown for {chat_id}: {detail}", flush=True)
+            return "none"
+    try:
+        joiners = await floodwait_guard(fetch_join_requests, chat_id)
+    except ChatAdminRequired as exc:
+        print(f"[FSUB] not an admin in {chat_id}: {exc}", flush=True)
+        return "none"
+    except Exception as exc:
+        print(f"[FSUB] join-request scan failed for {chat_id}: {exc}", flush=True)
+        return "none"
+    for joiner in joiners or []:
+        joiner_user = getattr(joiner, "user", None)
+        if joiner_user is not None and getattr(joiner_user, "id", None) == user_id:
+            return "pending" if getattr(joiner, "pending", False) else "approved"
+    return "none"
 
 
 async def get_user_client(user_id):
@@ -420,17 +517,28 @@ async def check_access(message, *, enforce_fsub: bool = True):
     if await get_maintenance() and user_id != OWNER_ID:
         await say(message, "🔧 **Bot is under maintenance!**\n\nPlease try again later.")
         return False
-    fsub = await get_fsub_channel() if enforce_fsub else None
-    if fsub and user_id != OWNER_ID:
-        try:
-            member = await bot.get_chat_member(fsub, user_id)
-            if not joined_channel(member):
-                raise Exception("Not member")
-        except:
-            await say(message,
-                ui.fsub_text(fsub),
-                reply_markup=ui.fsub_keyboard(fsub)
-            )
+    if enforce_fsub and user_id != OWNER_ID:
+        items = await get_fsub_list()
+        for item in items:
+            state, detail = await chat_membership_state(item["chat_id"], user_id)
+            if state == "error":
+                # Never lock a user out because Telegram could not answer.
+                print(f"[FSUB] check skipped for {item['chat_id']}: {detail}", flush=True)
+                continue
+            if state == "member":
+                continue
+            # Not a member: a pending or approved join request also counts.
+            try:
+                request_state = await join_request_state(item["chat_id"], user_id,
+                                                         skip_membership=True)
+            except Exception as exc:  # defensive: fail open, never lock out
+                print(f"[FSUB] join-request check failed for {item['chat_id']}: {exc}", flush=True)
+                request_state = "none"
+            if request_state in {"pending", "approved"}:
+                continue
+            page = 0
+            await say(message, ui.fsub_text(items, page),
+                      reply_markup=ui.fsub_keyboard(items, page, await get_fsub_verify_label()))
             return False
     return True
 
@@ -1206,28 +1314,221 @@ async def cb_cancel_action(client, query):
     await render(query, ui.action_cancelled_text(), ui.back_keyboard())
 
 
-@callback_action("check_fsub")
-async def cb_check_fsub(client, query):
-    fsub = await get_fsub_channel()
-    if not fsub:
-        await query.answer(ui_text("✅ No channel to verify — send me a link!"), show_alert=True)
+@callback_action("fsub:check")
+async def cb_fsub_check(client, query):
+    """**✅ I Joined** — verify membership *and* the join-request approve list.
+
+    Every required chat is checked; the screen is only cleared when all of
+    them are satisfied.  A pending request counts as satisfied, and is
+    auto-approved when the owner enabled that for the entry.
+    """
+    items = await get_fsub_list()
+    if not items:
+        await query.answer(ui_text(ui.fsub_empty_text()), show_alert=True)
         return
+    user_id = query.from_user.id
+    auto_approved = False
+    for item in items:
+        state = await join_request_state(item["chat_id"], user_id)
+        if state in {"member", "approved"}:
+            continue
+        if state == "pending" and item.get("auto_approve"):
+            try:
+                approved = await bot.approve_chat_join_request(item["chat_id"], user_id)
+            except Exception as exc:
+                print(f"[FSUB] auto-approve failed for {item['chat_id']}: {exc}", flush=True)
+                approved = False
+            if approved:
+                await set_join_request_status(item["chat_id"], user_id, "approved")
+                auto_approved = True
+                continue
+        if state == "pending":
+            await query.answer(ui_text(ui.fsub_pending_text()), show_alert=True)
+            return
+        private = bool(item.get("invite_link")) and not item.get("username")
+        await query.answer(ui_text(ui.fsub_join_instruction_text(private)), show_alert=True)
+        return
+    # Every entry is satisfied: clear the screen as before.
     try:
-        member = await bot.get_chat_member(fsub, query.from_user.id)
-        joined = joined_channel(member)
+        await query.message.delete()
     except Exception:
-        joined = False
-    if joined:
+        pass
+    await query.answer(ui_text(ui.fsub_auto_approved_text() if auto_approved
+                               else ui.fsub_verified_text()))
+
+
+@bot.on_chat_join_request()
+async def fsub_join_request_handler(client, request):
+    """Incoming join request for one of the force-sub chats.
+
+    With auto-approve enabled the request is approved immediately and the user
+    is told so.  Otherwise the owner gets an Approve / Decline pair that only
+    answers to ``OWNER_ID``.
+    """
+    chat = getattr(request, "chat", None)
+    user = getattr(request, "from_user", None)
+    chat_id = getattr(chat, "id", None)
+    user_id = getattr(user, "id", None)
+    if chat_id is None or user_id is None:
+        return
+    await record_join_request(chat_id, user_id, date=getattr(request, "date", None))
+    items = await get_fsub_list()
+    item = next((entry for entry in items if int(entry.get("chat_id") or 0) == int(chat_id)), None)
+    if item is None:
+        return  # not one of our force-sub chats
+    if item.get("auto_approve"):
         try:
-            await query.message.delete()
-        except Exception:
-            pass
-        await query.answer(ui_text("✅ Verified! Send me a link now."))
-    else:
-        await query.answer(ui_text("❌ You have not joined the channel yet!"), show_alert=True)
+            await bot.approve_chat_join_request(chat_id, user_id)
+        except Exception as exc:
+            print(f"[FSUB] auto-approve failed for {chat_id}: {exc}", flush=True)
+            return
+        await set_join_request_status(chat_id, user_id, "approved")
+        try:
+            await say_message(bot, user_id, ui.fsub_request_approved_text())
+        except Exception as exc:
+            print(f"[FSUB] could not notify {user_id}: {exc}", flush=True)
+        return
+    name = await get_display_name(user_id, fallback=None) or get_user_display_name(user, default="User")
+    text = ui.fsub_request_notify_text(name, user_id, item.get("title") or str(chat_id))
+    keyboard = ui.fsub_request_keyboard(user_id, chat_id)
+    for recipient in dict.fromkeys([OWNER_ID]):
+        if not recipient:
+            continue
+        try:
+            await say_message(bot, recipient, text, reply_markup=keyboard)
+        except Exception as exc:
+            print(f"[FSUB] owner notification failed for {chat_id}: {exc}", flush=True)
 
 
-COMMAND_NAMES = ["start", "help", "login", "logout", "status", "cancel", "setcaption", "delcaption", "setthumb", "delthumb", "setprefix", "setsuffix", "mystats", "myinfo", "history", "settings", "language", "refer", "bookmark", "bookmarks", "favorite", "favorites", "share", "feedback", "premium", "stats", "users", "loggedusers", "activeusers", "newusers", "topusers", "broadcast", "ban", "unban", "banlist", "finduser", "userinfo", "addpremium", "removepremium", "premiumlist", "addadmin", "removeadmin", "adminlist", "setfsub", "delfsub", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export", "adminhelp", "admin", "admins", "addqr", "delqr", "removeqr", "payments", "redeem", "setchat", "delchat"]
+async def handle_fsub_review(client, query, data: str):
+    """Owner-only verdict on a join request (approve / decline)."""
+    uid = query.from_user.id
+    if uid != OWNER_ID:
+        await query.answer(ui_text("👑 Owner only — join requests are restricted."), show_alert=True)
+        return
+    # data looks like "fsub:approve:<user_id>:<chat_id>"
+    parts = (data or "").split(":")
+    if len(parts) < 4:
+        await query.answer(ui_text("Unknown join request."), show_alert=True)
+        return
+    action = parts[1]
+    try:
+        user_id, chat_id = int(parts[2]), int(parts[3])
+    except ValueError:
+        await query.answer(ui_text("Unknown join request."), show_alert=True)
+        return
+    verdict = "approved" if action == "approve" else "declined"
+    try:
+        if action == "approve":
+            await bot.approve_chat_join_request(chat_id, user_id)
+        else:
+            await bot.decline_chat_join_request(chat_id, user_id)
+    except Exception as exc:
+        print(f"[FSUB] {action} failed for {user_id} in {chat_id}: {exc}", flush=True)
+        await query.answer(ui_text(f"⚠️ Telegram refused: {exc}"), show_alert=True)
+        return
+    await set_join_request_status(chat_id, user_id, verdict)
+    line = ("✅ Approved by Owner" if action == "approve" else "❌ Declined by Owner")
+    await query.answer(ui_text(line))
+    try:
+        base = getattr(query.message, "text", None)
+        await query.message.edit_text(
+            ui_text(ui.fsub_request_verdict_text(base, line)), reply_markup=None)
+    except Exception:
+        pass
+
+
+async def show_fsub_screen(source, page: int = 0):
+    """Render the force-sub screen with its join buttons."""
+    items = await get_fsub_list()
+    verify_label = await get_fsub_verify_label()
+    await render(source, ui.fsub_text(items, page),
+                 ui.fsub_keyboard(items, page, verify_label))
+
+
+async def show_fsub_list(source, page: int = 0):
+    """Render the owner's numbered force-sub listing."""
+    items = await get_fsub_list()
+    await render(source, ui.fsub_list_text(items, page), ui.fsub_list_keyboard(items, page))
+
+
+async def handle_fsub_callback(client, query, data: str):
+    """Route every force-sub button (verify, page, rename, delete, verdict)."""
+    if data == "fsub:check":
+        # Verification is for everybody: the user proves that they joined.
+        await cb_fsub_check(client, query)
+        return
+    uid = query.from_user.id
+    if data.startswith("fsub_page:"):
+        # Browsing the join screen is open to everybody, like verification.
+        try:
+            page = int(data.split(":", 1)[1])
+        except ValueError:
+            page = 0
+        await query.answer()
+        await show_fsub_screen(query, page)
+        return
+    if uid != OWNER_ID and not await is_admin(uid):
+        await query.answer(ui_text("🚫 Owner only — force sub is restricted."), show_alert=True)
+        return
+    if data.startswith("fsub_list_page:"):
+        try:
+            page = int(data.split(":", 1)[1])
+        except ValueError:
+            page = 0
+        await query.answer()
+        await show_fsub_list(query, page)
+        return
+    if data == "fsub_del_all":
+        items = await get_fsub_list()
+        if not items:
+            await query.answer(ui_text("ℹ️ Nothing to delete."), show_alert=True)
+            return
+        await query.answer()
+        await render(query, ui.fsub_delete_all_confirm_text(len(items)),
+                     ui.fsub_delete_all_keyboard())
+        return
+    if data == "fsub_del_all_confirm":
+        removed = await clear_fsub_list()
+        await query.answer(ui_text(ui.fsub_cleared_text(removed)))
+        await show_fsub_list(query)
+        return
+    if data.startswith("fsub_del:"):
+        try:
+            number = int(data.split(":", 1)[1])
+        except ValueError:
+            await query.answer(ui_text("Unknown entry."), show_alert=True)
+            return
+        removed = await remove_fsub_item(number)
+        if removed is None:
+            await query.answer(ui_text(f"❌ No entry number {number}."), show_alert=True)
+            return
+        await query.answer(ui_text(ui.fsub_removed_text(removed)))
+        await show_fsub_list(query)
+        return
+    if data.startswith("fsub_rename:"):
+        try:
+            number = int(data.split(":", 1)[1])
+        except ValueError:
+            await query.answer(ui_text("Unknown entry."), show_alert=True)
+            return
+        items = await get_fsub_list()
+        if not 1 <= number <= len(items):
+            await query.answer(ui_text(f"❌ No entry number {number}."), show_alert=True)
+            return
+        fsub_pending[uid] = {"step": "await_rename", "number": number}
+        await query.answer()
+        await say(query.message, ui.fsub_button_prompt_text(
+            items[number - 1].get("title") or "Chat", items[number - 1].get("kind") or "channel"),
+            reply_markup=ui.feedback_keyboard())
+        return
+    if data.startswith("fsub:approve:") or data.startswith("fsub:decline:"):
+        await handle_fsub_review(client, query, data)
+        return
+    await query.answer(ui_text(ui.stale_button_text()), show_alert=True)
+
+
+COMMAND_NAMES = ["start", "help", "login", "logout", "status", "cancel", "setcaption", "delcaption", "setthumb", "delthumb", "setprefix", "setsuffix", "mystats", "myinfo", "history", "settings", "language", "refer", "bookmark", "bookmarks", "favorite", "favorites", "share", "feedback", "premium", "stats", "users", "loggedusers", "activeusers", "newusers", "topusers", "broadcast", "ban", "unban", "banlist", "finduser", "userinfo", "addpremium", "removepremium", "premiumlist", "addadmin", "removeadmin", "adminlist", "setfsub", "fsublist", "delfsub", "fsublabel", "fsubcheck", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export", "adminhelp", "admin", "admins", "addqr", "delqr", "removeqr", "payments", "redeem", "setchat", "delchat"]
 ABORT_GROUP = -1
 
 
@@ -1237,6 +1538,7 @@ async def clear_pending_inputs(uid):
     aborted = bool(admin_pending.pop(uid, None)) or aborted
     aborted = bool(premium_tier_pending.pop(uid, None)) or aborted
     aborted = bool(setchat_pending.pop(uid, None)) or aborted
+    aborted = bool(fsub_pending.pop(uid, None)) or aborted
     pending = login_pending.pop(uid, None)
     if pending:
         temp = pending.get("client")
@@ -1891,25 +2193,252 @@ async def adminlist_handler(client, message):
     await say(message, text)
 
 
+def clean_fsub_label(text: str) -> str | None:
+    """Validate an owner-typed button label; ``None`` when it is not usable.
+
+    One line, 1–:data:`config.FSUB_MAX_BUTTON_CHARS` characters, no links,
+    ``t.me/`` references or @-mentions.  Emojis and digits are welcome.
+    """
+    label = (text or "").strip()
+    if not label or "\n" in label:
+        return None
+    if len(label) > FSUB_MAX_BUTTON_CHARS:
+        return None
+    lowered = label.lower()
+    if any(token in lowered for token in ("http://", "https://", "t.me/", "telegram.me/",
+                                          "www.", "joinchat", "@")):
+        return None
+    return label
+
+
+def chat_kind_of_type(type_value: str) -> str:
+    """``"group"`` or ``"channel"`` from a chat type string."""
+    return "group" if "group" in str(type_value or "").lower() else "channel"
+
+
 @bot.on_message(filters.command("setfsub") & filters.private)
 @owner_only
 async def setfsub_handler(client, message):
-    args = message.text.split()
-    if len(args) < 2:
-        await say(message, "Usage: `/setfsub @channelname`")
+    """Step 1 of the add wizard — resolve the chat, then ask for the label."""
+    ref = chat_ref_from_text(message.text)
+    if not ref:
+        await say(message, "Usage: `/setfsub` with a channel link, @username, numeric ID or a "
+                           "private invite link — repeat it to add as many entries as you want.")
         return
-    channel = args[1]
-    if not channel.startswith("@"):
-        channel = "@" + channel
-    await set_fsub_channel(channel)
-    await say(message, f"✅ Force sub: {channel}")
+    uid = message.from_user.id
+    try:
+        resolved = await resolve_chat_target(ref)
+    except InviteRequestSent:
+        # Approval-only chat: keep the wizard alive and resolve again once the
+        # owner of that chat has approved the bot.
+        fsub_pending[uid] = {"step": "await_label", "ref": ref}
+        await say(message, ui.fsub_join_pending_text("Private chat"),
+                  reply_markup=ui.feedback_keyboard())
+        return
+    except InviteLinkError as exc:
+        print(f"[FSUB] could not resolve {ref!r}: {exc.detail or exc}", flush=True)
+        await say(message, ui.setchat_resolve_failed_text(exc.reason),
+                  reply_markup=ui.feedback_keyboard())
+        return
+    await ask_fsub_button_label(message, uid, resolved)
+
+
+async def ask_fsub_button_label(message, uid, resolved):
+    """Admin check, then ask the owner what the Join button should say."""
+    ok, reason = await describe_channel_admin(resolved["chat_id"])
+    if not ok:
+        await say(message, ui.fsub_admin_failed_text(reason, resolved["title"]),
+                  reply_markup=ui.feedback_keyboard())
+        return
+    fsub_pending[uid] = {"step": "await_label", "resolved": resolved}
+    await say(message, ui.fsub_button_prompt_text(
+        resolved["title"], chat_kind_of_type(resolved.get("type"))),
+        reply_markup=ui.feedback_keyboard())
+
+
+async def complete_fsub_label(message, uid):
+    """Step 2 — the owner typed the Join button label (or ``-`` for default)."""
+    pending = fsub_pending.get(uid) or {}
+    resolved = pending.get("resolved")
+    if resolved is None:
+        # The chat was waiting for approval: try the stored reference again.
+        try:
+            resolved = await resolve_chat_target(pending.get("ref"))
+        except InviteRequestSent:
+            await say(message, ui.fsub_join_pending_text("Private chat"),
+                      reply_markup=ui.feedback_keyboard())
+            return
+        except InviteLinkError as exc:
+            fsub_pending.pop(uid, None)
+            await say(message, ui.setchat_resolve_failed_text(exc.reason),
+                      reply_markup=ui.feedback_keyboard())
+            return
+        ok, reason = await describe_channel_admin(resolved["chat_id"])
+        if not ok:
+            fsub_pending.pop(uid, None)
+            await say(message, ui.fsub_admin_failed_text(reason, resolved["title"]),
+                      reply_markup=ui.feedback_keyboard())
+            return
+    typed = (message.text or "").strip()
+    if typed in {"", "-"}:
+        label = ui.default_fsub_label(resolved["title"])
+    else:
+        label = clean_fsub_label(typed)
+        if label is None:
+            # The wizard stays open: the owner simply sends a better label.
+            await say(message, ui.fsub_label_invalid_text(),
+                      reply_markup=ui.feedback_keyboard())
+            return
+    fsub_pending.pop(uid, None)
+    admin_pending.pop(uid, None)
+    invite_link = resolved.get("invite_link")
+    if not invite_link and not resolved.get("username"):
+        # Private chat: mint a fresh link for the button only — it is never
+        # echoed back in any message text.
+        try:
+            invite_link = getattr(
+                await floodwait_guard(bot.export_chat_invite_link, resolved["chat_id"]),
+                "invite_link", None)
+        except Exception as exc:
+            print(f"[FSUB] could not export an invite link for "
+                  f"{resolved['chat_id']}: {exc}", flush=True)
+    item = {
+        "chat_id": resolved["chat_id"],
+        "title": resolved["title"],
+        "username": resolved.get("username"),
+        "invite_link": invite_link,
+        "button_text": label,
+        "kind": chat_kind_of_type(resolved.get("type")),
+        "auto_approve": False,
+    }
+    await add_fsub_item(item)
+    items = await get_fsub_list()
+    await say(message, ui.fsub_added_text(items[-1]), reply_markup=ui.back_keyboard())
+    await show_fsub_list(message)
+
+
+async def apply_fsub_rename(message, number, text):
+    """Store the label typed after **✏️ Rename** was pressed."""
+    typed = (text or "").strip()
+    if typed in {"", "-"}:
+        await say(message, ui.fsub_label_invalid_text(), reply_markup=ui.feedback_keyboard())
+        return
+    label = clean_fsub_label(typed)
+    if label is None:
+        await say(message, ui.fsub_label_invalid_text(), reply_markup=ui.feedback_keyboard())
+        return
+    if not await update_fsub_item(number, button_text=label):
+        await say(message, f"❌ No entry number {number}.")
+        return
+    await say(message, f"✅ Entry {number} button: **{label}**", reply_markup=ui.back_keyboard())
+    await show_fsub_list(message)
 
 
 @bot.on_message(filters.command("delfsub") & filters.private)
 @owner_only
 async def delfsub_handler(client, message):
-    await delete_fsub()
-    await say(message, "✅ Force sub removed!")
+    """Remove one entry (``/delfsub 2``) or ask before removing them all."""
+    args = (message.text or "").split()[1:]
+    if not args or args[0].lower() == "all":
+        items = await get_fsub_list()
+        if not items:
+            await say(message, "ℹ️ Force-sub list is already empty.")
+            return
+        await say(message, ui.fsub_delete_all_confirm_text(len(items)),
+                  reply_markup=ui.fsub_delete_all_keyboard())
+        return
+    try:
+        number = int(args[0])
+    except ValueError:
+        await say(message, "Usage: `/delfsub 2` — or `/delfsub all` to remove every entry.")
+        return
+    removed = await remove_fsub_item(number)
+    if removed is None:
+        await say(message, f"❌ No entry number {number}.")
+        return
+    await say(message, ui.fsub_removed_text(removed), reply_markup=ui.back_keyboard())
+    await show_fsub_list(message)
+
+
+@bot.on_message(filters.command("fsublist") & filters.private)
+@owner_only
+async def fsublist_handler(client, message):
+    """Numbered list of every required chat with rename / delete buttons."""
+    await show_fsub_list(message)
+
+
+@bot.on_message(filters.command("fsublabel") & filters.private)
+@owner_only
+async def fsublabel_handler(client, message):
+    """Rename an entry's Join button, or the global verify button."""
+    args = (message.text or "").split()
+    if len(args) < 2:
+        await say(message, "Usage: `/fsublabel 1 Join Now` — or `/fsublabel verify ✅ Verified`.")
+        return
+    if args[1].lower() == "verify":
+        label = " ".join(args[2:]).strip()
+        if label in {"", "-"}:
+            await set_fsub_verify_label(None)
+            await say(message, f"✅ Verify button label reset to **{FSUB_VERIFY_LABEL}**.")
+            return
+        cleaned = clean_fsub_label(label)
+        if cleaned is None:
+            await say(message, ui.fsub_label_invalid_text())
+            return
+        await set_fsub_verify_label(cleaned)
+        await say(message, f"✅ Verify button label: **{cleaned}**")
+        return
+    try:
+        number = int(args[1])
+    except ValueError:
+        await say(message, "Usage: `/fsublabel 1 Join Now` — or `/fsublabel verify ✅ Verified`.")
+        return
+    label = " ".join(args[2:]).strip()
+    if label in {"", "-"}:
+        await say(message, ui.fsub_label_invalid_text())
+        return
+    cleaned = clean_fsub_label(label)
+    if cleaned is None:
+        await say(message, ui.fsub_label_invalid_text())
+        return
+    if not await update_fsub_item(number, button_text=cleaned):
+        await say(message, f"❌ No entry number {number}.")
+        return
+    items = await get_fsub_list()
+    await say(message, f"✅ Entry {number} button: **{cleaned}**", reply_markup=ui.back_keyboard())
+    await show_fsub_list(message)
+
+
+@bot.on_message(filters.command("fsubcheck") & filters.private)
+@owner_only
+async def fsubcheck_handler(client, message):
+    """Toggle auto-approval of join requests for one entry or all of them."""
+    args = (message.text or "").split()
+    if len(args) < 3 or args[2].lower() not in {"on", "off"}:
+        await say(message, "Usage: `/fsubcheck 1 on` — or `/fsubcheck all off`.")
+        return
+    enabled = args[2].lower() == "on"
+    target = args[1].lower()
+    items = await get_fsub_list()
+    if not items:
+        await say(message, "ℹ️ Force-sub list is empty.")
+        return
+    if target == "all":
+        for number in range(1, len(items) + 1):
+            await update_fsub_item(number, auto_approve=enabled)
+    else:
+        try:
+            number = int(target)
+        except ValueError:
+            await say(message, "Usage: `/fsubcheck 1 on` — or `/fsubcheck all off`.")
+            return
+        if not 1 <= number <= len(items):
+            await say(message, f"❌ No entry number {number}.")
+            return
+        await update_fsub_item(number, auto_approve=enabled)
+    state = "ON" if enabled else "OFF"
+    await say(message, f"✅ Auto-approve **{state}**", reply_markup=ui.back_keyboard())
+    await show_fsub_list(message)
 
 
 @bot.on_message(filters.command("maintenance") & filters.private)
@@ -2129,7 +2658,7 @@ async def redeem_handler(client, message):
         await say(message, f"🔒 You need {REDEEM_POINTS} points. Active owner-granted premium cannot be replaced by points premium.")
 
 
-@bot.on_message(filters.command("setchat") & (filters.private | filters.channel))
+@bot.on_message(filters.command("setchat") & (filters.private | filters.channel | filters.group))
 async def setchat_handler(client, message):
     """Channel dump — step 1: which channel should the bot extract into?"""
     await refresh_profile(getattr(message, "from_user", None))
@@ -2172,13 +2701,38 @@ async def cb_setchat_check(client, query):
     if not pending:
         await query.answer(ui_text("This setup expired — send /setchat again."), show_alert=True)
         return
+    if pending.get("chat_id") is None:
+        # The chat was approval-only: the owner may have approved us by now, so
+        # resolve the stored reference again before checking anything.
+        await query.answer(ui_text("🔍 Checking admin rights…"))
+        try:
+            resolved = await resolve_chat_target(pending.get("ref"))
+        except InviteRequestSent:
+            await render(query, ui.setchat_join_request_text("this chat"),
+                         ui.setchat_check_keyboard())
+            return
+        except Exception as exc:
+            print(f"[SETCHAT] retry resolve failed: {exc}", flush=True)
+            await render(query, ui.setchat_resolve_failed_text(
+                getattr(exc, "reason", "unresolved")), ui.setchat_check_keyboard())
+            return
+        pending.update({
+            "chat_id": resolved["chat_id"], "title": resolved["title"],
+            "username": resolved["username"], "invite_link": resolved.get("invite_link"),
+            "type": resolved.get("type") or "", "step": "await_check",
+        })
+        setchat_pending[uid] = pending
+        await render(query, ui.setchat_admin_hint_text(pending["title"]),
+                     ui.setchat_check_keyboard())
+        return
     await query.answer(ui_text("🔍 Checking admin rights…"))
-    if await verify_channel_admin(pending["chat_id"]):
+    ok, reason = await describe_channel_admin(pending["chat_id"])
+    if ok:
         pending["step"] = "await_sample"
         setchat_pending[uid] = pending
         await render(query, ui.setchat_admin_ok_text(pending["title"]), ui.feedback_keyboard())
     else:
-        await render(query, ui.setchat_admin_failed_text(), ui.setchat_check_keyboard())
+        await render(query, ui.setchat_admin_failed_text(reason), ui.setchat_check_keyboard())
 
 
 def bot_self_id():
@@ -2206,7 +2760,7 @@ def is_own_message(message) -> bool:
     return self_id is not None and getattr(sender, "id", None) == self_id
 
 
-@bot.on_message(filters.channel & filters.text)
+@bot.on_message((filters.channel | filters.group) & filters.text)
 async def channel_dump_handler(client, message):
     """Auto-extraction inside a channel that completed /setchat."""
     if is_own_message(message):
@@ -2256,31 +2810,166 @@ def chat_ref_from_text(text: str):
     return None
 
 
-def _chat_kind(chat) -> bool:
-    """True when *chat* is a channel (never true for private chats)."""
+class InviteLinkError(Exception):
+    """A chat reference could not be resolved, with a user-facing reason."""
+
+    def __init__(self, reason: str = "unresolved", detail: str = ""):
+        super().__init__(detail or reason)
+        self.reason = reason
+        self.detail = detail
+
+
+def chat_type_value(chat) -> str:
+    """``"channel"`` / ``"supergroup"`` / ``"group"`` / ``""`` for a chat object."""
     chat_type = getattr(chat, "type", None)
-    value = getattr(chat_type, "value", chat_type)
-    return str(value).lower().endswith("channel")
+    return str(getattr(chat_type, "value", chat_type) or "").lower()
+
+
+def raw_chat_type_value(raw_chat) -> str:
+    """Type of a raw (MTProto) chat object."""
+    name = type(raw_chat).__name__.lower()
+    if "channel" in name:
+        return "channel"
+    if "chat" in name:
+        return "group"
+    return ""
+
+
+def raw_chat_id(raw_chat) -> int:
+    """High-level id of a raw Channel / Chat object."""
+    raw_id = getattr(raw_chat, "id", None)
+    if raw_id is None:
+        raise InviteLinkError("invalid", "invite link returned no chat")
+    if isinstance(raw_chat, (raw.types.Chat, raw.types.ChatForbidden)):
+        return -raw_id
+    return utils.ZERO_CHANNEL_ID - raw_id
+
+
+def chat_title(chat, chat_id=None) -> str:
+    """Title of a chat, falling back to a readable placeholder (never None)."""
+    title = getattr(chat, "title", None)
+    if title:
+        return str(title)
+    if chat_id is None:
+        chat_id = getattr(chat, "id", None)
+    return CHANNEL_TITLE_FALLBACK.format(chat_id=chat_id)
+
+
+def classify_chat_ref(ref):
+    """``(kind, value)`` for any supported chat reference.
+
+    ``kind`` is ``numeric`` (a chat id), ``invite`` (a private invite hash),
+    ``public`` (a @username / t.me/username) or ``unknown``.
+    """
+    ref = (ref or "").strip()
+    if not ref:
+        return "unknown", None
+    if re.fullmatch(r"-?\d+", ref):
+        return "numeric", int(ref)
+    match = re.search(r"(?:t\.me|telegram\.me)/(?:\+|joinchat/)([A-Za-z0-9_-]+)", ref, re.I)
+    if match:
+        return "invite", match.group(1)
+    match = re.search(r"(?:t\.me|telegram\.me)/c/(\d+)", ref, re.I)
+    if match:
+        return "numeric", int("-100" + match.group(1))
+    match = re.search(r"(?:t\.me|telegram\.me)/([A-Za-z][A-Za-z0-9_]{3,})", ref, re.I)
+    if match:
+        return "public", match.group(1)
+    if ref.startswith("@"):
+        name = ref[1:]
+        return ("public", name) if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{3,}", name) else ("unknown", None)
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{3,}", ref):
+        return "public", ref
+    return "unknown", None
+
+
+async def _resolve_invite_link(ref, invite_hash):
+    """Resolve a private invite link, joining only when that is really needed."""
+    check = raw.functions.messages.CheckChatInvite(hash=invite_hash)
+    try:
+        result = await floodwait_guard(bot.invoke, check)
+    except UserAlreadyParticipant:
+        # Already inside: re-checking answers with the chat itself.
+        result = await floodwait_guard(bot.invoke, check)
+    except (InviteHashExpired, InviteSlugExpired) as exc:
+        raise InviteLinkError("expired", str(exc))
+    except InviteHashInvalid as exc:
+        raise InviteLinkError("invalid", str(exc))
+    except (ChannelPrivate, ChatAdminRequired, PeerIdInvalid) as exc:
+        raise InviteLinkError("no_access", str(exc))
+    if isinstance(result, raw.types.ChatInviteAlready):
+        return _invite_result(result.chat, ref)
+    if isinstance(result, (raw.types.ChatInvite, raw.types.ChatInvitePeek)):
+        try:
+            joined = await floodwait_guard(bot.join_chat, ref)
+        except UserAlreadyParticipant:
+            result = await floodwait_guard(bot.invoke, check)
+            return _invite_result(result.chat, ref)
+        return {
+            "chat_id": joined.id,
+            "title": chat_title(joined, joined.id),
+            "username": getattr(joined, "username", None),
+            "invite_link": ref,
+            "type": chat_type_value(joined),
+        }
+    raise InviteLinkError("invalid", f"unexpected CheckChatInvite answer: {result!r}")
+
+
+def _invite_result(raw_chat, ref):
+    chat_id = raw_chat_id(raw_chat)
+    return {
+        "chat_id": chat_id,
+        "title": chat_title(raw_chat, chat_id),
+        "username": getattr(raw_chat, "username", None),
+        "invite_link": ref,
+        "type": raw_chat_type_value(raw_chat),
+    }
+
+
+async def resolve_chat_target(ref):
+    """Resolve *any* chat reference to a dict, or raise :class:`InviteLinkError`.
+
+    Numeric ids, public @usernames, ``t.me/username`` links (with or without a
+    message id), ``t.me/c/<id>/<msg>`` and private invite links
+    (``t.me/+hash`` / ``t.me/joinchat/hash``) are all supported.
+    ``InviteRequestSent`` is re-raised unchanged so callers can explain the
+    approval-only case to the owner.
+    """
+    kind, value = classify_chat_ref(ref)
+    if kind == "unknown":
+        raise InviteLinkError("unresolved", f"unrecognised chat reference {ref!r}")
+    if kind == "invite":
+        return await _resolve_invite_link(ref, value)
+    try:
+        chat = await floodwait_guard(bot.get_chat, value)
+    except (ChannelPrivate, ChatAdminRequired, PeerIdInvalid) as exc:
+        raise InviteLinkError("no_access", str(exc))
+    except InviteRequestSent:
+        raise
+    except Exception as exc:
+        raise InviteLinkError("unresolved", str(exc))
+    chat_id = getattr(chat, "id", None)
+    if chat_id is None:
+        raise InviteLinkError("unresolved", f"no id for {ref!r}")
+    return {
+        "chat_id": chat_id,
+        "title": chat_title(chat, chat_id),
+        "username": getattr(chat, "username", None),
+        "invite_link": None,
+        "type": chat_type_value(chat),
+    }
 
 
 async def resolve_chat_ref(ref):
-    """Resolve a channel link, @username or numeric id → (id, title, username)."""
-    ref = (ref or "").strip()
-    if not ref:
-        return None
-    if re.fullmatch(r"-?\d+", ref):
-        target = int(ref)
-    elif "t.me/" in ref or "telegram.me/" in ref:
-        target = ref
-    else:
-        target = ref if ref.startswith("@") else "@" + ref
-    try:
-        chat = await floodwait_guard(bot.get_chat, target)
-    except Exception as exc:
-        print(f"[SETCHAT] could not resolve {ref!r}: {exc}", flush=True)
-        return None
-    title = getattr(chat, "title", None) or getattr(chat, "username", None) or str(chat.id)
-    return chat.id, title, getattr(chat, "username", None)
+    """Resolve a chat reference → ``(id, title, username)`` (legacy shape)."""
+    resolved = await resolve_chat_target(ref)
+    return resolved["chat_id"], resolved["title"], resolved["username"]
+
+
+def _chat_kind(chat) -> bool:
+    """True when *chat* can be a dump target (channel, supergroup or group)."""
+    value = chat_type_value(chat)
+    return "channel" in value or "group" in value
 
 
 async def start_setchat_flow(source, ref=None, chat=None):
@@ -2292,58 +2981,114 @@ async def start_setchat_flow(source, ref=None, chat=None):
         await render(source, ui.setchat_prompt_text(), ui.feedback_keyboard())
         return False
     if chat is not None:
-        # Command posted inside the channel: we already hold its details.
-        resolved = (chat.id, getattr(chat, "title", None) or str(chat.id),
-                    getattr(chat, "username", None))
+        # Command posted inside the channel/group: we already hold its details.
+        resolved = {
+            "chat_id": chat.id, "title": chat_title(chat, chat.id),
+            "username": getattr(chat, "username", None), "invite_link": None,
+            "type": chat_type_value(chat),
+        }
     else:
-        resolved = await resolve_chat_ref(ref)
-    if not resolved:
+        try:
+            resolved = await resolve_chat_target(ref)
+        except InviteRequestSent:
+            # Approval-only chat: the bot sent a join request and now waits for
+            # the owner of that chat.  Nothing is stored yet, and the wizard
+            # stays alive so **🔍 Check Admin Status** can be pressed again.
+            setchat_pending[uid] = {
+                "chat_id": None, "title": "Private chat", "username": None,
+                "step": "await_approval", "ref": ref,
+            }
+            pending_action.pop(uid, None)
+            await render(source, ui.setchat_join_request_text("this chat"),
+                         ui.setchat_check_keyboard())
+            return False
+        except InviteLinkError as exc:
+            print(f"[SETCHAT] could not resolve {ref!r}: {exc.detail or exc}", flush=True)
+            pending_action[uid] = "setchat"
+            await render(
+                source,
+                ui.setchat_resolve_failed_text(exc.reason) + "\n\n" + ui.setchat_prompt_text(),
+                ui.feedback_keyboard(),
+            )
+            return False
+    if not resolved or not resolved.get("chat_id"):
         pending_action[uid] = "setchat"
         await render(
             source,
-            "❌ Could not resolve that chat. Send the channel link, @username or ID again.\n\n"
-            + ui.setchat_prompt_text(),
+            ui.setchat_resolve_failed_text("unresolved") + "\n\n" + ui.setchat_prompt_text(),
             ui.feedback_keyboard(),
         )
         return False
-    chat_id, title, username = resolved
+    chat_id, title, username = resolved["chat_id"], resolved["title"], resolved["username"]
     setchat_pending[uid] = {
-        "chat_id": chat_id, "title": title, "username": username, "step": "await_check",
+        "chat_id": chat_id, "title": title, "username": username,
+        "step": "await_check", "invite_link": resolved.get("invite_link"),
+        "type": resolved.get("type") or "",
     }
     pending_action.pop(uid, None)
     await render(source, ui.setchat_admin_hint_text(title), ui.setchat_check_keyboard())
     return True
 
 
-async def verify_channel_admin(chat_id) -> bool:
-    """True when the bot is an admin in *chat_id* and may post messages there."""
+async def describe_channel_admin(chat_id):
+    """``(ok, reason)`` — the truthful admin state of the bot in *chat_id*.
+
+    Kurigram keeps posting rights in ``ChatMember.privileges``
+    (:class:`pyrogram.types.ChatAdministratorRights`); ``ChatMember`` itself has
+    no ``can_post_messages`` attribute at all, so that is the only place they
+    can be read from.  ``reason`` is one of ``ok``, ``not_admin``,
+    ``no_post_rights`` or ``error``.
+    """
     try:
         me = await floodwait_guard(bot.get_me)
         member = await floodwait_guard(bot.get_chat_member, chat_id, me.id)
     except Exception as exc:
-        print(f"[SETCHAT] admin check failed for {chat_id}: {exc}", flush=True)
-        return False
+        print(f"[SETCHAT] admin check error for {chat_id}: {exc}", flush=True)
+        return False, "error"
     status = getattr(getattr(member, "status", None), "value", getattr(member, "status", None))
     status = str(status).lower()
-    if status not in {"administrator", "owner", "creator"}:
-        return False
-    can_post = getattr(member, "can_post_messages", None)
-    if can_post is None:
-        can_post = getattr(member, "can_send_messages", None)
-    if can_post is None:  # chat creators have implicit posting rights
-        return status in {"owner", "creator"}
-    return bool(can_post) or status in {"owner", "creator"}
+    privileges = getattr(member, "privileges", None)
+    can_post = getattr(privileges, "can_post_messages", None)
+    can_manage = getattr(privileges, "can_manage_chat", None)
+    # Always log the raw values: this is what a deployment gets debugged from.
+    print(f"[SETCHAT] admin check chat={chat_id} status={status!r} "
+          f"privileges={'set' if privileges is not None else 'none'} "
+          f"can_post_messages={can_post!r} can_manage_chat={can_manage!r}", flush=True)
+    if status in {"owner", "creator"}:
+        return True, "ok"
+    if status != "administrator":
+        return False, "not_admin"
+    # Channel and supergroup admins carry their rights in ``privileges``.
+    rights = [can_post, can_manage]
+    if all(right is None for right in rights):
+        # Telegram reports no posting right for this chat type (basic group or
+        # legacy parser): the sample message plus the first real send are the
+        # true proof, so the wizard is allowed to continue.
+        return True, "ok"
+    return (True, "ok") if rights[0] else (False, "no_post_rights")
+
+
+async def verify_channel_admin(chat_id) -> bool:
+    """True when the bot may post in *chat_id* (see :func:`describe_channel_admin`)."""
+    ok, _reason = await describe_channel_admin(chat_id)
+    return ok
 
 
 async def verify_setchat_sample(message, uid, text) -> bool:
-    """Step 3 — a sample message link proves the bot can read the channel."""
+    """Step 3 — a sample message proves the bot can read the channel."""
     pending = setchat_pending.get(uid)
     if not pending:
         return False
+    text = (text or "").strip()
     chat_target, msg_id, _ = parse_link(text)
     if chat_target is None:
-        await say(message, ui.setchat_sample_failed_text())
-        return False
+        # Private channels rarely expose t.me/<name>/<id>: while the wizard
+        # waits for the sample a bare message number is accepted too.
+        if re.fullmatch(r"\d+", text):
+            msg_id = int(text)
+        else:
+            await say(message, ui.setchat_sample_failed_text())
+            return False
     try:
         sample = await floodwait_guard(bot.get_messages, pending["chat_id"], msg_id)
     except Exception as exc:
@@ -2588,8 +3333,10 @@ ADMIN_PAGES = [
      ["broadcast", "sendmsg", "ban", "unban", "banlist", "feedbacks"]),
     ("📡 Channel Dump",
      ["setchat", "delchat"]),
+    ("📢 Force Sub",
+     ["setfsub", "fsublist", "delfsub", "fsublabel", "fsubcheck"]),
     ("⚙️ Administration",
-     ["addadmin", "removeadmin", "adminlist", "setfsub", "delfsub", "maintenance",
+     ["addadmin", "removeadmin", "adminlist", "maintenance",
       "clearlogs", "adminhelp"]),
 ]
 
@@ -2608,7 +3355,10 @@ ADMIN_VALUE_EXAMPLES = {
     "removepremium": "123456789",
     "addadmin": "123456789",
     "removeadmin": "123456789",
-    "setfsub": "@channelname",
+    "setfsub": "t.me/+AbCdEf",
+    "fsublabel": "1 📢 Join Now",
+    "fsubcheck": "1 on",
+    "delfsub": "1",
     "maintenance": "on or off",
     "setchat": "t.me/mychannel",
     "delchat": "123456789",
@@ -2616,7 +3366,8 @@ ADMIN_VALUE_EXAMPLES = {
 
 #: Commands only the owner may run.
 ADMIN_OWNER_COMMANDS = {
-    "addpremium", "addadmin", "removeadmin", "setfsub", "delfsub", "maintenance",
+    "addpremium", "addadmin", "removeadmin", "setfsub", "fsublist", "delfsub",
+    "fsublabel", "fsubcheck", "maintenance",
     "addqr", "delqr", "removeqr", "clearlogs",
 }
 
@@ -2669,7 +3420,9 @@ ADMIN_INLINE_HANDLERS = {
     "premiumlist": premiumlist_handler, "feedbacks": feedbacks_handler,
     "payments": payments_handler, "adminhelp": adminhelp_handler,
     "addadmin": addadmin_handler, "removeadmin": removeadmin_handler,
-    "adminlist": adminlist_handler, "setfsub": setfsub_handler, "delfsub": delfsub_handler,
+    "adminlist": adminlist_handler, "setfsub": setfsub_handler,
+    "fsublist": fsublist_handler, "delfsub": delfsub_handler,
+    "fsublabel": fsublabel_handler, "fsubcheck": fsubcheck_handler,
     "maintenance": maintenance_handler, "addqr": addqr_handler, "delqr": delqr_handler,
     "removeqr": delqr_handler, "clearlogs": clearlogs_handler, "export": export_handler,
     "setchat": setchat_handler, "delchat": delchat_handler,
@@ -2713,7 +3466,10 @@ async def callback_handler(client, query):
     # Button presses refresh the stored profile too (renames show up everywhere).
     await refresh_profile(query.from_user)
     # Navigation never leaves feedback or an admin prompt silently active.
-    if not data.startswith("dl:") and data not in {"cancel_login", "cancel_action"}:
+    # Force-sub buttons keep their own wizard state (a rename prompt must
+    # survive the very button press that opened it).
+    if not data.startswith("dl:") and not data.startswith("fsub") \
+            and data not in {"cancel_login", "cancel_action"}:
         pending_action.pop(uid, None)
         admin_pending.pop(uid, None)
         pending = login_pending.pop(uid, {})
@@ -2724,6 +3480,7 @@ async def callback_handler(client, query):
                 pass
         if not data.startswith("paid:"):
             payment_pending.pop(uid, None)
+        fsub_pending.pop(uid, None)
     if data.startswith("dl:"):
         await handle_download_controls(query)
         return
@@ -2817,6 +3574,10 @@ async def callback_handler(client, query):
         await query.answer()
         await show_logged_users(query, page)
         return
+    if data == "fsub:check" or data.startswith(("fsub:", "fsub_page:", "fsub_list_page:",
+                                                "fsub_del:", "fsub_rename:", "fsub_del_all")):
+        await handle_fsub_callback(client, query, data)
+        return
     handler = CALLBACK_ACTIONS.get(data)
     if handler is None:
         await query.answer(ui_text(ui.stale_button_text()), show_alert=True)
@@ -2839,8 +3600,8 @@ async def callback_handler(client, query):
     "stats", "users", "loggedusers", "activeusers", "newusers", "topusers",
     "broadcast", "ban", "unban", "banlist", "finduser",
     "userinfo", "addpremium", "removepremium", "premiumlist",
-    "addadmin", "removeadmin", "adminlist", "setfsub", "delfsub",
-    "maintenance", "feedbacks", "sendmsg", "clearlogs", "export",
+    "addadmin", "removeadmin", "adminlist", "setfsub", "fsublist", "delfsub",
+    "fsublabel", "fsubcheck", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export",
     "adminhelp", "admin", "admins", "addqr", "delqr", "removeqr", "payments", "redeem",
     "setchat", "delchat",
 ]))
@@ -2856,13 +3617,21 @@ async def text_handler(client, message):
     # A rename on Telegram must show up everywhere the bot displays this user.
     await refresh_profile(message.from_user)
 
+    if user_id in fsub_pending and fsub_pending[user_id].get("step") == "await_label":
+        if user_id != OWNER_ID:
+            fsub_pending.pop(user_id, None)
+            await say(message, "🚫 Owner only command!")
+            return
+        await complete_fsub_label(message, user_id)
+        return
+
     if user_id in admin_pending:
         if user_id != OWNER_ID and not await is_admin(user_id):
             admin_pending.pop(user_id, None)
             await say(message, "🚫 Admin access only.")
             return
         action = admin_pending.pop(user_id)
-        handlers = {"sendmsg": sendmsg_handler, "ban": ban_handler, "unban": unban_handler, "finduser": finduser_handler, "userinfo": userinfo_handler, "addpremium": addpremium_handler, "removepremium": removepremium_handler, "addadmin": addadmin_handler, "removeadmin": removeadmin_handler, "setfsub": setfsub_handler, "maintenance": maintenance_handler, "setchat": setchat_handler, "delchat": delchat_handler}
+        handlers = {"sendmsg": sendmsg_handler, "ban": ban_handler, "unban": unban_handler, "finduser": finduser_handler, "userinfo": userinfo_handler, "addpremium": addpremium_handler, "removepremium": removepremium_handler, "addadmin": addadmin_handler, "removeadmin": removeadmin_handler, "setfsub": setfsub_handler, "fsublist": fsublist_handler, "delfsub": delfsub_handler, "fsublabel": fsublabel_handler, "fsubcheck": fsubcheck_handler, "maintenance": maintenance_handler, "setchat": setchat_handler, "delchat": delchat_handler}
         if action == "broadcast":
             users = await get_all_users()
             sent = 0
@@ -3006,6 +3775,11 @@ async def text_handler(client, message):
                     pass
                 del login_pending[user_id]
             return
+
+    if user_id in fsub_pending and fsub_pending[user_id].get("step") == "await_rename":
+        pending = fsub_pending.pop(user_id)
+        await apply_fsub_rename(message, pending["number"], text)
+        return
 
     if user_id in setchat_pending and setchat_pending[user_id].get("step") == "await_sample":
         await verify_setchat_sample(message, user_id, text)

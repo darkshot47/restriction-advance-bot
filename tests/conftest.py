@@ -27,7 +27,11 @@ os.environ.setdefault("BOT_USERNAME", "TestRestrictBot")
 os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017")
 
 import main  # noqa: E402  (import after the environment is ready)
-from pyrogram.types import CallbackQuery  # noqa: E402
+from pyrogram.types import (  # noqa: E402
+    CallbackQuery, ChatMember, ChatAdministratorRights, ChatJoiner,
+)
+from pyrogram.enums import ChatMemberStatus  # noqa: E402
+from pyrogram.errors import UserNotParticipant  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -162,6 +166,9 @@ class FakeDB:
         self.sessions: dict[int, str] = {}
         self.maintenance = False
         self.fsub = None
+        self.fsub_items: list[dict] = []
+        self.fsub_verify_label = None
+        self.join_requests: dict = {}
         self.admins: set[int] = set()
         self.profile_syncs: list[tuple] = []
         self.payments: list[dict] = []
@@ -442,6 +449,69 @@ class FakeDB:
 
     async def delete_fsub(self):
         self.fsub = None
+        return 0
+
+    # force-sub list (mirror of database.get_fsub_list and friends) --------
+    async def get_fsub_list(self):
+        return [dict(item) for item in self.fsub_items]
+
+    async def add_fsub_item(self, item):
+        entry = {
+            "chat_id": int(item.get("chat_id") or 0),
+            "title": (item.get("title") or "").strip() or f"Chat {item.get('chat_id')}",
+            "username": (item.get("username") or "").strip().lstrip("@") or None,
+            "invite_link": (item.get("invite_link") or "").strip() or None,
+            "button_text": (item.get("button_text") or "").strip()
+                           or f"✅ Join {item.get('title') or 'Chat'}",
+            "kind": "group" if str(item.get("kind") or "").lower().startswith("group") else "channel",
+            "auto_approve": bool(item.get("auto_approve")),
+            "order": len(self.fsub_items),
+        }
+        self.fsub_items.append(entry)
+        return len(self.fsub_items)
+
+    async def remove_fsub_item(self, number):
+        index = int(number) - 1
+        if not 0 <= index < len(self.fsub_items):
+            return None
+        removed = self.fsub_items.pop(index)
+        for position, entry in enumerate(self.fsub_items):
+            entry["order"] = position
+        return removed
+
+    async def update_fsub_item(self, number, **fields):
+        index = int(number) - 1
+        if not 0 <= index < len(self.fsub_items):
+            return False
+        allowed = {"chat_id", "title", "username", "invite_link",
+                   "button_text", "kind", "auto_approve", "order"}
+        self.fsub_items[index].update({k: v for k, v in fields.items() if k in allowed})
+        return True
+
+    async def clear_fsub_list(self):
+        count = len(self.fsub_items)
+        self.fsub_items = []
+        return count
+
+    async def get_fsub_verify_label(self):
+        return self.fsub_verify_label
+
+    async def set_fsub_verify_label(self, label):
+        self.fsub_verify_label = (label or "").strip() or None
+
+    # join requests ---------------------------------------------------------
+    async def record_join_request(self, chat_id, user_id, date=None, status="pending"):
+        self.join_requests[(int(chat_id), int(user_id))] = {
+            "chat_id": int(chat_id), "user_id": int(user_id), "status": status,
+        }
+
+    async def set_join_request_status(self, chat_id, user_id, status):
+        row = self.join_requests.setdefault(
+            (int(chat_id), int(user_id)), {"chat_id": int(chat_id), "user_id": int(user_id)})
+        row["status"] = status
+
+    async def get_join_request(self, chat_id, user_id):
+        return self.join_requests.get((int(chat_id), int(user_id)))
 
     async def add_download(self, user_id, link, file_type):
         self.downloads.append({"user_id": user_id, "link": link, "type": file_type})
@@ -467,7 +537,11 @@ DB_NAMES = [
     "get_active_users_today", "get_new_users_today", "get_top_users",
     "total_downloads_count", "total_bookmarks_count", "get_all_feedback",
     "search_user", "set_maintenance", "get_maintenance", "set_fsub_channel",
-    "get_fsub_channel", "delete_fsub", "add_admin", "remove_admin", "is_admin",
+    "get_fsub_channel", "delete_fsub", "get_fsub_list", "add_fsub_item",
+    "remove_fsub_item", "update_fsub_item", "clear_fsub_list",
+    "get_fsub_verify_label", "set_fsub_verify_label", "record_join_request",
+    "set_join_request_status", "get_join_request",
+    "add_admin", "remove_admin", "is_admin",
     "get_admins_list", "clear_all_logs", "get_bot_stats", "add_premium",
     "remove_premium", "ban_user", "unban_user", "get_points", "award_referral",
     "redeem_points", "set_qr", "get_qr", "delete_qr", "add_payment", "get_payments",
@@ -514,9 +588,42 @@ def clean_state(monkeypatch):
     monkeypatch.setattr(main, "payment_pending", {})
     monkeypatch.setattr(main, "premium_tier_pending", {})
     monkeypatch.setattr(main, "setchat_pending", {})
+    monkeypatch.setattr(main, "fsub_pending", {})
     monkeypatch.setattr(main, "channel_locks", {})
     monkeypatch.setattr(main, "channel_last_request", {})
     yield
+
+
+#: The bot's own user id inside FakeBot (used by every admin check).
+FAKE_BOT_ID = 999
+#: Raw channel id FakeBot reports for a private invite link.
+FAKE_RAW_CHANNEL_ID = 4242
+#: High-level id of that private channel (what the bot stores and checks).
+FAKE_PRIVATE_CHAT_ID = -1000000000000 - FAKE_RAW_CHANNEL_ID
+
+_UNSET = object()
+
+
+def make_member(status=ChatMemberStatus.MEMBER, *, can_post_messages=None,
+                privileges=_UNSET, user=None):
+    """A **real** :class:`pyrogram.types.ChatMember`.
+
+    ``can_post_messages`` deliberately lives in ``privileges``
+    (:class:`pyrogram.types.ChatAdministratorRights`) — the very place Kurigram
+    parses it into — because ``ChatMember`` has no such attribute at all.
+    Pass ``privileges=None`` for the chats where Telegram reports no rights.
+    """
+    if privileges is _UNSET:
+        privileges = ChatAdministratorRights(
+            can_post_messages=bool(can_post_messages), can_manage_chat=True,
+        ) if (can_post_messages is not None or status == ChatMemberStatus.ADMINISTRATOR) else None
+    return ChatMember(status=status, user=user, privileges=privileges)
+
+
+def make_joiner(user_id, *, pending=True):
+    """A **real** :class:`pyrogram.types.ChatJoiner` for the approve list."""
+    return ChatJoiner(client=None, user=SimpleNamespace(id=user_id), date=None, bio=None,
+                      pending=pending)
 
 
 class FakeBot:
@@ -524,26 +631,39 @@ class FakeBot:
 
     def __init__(self):
         self.sent: list[dict] = []
+        #: user_id or (chat_id, user_id) -> real ChatMember
         self.members: dict = {}
+        #: (chat_id, user_id) pairs that must raise UserNotParticipant
+        self.not_members: set = set()
         self.messages: dict = {}
         self.chats: dict = {}
         self.channel_id = -100777
-        self.me = SimpleNamespace(id=999, is_self=True, username="TestRestrictBot")
+        self.me = SimpleNamespace(id=FAKE_BOT_ID, is_self=True, username="TestRestrictBot")
+        #: invite hash -> "already" | "join" | "approval" | "expired" | "invalid"
+        self.invites: dict = {}
+        #: chat_id -> list of ChatJoiner (the approve list)
+        self.join_requests: dict = {}
+        self.approved: list = []
+        self.declined: list = []
+        self.joined_chats: list = []
+        self.invoked: list = []
 
     async def send_message(self, chat_id, text, **kwargs):
-        self.sent.append({"chat_id": chat_id, "text": text})
+        self.sent.append({"chat_id": chat_id, "text": text, **kwargs})
         return None
 
     async def send_photo(self, chat_id, photo, **kwargs):
         self.sent.append({"chat_id": chat_id, "photo": photo, **kwargs})
 
     async def get_chat_member(self, chat_id, user_id):
-        from types import SimpleNamespace
-        return self.members.get(user_id, SimpleNamespace(status="member"))
+        if (int(chat_id), user_id) in self.not_members:
+            raise UserNotParticipant()
+        if (chat_id, user_id) in self.members:
+            return self.members[(chat_id, user_id)]
+        return self.members.get(user_id, make_member())
 
     async def get_me(self):
-        from types import SimpleNamespace
-        return SimpleNamespace(id=999, username="TestRestrictBot", is_self=True)
+        return SimpleNamespace(id=FAKE_BOT_ID, username="TestRestrictBot", is_self=True)
 
     async def get_chat(self, chat_id):
         from types import SimpleNamespace
@@ -561,6 +681,62 @@ class FakeBot:
 
     async def download_media(self, *args, **kwargs):
         return None
+
+    # private invite links ---------------------------------------------------
+    async def invoke(self, query, *args, **kwargs):
+        """Answer ``messages.CheckChatInvite`` from the ``invites`` mapping."""
+        from pyrogram import raw
+        from pyrogram.errors import (InviteRequestSent, InviteHashExpired,
+                                     InviteHashInvalid)
+        self.invoked.append(query)
+        if not isinstance(query, raw.functions.messages.CheckChatInvite):
+            raise AssertionError(f"unexpected raw call: {query!r}")
+        behaviour = self.invites.get(query.hash, "expired")
+        if behaviour == "expired":
+            raise InviteHashExpired()
+        if behaviour == "invalid":
+            raise InviteHashInvalid()
+        if behaviour == "approval":
+            raise InviteRequestSent()
+        if behaviour == "join":
+            return raw.types.ChatInvite(
+                title="Private Channel", photo=raw.types.ChatPhoto(photo_id=1, dc_id=2),
+                participants_count=1, color=0, channel=True, request_needed=False,
+            )
+        return raw.types.ChatInviteAlready(chat=raw.types.Channel(
+            id=FAKE_RAW_CHANNEL_ID, title="Private Channel",
+            photo=raw.types.ChatPhoto(photo_id=1, dc_id=2), date=1,
+            access_hash=1, username=None,
+        ))
+
+    async def join_chat(self, chat_id):
+        from types import SimpleNamespace
+        from pyrogram.errors import UserAlreadyParticipant
+        self.joined_chats.append(chat_id)
+        invite_hash = str(chat_id).rstrip("/").split("/")[-1].lstrip("+")
+        if self.invites.get(invite_hash) == "approval":
+            raise UserAlreadyParticipant()
+        return SimpleNamespace(id=FAKE_PRIVATE_CHAT_ID, title="Private Channel",
+                               username=None, type="channel")
+
+    async def export_chat_invite_link(self, chat_id):
+        return SimpleNamespace(invite_link=f"https://t.me/+export{chat_id}")
+
+    async def resolve_peer(self, chat_id):
+        return f"peer:{chat_id}"
+
+    # join requests ----------------------------------------------------------
+    async def get_chat_join_requests(self, chat_id, limit=0, query=""):
+        for joiner in list(self.join_requests.get(chat_id, [])):
+            yield joiner
+
+    async def approve_chat_join_request(self, chat_id, user_id):
+        self.approved.append((chat_id, user_id))
+        return True
+
+    async def decline_chat_join_request(self, chat_id, user_id):
+        self.declined.append((chat_id, user_id))
+        return True
 
 
 @pytest.fixture(autouse=True)

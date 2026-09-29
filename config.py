@@ -48,3 +48,21 @@ FEEDBACK_LINK_WARNING = (
 CHANNEL_CLEANUP_SECONDS = 5
 #: Minimum delay between two channel-dump extraction requests (anti-ban guard).
 CHANNEL_EXTRACT_COOLDOWN = 3.0
+
+# --------------------------------------------------------------------------- #
+#  Force subscription (multi-channel) limits and wording
+# --------------------------------------------------------------------------- #
+#: Longest custom join-button label the owner may type.  Button labels must
+#: stay inside the 28 visible-character mobile budget, so the input limit is
+#: kept a little below it to leave room for emojis.
+FSUB_MAX_BUTTON_CHARS = 24
+#: Join buttons shown per keyboard page (keeps every page ≤ 7 rows).
+FSUB_ITEMS_PER_PAGE = 5
+#: Entries shown per page of the owner management keyboard (two buttons each).
+FSUB_LIST_PER_PAGE = 4
+#: How many join requests are read when checking the approve list.
+FSUB_JOINER_SCAN_LIMIT = 200
+#: Default label of the "I joined" verification button.
+FSUB_VERIFY_LABEL = "✅ I Joined"
+#: Placeholder title used when Telegram reports no title for a chat.
+CHANNEL_TITLE_FALLBACK = "Channel {chat_id}"
