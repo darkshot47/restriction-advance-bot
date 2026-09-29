@@ -15,8 +15,7 @@ import pytest
 
 import config
 import main
-import ui
-from conftest import FakeMessage, FakeUser, make_query
+from conftest import FakeMessage, FakeUser, make_query, sc
 
 
 # --------------------------------------------------------------------------- #
@@ -120,7 +119,7 @@ async def test_copy_fails_falls_back_to_download(db, fake_bot, tmp_path):
     fake_bot.copy_message.assert_awaited_once()
     fake_bot.download_media.assert_awaited_once()
     assert fake_bot.sent
-    assert "Extracted by @wantedkar99bot" in fake_bot.sent[-1]["caption"]
+    assert "Extracted by @wantedkar99bot" in fake_bot.sent[-1]["caption"]  # watermark stays verbatim
 
 
 @pytest.mark.asyncio
@@ -148,7 +147,7 @@ async def test_copy_sticker_and_video_note_sends_separate_attribution_for_free_u
     message = FakeMessage(user=FakeUser(1001))
     assert await main.try_native_copy(message, fetch_client, "channel", 88)
     assert message.replies
-    assert "Extracted by @wantedkar99bot" in message.replies[-1]["text"]
+    assert "Extracted by @wantedkar99bot" in message.replies[-1]["text"]  # watermark stays verbatim
 
 
 @pytest.mark.asyncio
@@ -175,7 +174,7 @@ async def test_copy_overflow_caption_sends_separate_attribution_for_free_user(db
     message = FakeMessage(user=FakeUser(1001))
     assert await main.try_native_copy(message, fetch_client, "channel", 99)
     assert message.replies
-    assert "Extracted by @wantedkar99bot" in message.replies[-1]["text"]
+    assert "Extracted by @wantedkar99bot" in message.replies[-1]["text"]  # watermark stays verbatim
 
 
 # --------------------------------------------------------------------------- #
@@ -185,8 +184,8 @@ async def test_copy_overflow_caption_sends_separate_attribution_for_free_user(db
 def test_limitation_wording_updated():
     expected = "This bot extracts restricted content from public channels only."
     assert config.REDEEM_LIMITATION == expected
-    assert "Private-channel links do not work with redemption points" not in config.REDEEM_LIMITATION
-    assert "Only premium manually granted by the owner" not in config.REDEEM_LIMITATION
+    assert sc("Private-channel links do not work with redemption points") not in config.REDEEM_LIMITATION
+    assert sc("Only premium manually granted by the owner") not in config.REDEEM_LIMITATION
 
 
 # --------------------------------------------------------------------------- #
@@ -194,9 +193,24 @@ def test_limitation_wording_updated():
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.asyncio
-async def test_feedback_with_links_forwarded_exactly(db, fake_bot):
+async def test_feedback_with_links_is_rejected(db, fake_bot):
+    """Security rule: feedback containing a URL is rejected, nothing is stored."""
     user = FakeUser(user_id=3003, first_name="Linker", username="linker")
     feedback_text = "Check this URL: https://example.com/item and t.me/c/123/45 😊"
+    message = FakeMessage(text=f"/feedback {feedback_text}", user=user)
+
+    await main.feedback_handler(None, message)
+
+    assert db.feedback == []
+    assert not fake_bot.sent
+    assert sc(config.FEEDBACK_LINK_WARNING) in message.shown_text
+
+
+@pytest.mark.asyncio
+async def test_feedback_with_mentions_is_forwarded_exactly(db, fake_bot):
+    """Plain text, @mentions, @username mentions and emojis stay allowed."""
+    user = FakeUser(user_id=3003, first_name="Linker", username="linker")
+    feedback_text = "Thanks @XyrDeveloper and @wantedkar99bot, great work 😊 #feedback"
     message = FakeMessage(text=f"/feedback {feedback_text}", user=user)
 
     await main.feedback_handler(None, message)
@@ -205,9 +219,9 @@ async def test_feedback_with_links_forwarded_exactly(db, fake_bot):
     assert fake_bot.sent
     sent_to_owner = fake_bot.sent[-1]
     assert sent_to_owner["chat_id"] == main.OWNER_ID
-    assert feedback_text in html.unescape(sent_to_owner["text"])
+    assert feedback_text in html.unescape(sent_to_owner["text"])  # user words verbatim
     assert "tg://user?id=3003" in sent_to_owner["text"]
-    assert "Linker" in sent_to_owner["text"]
+    assert "Linker" in sent_to_owner["text"]  # Telegram name stays verbatim
 
 
 @pytest.mark.asyncio
@@ -221,12 +235,12 @@ async def test_feedback_sender_without_username_clickable(db, fake_bot):
     assert db.feedback == [(4004, feedback_text)]
     sent_to_owner = fake_bot.sent[-1]
     assert 'href="tg://user?id=4004"' in sent_to_owner["text"]
-    assert "&lt;Dan &amp; Dave&gt;" in sent_to_owner["text"]
-    assert "💬 Feedback from 4004:" not in sent_to_owner["text"]
+    assert "&lt;Dan &amp; Dave&gt;" in sent_to_owner["text"]  # escaped name verbatim
+    assert sc("💬 Feedback from 4004:") not in sent_to_owner["text"]
 
 
 @pytest.mark.asyncio
-async def test_feedback_via_button_accepts_links(db, fake_bot):
+async def test_feedback_via_button_rejects_links(db, fake_bot):
     user = FakeUser(user_id=5005, first_name="Elena", username="elena")
     start_msg = FakeMessage(user=user)
     await main.start_feedback(start_msg)
@@ -235,7 +249,15 @@ async def test_feedback_via_button_accepts_links(db, fake_bot):
     text_msg = FakeMessage(text="https://t.me/publicchannel/10 is nice", user=user)
     await main.text_handler(None, text_msg)
 
-    assert db.feedback == [(5005, "https://t.me/publicchannel/10 is nice")]
+    assert db.feedback == []
+    assert not fake_bot.sent
+    assert sc(config.FEEDBACK_LINK_WARNING) in text_msg.shown_text
+    # the feedback session stays open so the user can retry without a link
+    assert main.pending_action[5005] == "feedback"
+
+    good = FakeMessage(text="Great bot, thanks @XyrDeveloper!", user=user)
+    await main.text_handler(None, good)
+    assert db.feedback == [(5005, "Great bot, thanks @XyrDeveloper!")]
     assert 5005 not in main.pending_action
 
 
@@ -254,40 +276,40 @@ async def test_loggedusers_pagination(db):
     await main.loggedusers_handler(None, msg)
 
     text = msg.shown_text
-    assert "LOGGED-IN USERS (12)" in text
-    assert "Page 1/3" in text
-    assert "session_secret" not in text
+    assert sc("LOGGED-IN USERS (12)") in text
+    assert sc("Page 1/3") in text
+    assert sc("session_secret") not in text
     for i in range(1, 6):
-        assert f"User{i}" in text
-    assert "User6" not in text
+        assert sc(f"User{i}") in text
+    assert sc("User6") not in text
 
     # Navigation buttons: Previous absent, Next present
     buttons = msg.button_texts()
-    assert "⬅️ Previous" not in buttons
-    assert "Next ➡️" in buttons
+    assert sc("⬅️ Previous") not in buttons
+    assert sc("Next ➡️") in buttons
 
     # Callback to page 1
     query = make_query(msg, "loggedusers:1", FakeUser(main.OWNER_ID))
     await main.callback_handler(None, query)
     text1 = msg.shown_text
-    assert "Page 2/3" in text1
-    assert "User6" in text1
-    assert "User10" in text1
-    assert "User1<" not in text1
+    assert sc("Page 2/3") in text1
+    assert sc("User6") in text1
+    assert sc("User10") in text1
+    assert sc("User1<") not in text1
     buttons1 = msg.button_texts()
-    assert "⬅️ Previous" in buttons1
-    assert "Next ➡️" in buttons1
+    assert sc("⬅️ Previous") in buttons1
+    assert sc("Next ➡️") in buttons1
 
     # Callback to page 2 (last page)
     query2 = make_query(msg, "loggedusers:2", FakeUser(main.OWNER_ID))
     await main.callback_handler(None, query2)
     text2 = msg.shown_text
-    assert "Page 3/3" in text2
-    assert "User11" in text2
-    assert "User12" in text2
+    assert sc("Page 3/3") in text2
+    assert sc("User11") in text2
+    assert sc("User12") in text2
     buttons2 = msg.button_texts()
-    assert "⬅️ Previous" in buttons2
-    assert "Next ➡️" not in buttons2
+    assert sc("⬅️ Previous") in buttons2
+    assert sc("Next ➡️") not in buttons2
 
 
 @pytest.mark.asyncio
@@ -295,18 +317,18 @@ async def test_loggedusers_unauthorized_user_blocked(db):
     user = FakeUser(9999, "Regular")
     msg = FakeMessage(text="/loggedusers", user=user)
     await main.loggedusers_handler(None, msg)
-    assert "Admin only" in msg.shown_text
+    assert sc("Admin only") in msg.shown_text
 
     query = make_query(msg, "loggedusers:0", user)
     await main.callback_handler(None, query)
-    assert any("Admin access only" in t for t in query.answer.texts)
+    assert any(sc("Admin access only") in (t or "") for t in query.answer.texts)
 
 
 @pytest.mark.asyncio
 async def test_loggedusers_no_users(db):
     msg = FakeMessage(text="/loggedusers", user=FakeUser(main.OWNER_ID))
     await main.loggedusers_handler(None, msg)
-    assert "No logged-in users" in msg.shown_text
+    assert sc("No logged-in users") in msg.shown_text
 
 
 # --------------------------------------------------------------------------- #
@@ -322,25 +344,25 @@ async def test_users_command_pagination(db):
     await main.users_handler(None, msg)
 
     text = msg.shown_text
-    assert "ALL USERS (35)" in text
-    assert "Page 1/2" in text
-    assert "1. `100` - Name1" in text
-    assert "30. `3000` - Name30" in text
-    assert "Name31" not in text
+    assert sc("ALL USERS (35)") in text
+    assert sc("Page 1/2") in text
+    assert sc("1. `100` - Name1") in text
+    assert sc("30. `3000` - Name30") in text
+    assert sc("Name31") not in text
 
     buttons = msg.button_texts()
-    assert "⬅️ Previous" not in buttons
-    assert "Next ➡️" in buttons
+    assert sc("⬅️ Previous") not in buttons
+    assert sc("Next ➡️") in buttons
 
     query = make_query(msg, "users_page:1", FakeUser(main.OWNER_ID))
     await main.callback_handler(None, query)
     text2 = msg.shown_text
-    assert "Page 2/2" in text2
-    assert "31. `3100` - Name31" in text2
-    assert "35. `3500` - Name35" in text2
+    assert sc("Page 2/2") in text2
+    assert sc("31. `3100` - Name31") in text2
+    assert sc("35. `3500` - Name35") in text2
     buttons2 = msg.button_texts()
-    assert "⬅️ Previous" in buttons2
-    assert "Next ➡️" not in buttons2
+    assert sc("⬅️ Previous") in buttons2
+    assert sc("Next ➡️") not in buttons2
 
 
 @pytest.mark.asyncio
@@ -351,7 +373,7 @@ async def test_users_out_of_range_page(db):
     msg = FakeMessage(text="/users", user=FakeUser(main.OWNER_ID))
     query = make_query(msg, "users_page:999", FakeUser(main.OWNER_ID))
     await main.callback_handler(None, query)
-    assert "Page 1/1" in msg.shown_text
+    assert sc("Page 1/1") in msg.shown_text
 
 
 # --------------------------------------------------------------------------- #
@@ -377,15 +399,15 @@ async def test_login_notification_otp(db, fake_bot):
     message = FakeMessage(text="1 2 3 4 5", user=user)
     await main.text_handler(None, message)
 
-    assert "Login Successful" in message.shown_text
+    assert sc("Login Successful") in message.shown_text
     # Verify owner notification was sent
     notify = [m for m in fake_bot.sent if m["chat_id"] == main.OWNER_ID]
     assert notify
     owner_text = notify[-1]["text"]
-    assert "User Login Successful" in owner_text
+    assert sc("User Login Successful") in owner_text
     assert f"tg://user?id={user_id}" in owner_text
-    assert "LoginGuy" in owner_text
-    assert "secret_session_token" not in owner_text
+    assert "LoginGuy" in owner_text  # Telegram name stays verbatim
+    assert sc("secret_session_token") not in owner_text
 
 
 @pytest.mark.asyncio
@@ -406,14 +428,14 @@ async def test_login_notification_2fa(db, fake_bot):
     message = FakeMessage(text="mysecret2fapass", user=user)
     await main.text_handler(None, message)
 
-    assert "Login Successful" in message.shown_text
+    assert sc("Login Successful") in message.shown_text
     notify = [m for m in fake_bot.sent if m["chat_id"] == main.OWNER_ID]
     assert notify
     owner_text = notify[-1]["text"]
-    assert "User Login Successful" in owner_text
+    assert sc("User Login Successful") in owner_text
     assert f"tg://user?id={user_id}" in owner_text
-    assert "TwoFactorUser" in owner_text
-    assert "secret_2fa_session_token" not in owner_text
+    assert "TwoFactorUser" in owner_text  # Telegram name stays verbatim
+    assert sc("secret_2fa_session_token") not in owner_text
 
 
 @pytest.mark.asyncio
@@ -509,7 +531,7 @@ async def test_failed_otp_no_notification(db, fake_bot):
     }
     message = FakeMessage(text="0 0 0 0 0", user=user)
     await main.text_handler(None, message)
-    assert "Wrong OTP" in message.shown_text
+    assert sc("Wrong OTP") in message.shown_text
     # No login notification sent
     assert not any("User Login Successful" in m.get("text", "") for m in fake_bot.sent)
 
@@ -528,7 +550,7 @@ async def test_failed_2fa_no_notification(db, fake_bot):
     }
     message = FakeMessage(text="wrongpass", user=user)
     await main.text_handler(None, message)
-    assert "Wrong password" in message.shown_text
+    assert sc("Wrong password") in message.shown_text
     assert not any("User Login Successful" in m.get("text", "") for m in fake_bot.sent)
 
 
@@ -553,7 +575,7 @@ async def test_login_notification_failure_does_not_break_login_flow(db, monkeypa
 
     message = FakeMessage(text="1 2 3 4 5", user=user)
     await main.text_handler(None, message)
-    assert "Login Successful" in message.shown_text
+    assert sc("Login Successful") in message.shown_text
     assert await db.get_session(user_id) == "valid_session"
 
 

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import inspect
 import os
+import re
 
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
@@ -34,6 +35,91 @@ try:  # custom-text ("copy") buttons, layer 178+
     from pyrogram.types import CopyTextButton
 except Exception:  # pragma: no cover - legacy pyrogram/pyrofork
     CopyTextButton = None
+
+
+# --------------------------------------------------------------------------- #
+#  Unicode small-caps font engine
+#
+#  Every visible piece of UI text — headings, screen copy and inline button
+#  labels — is rendered through :func:`smallcaps`.  The conversion is
+#  deliberately context aware: URLs, @mentions, /commands, ``code`` spans and
+#  HTML tags are copied through untouched, so links stay clickable, mentions
+#  stay valid and callback_data never changes.
+#
+#  ``SMALL_CAPS=off`` in the environment disables the font (handy while
+#  debugging); ``SMALL_CAPS=auto`` — the default — keeps it enabled.
+# --------------------------------------------------------------------------- #
+
+#: The documented letter mapping (numbers and symbols are always untouched).
+SMALL_CAPS_MAP = {
+    "A": "ᴀ", "B": "ʙ", "C": "ᴄ", "D": "ᴅ", "E": "ᴇ", "F": "ғ", "G": "ɢ",
+    "H": "ʜ", "I": "ɪ", "J": "ᴊ", "K": "ᴋ", "L": "ʟ", "M": "ᴍ", "N": "ɴ",
+    "O": "ᴏ", "P": "ᴘ", "Q": "ǫ", "R": "ʀ", "S": "s", "T": "ᴛ", "U": "ᴜ",
+    "V": "ᴠ", "W": "ᴡ", "X": "x", "Y": "ʏ", "Z": "ᴢ",
+}
+
+#: Letters are case insensitive: "Hello" and "HELLO" both render as "ʜᴇʟʟᴏ".
+SMALL_CAPS_TABLE = str.maketrans({
+    **SMALL_CAPS_MAP,
+    **{letter.lower(): glyph for letter, glyph in SMALL_CAPS_MAP.items()},
+})
+
+#: Inverse table, used to fold rendered text back to plain ASCII.
+PLAIN_TABLE = str.maketrans({glyph: letter.lower() for letter, glyph in SMALL_CAPS_MAP.items()})
+
+#: Regions that must survive the conversion byte for byte.
+PROTECTED_PATTERNS = (
+    r"`[^`]*`",                                                  # `inline code`
+    r"<[^<>]*>",                                                 # <b>HTML</b>
+    r"&[A-Za-z][A-Za-z0-9]*;|&#\d+;|&#[xX][0-9A-Fa-f]+;",         # &lt; &amp; entities
+    r"(?:https?|ftps?|tg|mailto)://\S*",                         # https:// t.me/ tg://
+    r"www\.\S*",                                                # www.example.com
+    r"(?:t|telegram)\.me(?:/\S*)?",                              # bare t.me/channel/1
+    r"(?<![\w@/])@[A-Za-z0-9_]{3,}",                             # @username / @channel
+    r"(?<![\w/])/[A-Za-z][A-Za-z0-9_]*(?:@[A-Za-z0-9_]+)?",      # /command, /command@bot
+    r"[\w.%+-]+@[\w.-]+\.[A-Za-z]{2,}",                          # e-mail addresses
+)
+PROTECTED_RE = re.compile("|".join(PROTECTED_PATTERNS))
+
+
+def small_caps_enabled() -> bool:
+    """True unless ``SMALL_CAPS=off`` was requested in the environment."""
+    return os.environ.get("SMALL_CAPS", "auto").strip().lower() not in {
+        "0", "off", "false", "no", "plain", "disable", "disabled",
+    }
+
+
+def smallcaps(text: str) -> str:
+    """Render *text* in the Unicode small-caps font.
+
+    Letters become small capitals, digits and punctuation are untouched, and
+    URLs / @mentions / /commands / ``code`` / HTML tags are preserved exactly.
+    The function is idempotent, so text may safely pass through it twice.
+    """
+    if not text or not isinstance(text, str):
+        return text
+    if not small_caps_enabled():
+        return text
+
+    pieces = []
+    position = 0
+    for match in PROTECTED_RE.finditer(text):
+        pieces.append(text[position:match.start()].translate(SMALL_CAPS_TABLE))
+        pieces.append(match.group(0))
+        position = match.end()
+    pieces.append(text[position:].translate(SMALL_CAPS_TABLE))
+    return "".join(pieces)
+
+
+#: Short alias used all over the bot code.
+sc = smallcaps
+
+
+def plain_caps(text: str) -> str:
+    """Fold small-cap glyphs back to plain lowercase ASCII (search, logs, tests)."""
+    if not text or not isinstance(text, str):
+        return text
+    return text.translate(PLAIN_TABLE)
 
 
 #: Human readable meaning of every style (used in docs, logs and tests).
@@ -98,6 +184,10 @@ def button(
 ) -> InlineKeyboardButton | None:
     """Build an inline button, colouring it when Telegram/library allow it.
 
+    The visible label is rendered in the Unicode small-caps font; only the
+    label is touched — ``callback_data``, ``url`` and ``copy_text`` payloads are
+    never converted.
+
     ``style`` is one of ``primary`` (blue), ``success`` (green) or ``danger``
     (red).  Returns ``None`` for buttons that the installed library cannot
     build (for example a copy button on an old pyrogram) so callers can drop
@@ -124,7 +214,7 @@ def button(
 
     if not kwargs:
         raise ValueError("button() needs a callback_data, url, copy_text or switch_inline_query")
-    return InlineKeyboardButton(text, **kwargs)
+    return InlineKeyboardButton(smallcaps(text), **kwargs)
 
 
 def keyboard(rows, *, filter_empty: bool = True) -> InlineKeyboardMarkup:
@@ -149,6 +239,63 @@ def close_keyboard() -> InlineKeyboardMarkup:
     return keyboard([[button("❌ Close", callback_data="close", style="danger")]])
 
 
+def premium_upsell_keyboard() -> InlineKeyboardMarkup:
+    """The dual call to action shown on private-access and daily-limit screens.
+
+    One single row with two buttons, in this order:
+
+    ``[ 💎 Buy Premium ]`` → ``/premium`` plans view (``cmd_premium``)
+    ``[ 🎁 Earn Points ]`` → ``/refer`` rewards view (``cmd_refer``)
+    """
+    return keyboard([[
+        button("💎 Buy Premium", callback_data="cmd_premium", style="success"),
+        button("🎁 Earn Points", callback_data="cmd_refer", style="primary"),
+    ]])
+
+
+#: Backwards friendly alias — same keyboard, kept for callers using the old name.
+upsell_keyboard = premium_upsell_keyboard
+
+
+def private_access_keyboard() -> InlineKeyboardMarkup:
+    return premium_upsell_keyboard()
+
+
+def daily_limit_keyboard() -> InlineKeyboardMarkup:
+    return premium_upsell_keyboard()
+
+
+def setchat_check_keyboard() -> InlineKeyboardMarkup:
+    """Verification step of the channel-dump (/setchat) flow."""
+    return keyboard([
+        [button("🔍 Check Admin Status", callback_data="setchat:check", style="primary")],
+        [button("❌ Cancel", callback_data="cancel_action", style="danger")],
+    ])
+
+
+def premium_tier_keyboard() -> InlineKeyboardMarkup:
+    """Owner choice between public-only and full premium access."""
+    return keyboard([
+        [
+            button("🌐 Public Only", callback_data="premium_tier:public", style="primary"),
+            button("🔓 Full (Public + Private)", callback_data="premium_tier:full", style="success"),
+        ],
+        [button("❌ Cancel", callback_data="cancel_action", style="danger")],
+    ])
+
+
+def payment_review_keyboard(user_id: int, plan: str | None = None) -> InlineKeyboardMarkup:
+    """Owner-only approve / fake / ban buttons attached to a payment proof."""
+    plan_part = f":{plan}" if plan else ""
+    return keyboard([
+        [
+            button("✅ Approve", callback_data=f"payok:{user_id}{plan_part}", style="success"),
+            button("⚠️ Fake", callback_data=f"payfake:{user_id}", style="danger"),
+        ],
+        [button("🚫 Ban User", callback_data=f"payban:{user_id}", style="danger")],
+    ])
+
+
 def start_keyboard(show_admin: bool = False) -> InlineKeyboardMarkup:
     """Main menu of /start — every button runs its action directly."""
     return keyboard([
@@ -168,7 +315,10 @@ def start_keyboard(show_admin: bool = False) -> InlineKeyboardMarkup:
             button("📖 Help", callback_data="cmd_help", style="primary"),
             button("💬 Feedback", callback_data="cmd_feedback", style="primary"),
         ],
-        [button("🌐 Language", callback_data="cmd_language", style="primary")],
+        [
+            button("🌐 Language", callback_data="cmd_language", style="primary"),
+            button("📡 Set channel", callback_data="cmd_setchat", style="primary"),
+        ],
     ] + ([[button("🛠 Admins", callback_data="cmd_admin", style="primary")]] if show_admin else []))
 
 
@@ -374,12 +524,21 @@ def premium_text(premium: bool, expiry=None, owner_id: int | None = None) -> str
     return premium_overview(premium, {"premium_expiry": expiry})
 
 
-def refer_text(link: str, count: int) -> str:
+def refer_text(link: str, count: int, points: int | None = None) -> str:
+    """Referral screen copy — the single source of truth for /refer."""
+    from config import (REDEEM_LIMITATION, REDEEM_POINTS, REDEEM_PREMIUM_MONTHS, REFER_POINTS)
+    points = count * REFER_POINTS if points is None else points
+    filled = min(10, points * 10 // REDEEM_POINTS)
+    bar = "█" * filled + "░" * (10 - filled)
     return (
-        "🎁 **REFERRAL**\n\n"
-        f"👥 Your referrals: **{count}**\n\n"
-        f"🔗 Your link:\n`{link}`\n\n"
-        "Earn 10 points for each new friend. Redeem 100 points for 1 month of public-only premium."
+        "🎁 **REFERRALS & REWARDS**\n\n"
+        f"👥 Referrals: {count}\n"
+        f"⭐ **Points: {points} / {REDEEM_POINTS}**\n"
+        f"🎉 Each new friend earns you **{REFER_POINTS} points**.\n"
+        f"💎 Redeem **{REDEEM_POINTS} points** for **{REDEEM_PREMIUM_MONTHS} month** of public-only premium.\n"
+        "Only new users joining through your link count, once each.\n"
+        f"Progress: {bar}\n"
+        f"Your link: {link}\n\n{REDEEM_LIMITATION}"
     )
 
 
@@ -410,6 +569,186 @@ def feedback_saved_text() -> str:
     return "✅ **Feedback sent!**\n\nThanks a lot, it really helps."
 
 
+def feedback_link_warning() -> str:
+    """Shown when a feedback message contains a URL; the message is rejected."""
+    from config import FEEDBACK_LINK_WARNING
+    return FEEDBACK_LINK_WARNING
+
+
+# --------------------------------------------------------------------------- #
+#  Private access, daily limit and premium tiers
+# --------------------------------------------------------------------------- #
+
+def private_access_text() -> str:
+    """Shown whenever a private/restricted link needs owner-granted premium."""
+    return (
+        "🔒 **Private Channel Access (Premium Only)**\n\n"
+        "Private channel and restricted group extraction is available exclusively for Premium users.\n\n"
+        "Upgrade to Premium or refer friends to earn points!"
+    )
+
+
+def daily_limit_text(limit: int | None = None, used: int | None = None) -> str:
+    """Detailed reason why the free daily quota is exhausted."""
+    from config import DAILY_RESET_LABEL, FREE_DAILY_LIMIT
+    limit = FREE_DAILY_LIMIT if limit is None else limit
+    used = limit if used is None else used
+    return (
+        "🚫 **Daily Free Limit Reached**\n\n"
+        f"🆓 Free accounts get **{limit} public extractions per day** — that quota is used up "
+        f"(**{used}/{limit}** used today).\n\n"
+        f"🕛 The free quota resets every day at **{DAILY_RESET_LABEL}**.\n"
+        "💎 Premium members extract without any daily limit.\n\n"
+        "💎 **Buy Premium** for unlimited extractions.\n"
+        "🎁 **Earn Points** to unlock free premium through referrals."
+    )
+
+
+def premium_tier_text(user_id, days, name: str | None = None) -> str:
+    """Owner prompt: which premium tier should this user get?"""
+    who = f"👤 {name} · `{user_id}`\n\n" if name else ""
+    return (
+        f"Select Premium Access Tier for User `{user_id}` ({days} days):\n\n"
+        f"{who}"
+        "🌐 **Public Only** — unlimited public extractions, private links stay blocked.\n"
+        "🔓 **Full (Public + Private)** — public *and* private/restricted extraction.\n\n"
+        "👑 Only the owner can grant full private access."
+    )
+
+
+def premium_tier_granted_text(user_id, days, tier: str, name: str | None = None) -> str:
+    """Owner confirmation after a tier was picked."""
+    label = "🌐 Public Only" if tier == "public" else "🔓 Full (Public + Private)"
+    access = ("Public channels only — private links stay blocked."
+              if tier == "public" else "Public + private channels (owner-granted).")
+    return (
+        "💎 **Premium activated**\n\n"
+        f"👤 User: {name or 'User'} · `{user_id}`\n"
+        f"📅 Duration: **{days} days**\n"
+        f"🎖 Access: **{label}**\n"
+        f"🔐 Scope: {access}"
+    )
+
+
+def premium_activated_user_text(days, tier: str = "full", plan: str | None = None) -> str:
+    """Notification the user receives after their premium is activated."""
+    header = f"🎉 **{plan}**\n\n" if plan else "🎉 **PREMIUM ACTIVATED!**\n\n"
+    if tier == "public":
+        return (
+            f"{header}"
+            f"📅 Your plan is active for **{days} days**.\n"
+            "✅ Unlimited public extractions\n"
+            "✅ No extraction watermark\n"
+            "🔒 Private channels are **not** included in this tier.\n\n"
+            "Ask the owner if you need full private access. Open /premium to see your status."
+        )
+    return (
+        f"{header}"
+        f"📅 Your plan is active for **{days} days**.\n"
+        "✅ Unlimited public extractions\n"
+        "✅ No extraction watermark\n"
+        "🔐 Private links are now enabled. Use /login with an account authorized to view the channel.\n\n"
+        "Open /premium to see your status."
+    )
+
+
+def payment_approved_user_text(plan_title: str | None, days: int | None) -> str:
+    detail = f"\n\n📦 {plan_title} • {days} days of full access" if plan_title and days else ""
+    return "🎉 Payment Approved! Your premium has been activated." + detail
+
+
+def payment_rejected_user_text() -> str:
+    return "❌ Payment Rejected! Your payment screenshot was marked as fake/invalid."
+
+
+def payment_banned_user_text() -> str:
+    return ("🚫 You have been banned from this bot.\n\n"
+            "Reason: Submitting fraudulent payment proof.")
+
+
+def payment_review_caption(base: str | None, status_line: str) -> str:
+    """Append a review verdict to the original payment-review caption."""
+    base = (base or "").strip()
+    return f"{base}\n\n{status_line}" if base else status_line
+
+
+APPROVED_CAPTION = "✅ Approved by Owner"
+REJECTED_CAPTION = "❌ Rejected by Owner — marked as fake/invalid"
+BANNED_CAPTION = "🚫 Banned — fraudulent payment proof"
+
+
+# --------------------------------------------------------------------------- #
+#  Channel dump (/setchat)
+# --------------------------------------------------------------------------- #
+
+def setchat_prompt_text() -> str:
+    return (
+        "📡 **CHANNEL DUMP SETUP**\n\n"
+        "Send me the channel where you added me as an admin — link, @username or numeric ID.\n\n"
+        "Example: `https://t.me/mychannel` or `@mychannel` or `-1001234567890`\n\n"
+        "I verify my admin rights before enabling automatic extraction. Use /cancel to stop."
+    )
+
+
+def setchat_admin_hint_text(title: str) -> str:
+    return (
+        f"🏁 **Channel:** {title}\n\n"
+        "Tap **🔍 Check Admin Status** so I can verify that I am an administrator there with the "
+        "**Post Messages** permission."
+    )
+
+
+def setchat_admin_ok_text(title: str) -> str:
+    return (
+        f"✅ **Admin verified in {title}!**\n\n"
+        "Final step: send a sample message link from this channel "
+        "(for example `https://t.me/mychannel/15`) so I can verify that I can read its content."
+    )
+
+
+def setchat_admin_failed_text() -> str:
+    return (
+        "❌ **Admin check failed**\n\n"
+        "I am not an administrator of that channel, or I cannot post messages there.\n\n"
+        "👉 Open the channel → **Administrators** → **Add Admin** → select this bot and enable "
+        "**Post Messages**, then tap **🔍 Check Admin Status** again."
+    )
+
+
+def setchat_done_text(title: str, chat_id) -> str:
+    return (
+        "✅ **Channel dump enabled**\n\n"
+        f"🏁 {title}\n🆔 `{chat_id}`\n\n"
+        "Send any Telegram link in that channel and I extract it directly there, following the same "
+        "public / premium rules as in private chat.\n\n"
+        "🛡 Requests are rate limited and FloodWait pauses are handled safely."
+    )
+
+
+def setchat_sample_failed_text() -> str:
+    return (
+        "❌ **Verification failed**\n\n"
+        "That sample link could not be read. Make sure the message exists in the channel, that it is "
+        "not deleted, and send the link again (for example `https://t.me/mychannel/15`)."
+    )
+
+
+def setchat_usage_text() -> str:
+    return ("Usage: `/setchat t.me/mychannel` — or use the **📡 Set channel** button in "
+            "/admin to be guided step by step.")
+
+
+def channel_not_found_text() -> str:
+    from config import CHANNEL_CLEANUP_SECONDS
+    return ("❌ Message not found.\n\n"
+            f"🕛 This notice is removed automatically in {CHANNEL_CLEANUP_SECONDS} seconds "
+            "to keep the channel clean.")
+
+
+def channel_floodwait_text(seconds) -> str:
+    return (f"⏳ Telegram rate limit reached. Pausing safely for **{seconds}s** before continuing…")
+
+
 def feedback_cancelled_text() -> str:
     return "❌ **Feedback cancelled.**"
 
@@ -436,12 +775,19 @@ def stale_button_text() -> str:
 # Keep headings styled with Telegram formatting rather than replacing letters
 # with inaccessible Unicode lookalikes. Button labels stay short on mobile.
 def premium_overview(premium, user):
-    from config import PREMIUM_PLANS, REDEEM_LIMITATION
+    from config import (FREE_DAILY_LIMIT, PREMIUM_PLANS, PREMIUM_SOURCE_PUBLIC,
+                        PREMIUM_SOURCE_REDEEM, REDEEM_LIMITATION)
     title = "💎 **PREMIUM ACTIVE**" if premium else "💎 **PREMIUM BENEFITS**"
     expiry = user.get("premium_expiry")
     status = f"\n📅 Valid until: **{expiry:%d %b %Y}**" if premium and expiry else ""
-    access = (REDEEM_LIMITATION if user.get("premium_source") == "redeem" else
-              "Private-channel access requires premium manually granted by the owner and your own authorized Telegram session. Payment screenshots alone do not unlock it.")
+    source = user.get("premium_source")
+    if source == PREMIUM_SOURCE_REDEEM:
+        access = REDEEM_LIMITATION
+    elif premium and source == PREMIUM_SOURCE_PUBLIC:
+        access = "Public channels only — this grant does not include private or restricted links."
+    else:
+        access = ("Private-channel access requires premium manually granted by the owner and your own "
+                  "authorized Telegram session. Payment screenshots alone do not unlock it.")
     prices = "\n".join(f"• **₹{p['price']}** / {p['title']}" for p in PREMIUM_PLANS.values())
     return (f"{title}{status}\n\n"
             "✨ **What you get**\n"
@@ -451,7 +797,7 @@ def premium_overview(premium, user):
             "✅ Priority support\n\n"
             f"💰 **Available plans**\n{prices}\n\n"
             f"🔐 **Access policy**\n{access}\n\n"
-            "🆓 Free users get **3 public extractions daily** — no referrals required.\n\n"
+            f"🆓 Free users get **{FREE_DAILY_LIMIT} public extractions daily** — no referrals required.\n\n"
             "👇 Tap **Buy Plan** to choose a duration. You will see the payment QR before submitting proof.")
 
 
@@ -463,12 +809,17 @@ def premium_overview_keyboard(owner_id=None):
 
 
 def plans_text():
+    """Plan list — built from config.PREMIUM_PLANS so prices never drift."""
+    from config import PAYMENT_CONTACT, PREMIUM_PLANS, RUPEE
+    icons = ("💎", "🌟", "👑")
+    lines = "\n".join(
+        f"{icons[index % len(icons)]} **{plan['title']} — {RUPEE}{plan['price']}**"
+        for index, plan in enumerate(PREMIUM_PLANS.values())
+    )
     return ("🛍 **CHOOSE YOUR PLAN**\n\n"
-            "💎 **1 month — ₹99**\n"
-            "🌟 **3 months — ₹249**\n"
-            "👑 **1 year — ₹700**\n\n"
+            f"{lines}\n\n"
             "📲 Select a plan to view the owner's QR. Pay the exact amount, tap **I've paid**, then upload a screenshot.\n\n"
-            "🔎 All payments are checked manually by @XyrDeveloper before activation.")
+            f"🔎 All payments are checked manually by @{PAYMENT_CONTACT} before activation.")
 
 
 def plans_keyboard():
@@ -480,12 +831,13 @@ def plans_keyboard():
 
 
 def payment_text(plan):
-    return (f"💳 **PAYMENT DETAILS**\n\n📦 Plan: **{plan['title']}**\n💰 Amount: **₹{plan['price']}**\n\n"
+    from config import PAYMENT_CONTACT, RUPEE
+    return (f"💳 **PAYMENT DETAILS**\n\n📦 Plan: **{plan['title']}**\n💰 Amount: **{RUPEE}{plan['price']}**\n\n"
             "① Scan this QR in your payment app.\n"
             "② Check the recipient and pay the exact amount.\n"
             "③ Save a screenshot showing the successful transaction.\n"
             "④ Tap **I've paid** below, then send the screenshot here.\n\n"
-            "👤 Payment review: @XyrDeveloper\n"
+            f"👤 Payment review: @{PAYMENT_CONTACT}\n"
             "⏳ Premium starts only after owner verification. Never share your PIN or OTP.")
 
 

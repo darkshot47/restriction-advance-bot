@@ -3,7 +3,7 @@ import datetime as dt
 import pytest
 
 import main
-from conftest import FakeMessage, FakeUser
+from conftest import FakeMessage, FakeUser, sc
 
 
 @pytest.mark.asyncio
@@ -47,9 +47,9 @@ async def test_redeem_grants_thirty_day_redeem_premium(db):
 async def test_free_referral_page_shows_points_and_private_warning(db):
     message = FakeMessage(user=FakeUser(42))
     await main.show_refer(message)
-    assert "points" in message.shown_text.lower()
-    assert "public channels only" in message.shown_text.lower()
-    assert "https://t.me/" in message.shown_text
+    assert sc("points") in message.shown_text.lower()
+    assert sc("public channels only") in message.shown_text.lower()
+    assert sc("https://t.me/") in message.shown_text
     assert any("🔒" in label for label in message.button_texts())
 
 
@@ -58,4 +58,4 @@ async def test_add_qr_is_owner_prompt(db):
     message = FakeMessage(text="/addqr", user=FakeUser(main.OWNER_ID))
     await main.addqr_handler(None, message)
     assert main.pending_action[main.OWNER_ID] == "qr_upload"
-    assert "photo" in message.shown_text.lower()
+    assert sc("photo") in message.shown_text.lower()
