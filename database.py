@@ -3,7 +3,8 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from datetime import datetime, timedelta
 import calendar
 from pymongo.errors import DuplicateKeyError
-from config import FREE_DAILY_LIMIT, REDEEM_PREMIUM_MONTHS
+from config import (FREE_DAILY_LIMIT, REDEEM_PREMIUM_MONTHS,
+                    PREMIUM_SOURCE_MANUAL, PREMIUM_SOURCE_REDEEM)
 
 MONGO_URL = os.environ.get("MONGO_URL")
 
@@ -15,6 +16,15 @@ downloads_col = db["downloads"]
 bookmarks_col = db["bookmarks"]
 feedback_col = db["feedback"]
 config_col = db["config"]
+
+
+def utcnow():
+    """Naive UTC clock — the free daily quota resets at midnight UTC.
+
+    Keeping the counters on UTC makes the user facing "resets at 00:00 UTC"
+    wording in ``ui.daily_limit_text`` literally true.
+    """
+    return datetime.utcnow()
 
 
 async def add_user(user_id, name, username=None):
@@ -47,7 +57,11 @@ async def add_user(user_id, name, username=None):
             "premium_source": None,
             "notifications": True,
             "silent_mode": False,
-            "favorites": []
+            "favorites": [],
+            # Channel dump (/setchat): the channel this user extracts into.
+            "channel_chat_id": None,
+            "channel_title": None,
+            "channel_username": None,
         }
         try:
             await users_col.insert_one(user_data)
@@ -96,7 +110,9 @@ async def get_premium_users_list():
 
 async def get_logged_users_list():
     users = []
-    async for user in users_col.find({"session_string": {"$exists": True, "$ne": None, "$ne": ""}}):
+    # ``$nin`` is the correct filter here: a duplicated ``$ne`` key would be
+    # silently collapsed by Python, dropping one of the two checks.
+    async for user in users_col.find({"session_string": {"$exists": True, "$nin": [None, ""]}}):
         users.append(user)
     return users
 
@@ -115,7 +131,7 @@ async def is_premium(user_id):
     return True
 
 
-async def add_premium(user_id, days=30, source="manual"):
+async def add_premium(user_id, days=30, source=PREMIUM_SOURCE_MANUAL):
     expiry = datetime.now() + timedelta(days=days)
     await users_col.update_one(
         {"user_id": user_id},
@@ -147,7 +163,7 @@ async def check_daily_limit(user_id, limit=FREE_DAILY_LIMIT):
     user = await users_col.find_one({"user_id": user_id})
     if not user:
         return True, 0
-    today = datetime.now().date()
+    today = utcnow().date()
     last_date = user.get("last_download_date")
     if last_date and last_date.date() == today:
         current = user.get("daily_downloads", 0)
@@ -373,6 +389,94 @@ async def total_bookmarks_count():
     return await bookmarks_col.count_documents({})
 
 
+async def sync_user_profile(user_id, name=None, username=None):
+    """Keep the stored name/username in sync with Telegram.
+
+    Users can rename themselves at any time, so every interaction refreshes the
+    stored profile instead of trusting the value captured at first /start.  Only
+    real changes are written.
+    """
+    user = await users_col.find_one({"user_id": user_id})
+    if not user:
+        return False
+    updates = {}
+    if name and name != user.get("name"):
+        updates["name"] = name
+        history = list(user.get("previous_names") or [])
+        old_name = user.get("name")
+        if old_name and old_name != name and len(history) < 5:
+            history.append(old_name)
+        updates["previous_names"] = history
+    if username is not None and username != user.get("username"):
+        updates["username"] = username
+    if not updates:
+        return False
+    updates["last_active"] = datetime.now()
+    await users_col.update_one({"user_id": user_id}, {"$set": updates})
+    return True
+
+
+async def get_display_name(user_id, fallback="User"):
+    """Always read the freshest stored name (used by lists and notifications)."""
+    user = await users_col.find_one({"user_id": user_id}, {"name": 1})
+    return (user or {}).get("name") or fallback
+
+
+async def set_user_chat(user_id, chat_id, title=None, username=None):
+    """Remember the channel where this user enabled the bot dump (/setchat)."""
+    await users_col.update_one(
+        {"user_id": user_id},
+        {"$set": {
+            "channel_chat_id": int(chat_id),
+            "channel_title": title,
+            "channel_username": username,
+        }},
+    )
+
+
+async def get_user_chat(user_id):
+    """The channel-dump target of *user_id* (``None`` when not configured)."""
+    user = await users_col.find_one({"user_id": user_id})
+    if not user or user.get("channel_chat_id") is None:
+        return None
+    return {
+        "chat_id": user.get("channel_chat_id"),
+        "title": user.get("channel_title") or str(user.get("channel_chat_id")),
+        "username": user.get("channel_username"),
+    }
+
+
+async def find_user_chat_owner(chat_id):
+    """Which user configured *chat_id* as their dump channel?"""
+    return await users_col.find_one({"channel_chat_id": int(chat_id)})
+
+
+async def clear_user_chat(user_id):
+    await users_col.update_one(
+        {"user_id": user_id},
+        {"$set": {"channel_chat_id": None, "channel_title": None, "channel_username": None}},
+    )
+
+
+async def mark_payment(user_id, status, reviewer=None, plan=None):
+    """Move the newest pending proof of *user_id* to *status*.
+
+    Returns the updated row (or ``None`` when there was nothing pending), so the
+    caller can build the review caption from the stored plan details.
+    """
+    row = await db["payments"].find_one(
+        {"user_id": user_id, "status": "pending_review"}, sort=[("date", -1)]
+    )
+    if not row:
+        return None
+    updates = {"status": status, "reviewed_by": reviewer, "reviewed_at": datetime.now()}
+    if plan:
+        updates["approved_plan"] = plan
+    await db["payments"].update_one({"_id": row["_id"]}, {"$set": updates})
+    row.update(updates)
+    return row
+
+
 async def search_user(query):
     try:
         q_int = int(query)
@@ -513,7 +617,7 @@ async def redeem_points(user_id, points=100, days=None, *, months=REDEEM_PREMIUM
             return False
         expiry = user.get("premium_expiry")
         active = user.get("is_premium") and (not expiry or expiry > now)
-        if active and user.get("premium_source") != "redeem":
+        if active and user.get("premium_source") != PREMIUM_SOURCE_REDEEM:
             return False
         base = max(now, expiry) if active and expiry else now
         new_expiry = base + timedelta(days=days) if days is not None else add_months(base, months)
@@ -522,7 +626,7 @@ async def redeem_points(user_id, points=100, days=None, *, months=REDEEM_PREMIUM
              "premium_expiry": expiry, "premium_source": user.get("premium_source"),
              "is_premium": user.get("is_premium", False)},
             {"$inc": {"points": -points}, "$set": {
-                "is_premium": True, "premium_source": "redeem",
+                "is_premium": True, "premium_source": PREMIUM_SOURCE_REDEEM,
                 "premium_expiry": new_expiry,
             }},
         )
@@ -533,7 +637,7 @@ async def redeem_points(user_id, points=100, days=None, *, months=REDEEM_PREMIUM
 
 async def reserve_daily(user_id, limit=FREE_DAILY_LIMIT, now=None):
     """Reserve before sending, so concurrent requests cannot exceed the quota."""
-    now = now or datetime.now()
+    now = now or utcnow()
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     await users_col.update_one(
         {"user_id": user_id, "last_download_date": {"$not": {"$gte": today}}},

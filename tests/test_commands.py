@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 
 import main
-from conftest import FakeMessage, FakeUser
+from conftest import FakeMessage, FakeUser, sc
 
 
 def flat(markup):
@@ -18,10 +18,10 @@ async def test_start_command_shows_working_menu(db):
     await main.start_handler(None, message)
 
     text = message.shown_text
-    assert "Restricted Content Saver Bot" in text
-    assert "Status:" in text
+    assert sc("Restricted Content Saver Bot") in text
+    assert sc("Status:") in text
     # the old menu told users to type /login — that is gone
-    assert "/login first" not in text
+    assert sc("/login first") not in text
 
     data = message.callback_data()
     assert {
@@ -56,7 +56,7 @@ async def test_start_command_ignores_self_referral(db):
 async def test_help_command(db):
     message = FakeMessage(text="/help")
     await main.help_handler(None, message)
-    assert "HELP MENU" in message.shown_text
+    assert sc("HELP MENU") in message.shown_text
     assert "home" in message.callback_data()
 
 
@@ -64,7 +64,7 @@ async def test_help_command(db):
 async def test_settings_command(db):
     message = FakeMessage(text="/settings")
     await main.settings_handler(None, message)
-    assert "SETTINGS" in message.shown_text
+    assert sc("SETTINGS") in message.shown_text
     assert {"toggle_notif", "toggle_silent", "cmd_language", "reset_settings"} <= set(
         message.callback_data()
     )
@@ -81,14 +81,14 @@ async def test_language_command(db):
 async def test_stats_command(db):
     message = FakeMessage(text="/mystats")
     await main.mystats_handler(None, message)
-    assert "YOUR STATS" in message.shown_text
+    assert sc("YOUR STATS") in message.shown_text
 
 
 @pytest.mark.asyncio
 async def test_premium_command_for_free_user(db):
     message = FakeMessage(text="/premium")
     await main.premium_handler(None, message)
-    assert "PREMIUM BENEFITS" in message.shown_text
+    assert sc("PREMIUM BENEFITS") in message.shown_text
 
 
 @pytest.mark.asyncio
@@ -99,7 +99,7 @@ async def test_premium_command_for_premium_user(db):
 
     message = FakeMessage(text="/premium", user=user)
     await main.premium_handler(None, message)
-    assert "PREMIUM ACTIVE" in message.shown_text
+    assert sc("PREMIUM ACTIVE") in message.shown_text
 
 
 @pytest.mark.asyncio
@@ -115,7 +115,7 @@ async def test_feedback_command_with_text(db, fake_bot):
     await main.feedback_handler(None, message)
 
     assert db.feedback == [(4004, "nice work")]
-    assert "Feedback sent" in message.shown_text
+    assert sc("Feedback sent") in message.shown_text
     assert fake_bot.sent and fake_bot.sent[0]["chat_id"] == main.OWNER_ID
 
 
@@ -131,7 +131,7 @@ async def test_feedback_command_without_text_waits(db):
 async def test_myinfo_command(db):
     message = FakeMessage(text="/myinfo")
     await main.myinfo_handler(None, message)
-    assert "MY INFO" in message.shown_text
+    assert sc("MY INFO") in message.shown_text
 
 
 @pytest.mark.asyncio
@@ -142,14 +142,14 @@ async def test_logout_command_without_session(db, monkeypatch):
     monkeypatch.setattr(main, "get_user_client", no_client)
     message = FakeMessage(text="/logout")
     await main.logout_handler(None, message)
-    assert "not logged in" in message.shown_text.lower()
+    assert sc("not logged in") in message.shown_text.lower()
 
 
 @pytest.mark.asyncio
 async def test_text_handler_ignores_plain_chatter_but_asks_for_a_link(db):
     message = FakeMessage(text="hello there")
     await main.text_handler(None, message)
-    assert "t.me/" in message.shown_text
+    assert sc("t.me/") in message.shown_text
 
 
 @pytest.mark.asyncio

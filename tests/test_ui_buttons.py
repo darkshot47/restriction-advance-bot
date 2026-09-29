@@ -69,7 +69,8 @@ def test_start_menu_has_every_requested_button():
     }
     for data, label in expected.items():
         assert data in by_data, f"{label} button missing"
-        assert label in by_data[data].text
+        # labels are rendered in small caps, the wording itself stays identical
+        assert label.lower() in ui.plain_caps(by_data[data].text).lower()
 
     # every row is at most two buttons (fits on a phone screen)
     assert all(1 <= len(row) <= 2 for row in markup.inline_keyboard)
@@ -97,8 +98,12 @@ def test_language_menu_marks_current_language():
 def test_settings_menu_labels_follow_state():
     on = {b.callback_data: b.text for b in flat(ui.settings_keyboard(True, False))}
     off = {b.callback_data: b.text for b in flat(ui.settings_keyboard(False, True))}
-    assert "ON" in on["toggle_notif"] and "OFF" in on["toggle_silent"]
-    assert "OFF" in off["toggle_notif"] and "ON" in off["toggle_silent"]
+    on_labels = {k: ui.plain_caps(v) for k, v in on.items()}
+    off_labels = {k: ui.plain_caps(v) for k, v in off.items()}
+    assert "on" in on_labels["toggle_notif"].lower()
+    assert "off" in on_labels["toggle_silent"].lower()
+    assert "off" in off_labels["toggle_notif"].lower()
+    assert "on" in off_labels["toggle_silent"].lower()
 
 
 def test_download_controls_colours():
@@ -113,9 +118,9 @@ def test_download_controls_colours():
 
 def test_refer_keyboard_share_and_copy():
     link = "https://t.me/TestRestrictBot?start=42"
-    by_data = {b.text: b for b in flat(ui.refer_keyboard(link))}
-    share = next(b for t, b in by_data.items() if "Share" in t)
-    copy = next(b for t, b in by_data.items() if "Copy" in t)
+    by_data = {ui.plain_caps(b.text): b for b in flat(ui.refer_keyboard(link))}
+    share = next(b for t, b in by_data.items() if "share" in t.lower())
+    copy = next(b for t, b in by_data.items() if "copy" in t.lower())
     assert share.url.startswith("https://t.me/share/url?url=")
     assert link in share.url
     assert copy.copy_text.text == link
@@ -126,10 +131,10 @@ def test_styles_degrade_gracefully_without_library_support(monkeypatch):
     monkeypatch.setattr(ui, "native_style_support", lambda: False)
     markup = ui.start_keyboard()
     buttons = flat(markup)
-    assert len(buttons) == 9
+    assert len(buttons) == 10
     assert all(is_plain(b) for b in buttons)
     # callback data is untouched, so the actions keep working
-    assert {b.callback_data for b in buttons} >= {"cmd_login", "cmd_language"}
+    assert {b.callback_data for b in buttons} >= {"cmd_login", "cmd_language", "cmd_setchat"}
 
 
 def test_styles_can_be_forced_off(monkeypatch):

@@ -11,6 +11,7 @@ import datetime as _dt
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -41,8 +42,10 @@ class FakeUser:
 
 
 class FakeChat:
-    def __init__(self, chat_id: int = 1001):
+    def __init__(self, chat_id: int = 1001, chat_type: str | None = None, title: str | None = None):
         self.id = chat_id
+        self.type = chat_type
+        self.title = title or f"chat{chat_id}"
 
 
 class FakeMessage:
@@ -53,9 +56,13 @@ class FakeMessage:
         self.text = text
         self.from_user = user or FakeUser()
         self.chat = FakeChat(self.from_user.id)
+        self.caption = None
+        self.photo = None
+        self.reply_to_message = None
         self.replies: list[dict] = []
         self.edits: list[dict] = []
         self.markups: list = []
+        self.captions: list = []
         self.deleted = False
 
     async def reply(self, text, reply_markup=None, **kwargs):
@@ -72,6 +79,16 @@ class FakeMessage:
     async def edit_reply_markup(self, reply_markup=None):
         self.markups.append(reply_markup)
         return self
+
+    async def edit_caption(self, caption, **kwargs):
+        self.captions.append({"caption": caption, **kwargs})
+        self.caption = caption
+        return self
+
+    @property
+    def last_caption(self) -> str:
+        assert self.captions, "the bot did not edit the caption"
+        return self.captions[-1]["caption"]
 
     async def delete(self):
         self.deleted = True
@@ -146,6 +163,8 @@ class FakeDB:
         self.maintenance = False
         self.fsub = None
         self.admins: set[int] = set()
+        self.profile_syncs: list[tuple] = []
+        self.payments: list[dict] = []
 
     # users -----------------------------------------------------------------
     def _new_user(self, user_id, name, username):
@@ -183,6 +202,83 @@ class FakeDB:
             return False
         self.users[user_id] = self._new_user(user_id, name, username)
         return True
+
+    async def sync_user_profile(self, user_id, name=None, username=None):
+        """Mirror of database.sync_user_profile — records every change."""
+        user = self.users.get(user_id)
+        if not user:
+            return False
+        changed = False
+        if name and name != user.get("name"):
+            user["name"] = name
+            changed = True
+        if username is not None and username != user.get("username"):
+            user["username"] = username
+            changed = True
+        self.profile_syncs.append((user_id, name, username))
+        return changed
+
+    async def get_display_name(self, user_id, fallback="User"):
+        return (self.users.get(user_id) or {}).get("name") or fallback
+
+    async def add_premium(self, user_id, days=30, source="manual"):
+        user = self.users.setdefault(user_id, self._new_user(user_id, "Tester", None))
+        user["is_premium"] = True
+        user["premium_source"] = source
+        user["premium_expiry"] = _dt.datetime.now() + _dt.timedelta(days=days)
+
+    async def remove_premium(self, user_id):
+        user = self.users.setdefault(user_id, self._new_user(user_id, "Tester", None))
+        user["is_premium"] = False
+        user["premium_expiry"] = None
+        user["premium_source"] = None
+
+    async def ban_user(self, user_id):
+        self.users.setdefault(user_id, self._new_user(user_id, "Tester", None))["is_banned"] = True
+
+    async def unban_user(self, user_id):
+        self.users.setdefault(user_id, self._new_user(user_id, "Tester", None))["is_banned"] = False
+
+    # channel dump (/setchat) -------------------------------------------------
+    async def set_user_chat(self, user_id, chat_id, title=None, username=None):
+        user = self.users.setdefault(user_id, self._new_user(user_id, "Tester", None))
+        user.update({
+            "channel_chat_id": int(chat_id), "channel_title": title,
+            "channel_username": username,
+        })
+
+    async def get_user_chat(self, user_id):
+        user = self.users.get(user_id) or {}
+        if user.get("channel_chat_id") is None:
+            return None
+        return {
+            "chat_id": user["channel_chat_id"],
+            "title": user.get("channel_title") or str(user["channel_chat_id"]),
+            "username": user.get("channel_username"),
+        }
+
+    async def find_user_chat_owner(self, chat_id):
+        for user in self.users.values():
+            if user.get("channel_chat_id") == int(chat_id):
+                return user
+        return None
+
+    async def clear_user_chat(self, user_id):
+        user = self.users.get(user_id)
+        if user:
+            user.update({"channel_chat_id": None, "channel_title": None,
+                         "channel_username": None})
+
+    # payments ----------------------------------------------------------------
+    async def mark_payment(self, user_id, status, reviewer=None, plan=None):
+        for row in reversed(self.payments):
+            if row.get("user_id") == user_id and row.get("status", "pending_review") == "pending_review":
+                row["status"] = status
+                row["reviewed_by"] = reviewer
+                if plan:
+                    row["approved_plan"] = plan
+                return row
+        return None
 
     async def get_user(self, user_id):
         return self.users.get(user_id)
@@ -319,12 +415,15 @@ class FakeDB:
     async def refund_daily(self, user_id, reservation_date):
         self.users[user_id]["daily_downloads"] -= 1
 
+    def utcnow(self):
+        return _dt.datetime.utcnow()
+
     async def set_qr(self, file_id): self.qr = file_id
     async def get_qr(self): return getattr(self, "qr", None)
     async def delete_qr(self): self.qr = None
     async def add_payment(self, user_id, proof, note=None):
-        self.payments = getattr(self, "payments", [])
-        self.payments.append({"user_id": user_id, "proof": proof, "note": note})
+        self.payments.append({"user_id": user_id, "proof": proof, "note": note,
+                              "status": "pending_review"})
         return True
     async def get_payments(self): return getattr(self, "payments", [])
 
@@ -372,7 +471,8 @@ DB_NAMES = [
     "get_admins_list", "clear_all_logs", "get_bot_stats", "add_premium",
     "remove_premium", "ban_user", "unban_user", "get_points", "award_referral",
     "redeem_points", "set_qr", "get_qr", "delete_qr", "add_payment", "get_payments",
-    "reserve_daily", "refund_daily",
+    "reserve_daily", "refund_daily", "utcnow", "sync_user_profile", "get_display_name",
+    "set_user_chat", "get_user_chat", "find_user_chat_owner", "clear_user_chat", "mark_payment",
 ]
 
 
@@ -412,6 +512,10 @@ def clean_state(monkeypatch):
     monkeypatch.setattr(main, "admin_pending", {})
     monkeypatch.setattr(main, "active_downloads", {})
     monkeypatch.setattr(main, "payment_pending", {})
+    monkeypatch.setattr(main, "premium_tier_pending", {})
+    monkeypatch.setattr(main, "setchat_pending", {})
+    monkeypatch.setattr(main, "channel_locks", {})
+    monkeypatch.setattr(main, "channel_last_request", {})
     yield
 
 
@@ -421,6 +525,10 @@ class FakeBot:
     def __init__(self):
         self.sent: list[dict] = []
         self.members: dict = {}
+        self.messages: dict = {}
+        self.chats: dict = {}
+        self.channel_id = -100777
+        self.me = SimpleNamespace(id=999, is_self=True, username="TestRestrictBot")
 
     async def send_message(self, chat_id, text, **kwargs):
         self.sent.append({"chat_id": chat_id, "text": text})
@@ -432,6 +540,24 @@ class FakeBot:
     async def get_chat_member(self, chat_id, user_id):
         from types import SimpleNamespace
         return self.members.get(user_id, SimpleNamespace(status="member"))
+
+    async def get_me(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(id=999, username="TestRestrictBot", is_self=True)
+
+    async def get_chat(self, chat_id):
+        from types import SimpleNamespace
+        if chat_id in self.chats:
+            return self.chats[chat_id]
+        if isinstance(chat_id, int):
+            return SimpleNamespace(id=chat_id, title=f"chat{chat_id}", username=None,
+                                   type="channel")
+        handle = str(chat_id).rstrip("/").split("/")[-1].lstrip("@") or "channel"
+        return SimpleNamespace(id=self.channel_id, title=handle, username=handle,
+                               type="channel")
+
+    async def get_messages(self, chat_id, message_ids):
+        return self.messages.get(message_ids)
 
     async def download_media(self, *args, **kwargs):
         return None
@@ -467,6 +593,12 @@ def make_query(message: FakeMessage, data: str, user_obj: FakeUser | None = None
     )
     query.answer = RecordingAnswer()
     return query
+
+
+def sc(text):
+    """Render *text* the way the bot does (Unicode small caps)."""
+    import ui as _ui
+    return _ui.smallcaps(text)
 
 
 @pytest.fixture

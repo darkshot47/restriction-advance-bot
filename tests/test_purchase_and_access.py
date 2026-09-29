@@ -8,7 +8,7 @@ from pyrogram.enums import ChatMemberStatus
 
 import main
 import ui
-from conftest import FakeMessage, FakeUser
+from conftest import FakeMessage, FakeUser, sc
 
 
 @pytest.mark.asyncio
@@ -27,12 +27,12 @@ async def test_purchase_is_benefits_then_plans_then_qr_then_photo(db, press, fak
     await press(message, "buy:quarter")
     qr = fake_bot.sent[-1]
     assert qr["photo"] == "owner-qr"
-    assert "₹249" in qr["caption"]
+    assert sc("₹249") in qr["caption"]
     assert uid not in main.pending_action
     paid = qr["reply_markup"].inline_keyboard[0][0].callback_data
     await press(message, paid)
     assert main.pending_action[uid] == "payment_proof"
-    assert "screenshot" in message.shown_text.lower()
+    assert sc("screenshot") in message.shown_text.lower()
     message.photo = SimpleNamespace(file_id="receipt")
     await main.photo_handler(None, message)
     assert db.payments[0]["note"]["plan"] == "quarter"
@@ -51,7 +51,7 @@ async def test_purchase_is_benefits_then_plans_then_qr_then_photo(db, press, fak
 async def test_missing_qr_does_not_request_or_accept_proof(db, press, fake_bot):
     message = FakeMessage()
     await press(message, "buy:month")
-    assert "temporarily unavailable" in message.shown_text
+    assert sc("temporarily unavailable") in message.shown_text
     assert not main.payment_pending and not main.pending_action and not fake_bot.sent
 
 
@@ -59,13 +59,13 @@ async def test_missing_qr_does_not_request_or_accept_proof(db, press, fake_bot):
 async def test_expired_checkout_and_text_proof(db, press):
     message = FakeMessage()
     query = await press(message, "paid:old-token")
-    assert "expired" in query.answer.texts[-1]
+    assert sc("expired") in query.answer.texts[-1]
     await db.set_qr("qr")
     await press(message, "buy:month")
     await press(message, "paid:" + main.payment_pending[1001]["token"])
     message.text = "Paid successfully"
     await main.text_handler(None, message)
-    assert "Screenshot required" in message.replies[-1]["text"]
+    assert sc("Screenshot required") in message.replies[-1]["text"]
     assert main.pending_action[1001] == "payment_proof"
     assert not getattr(db, "payments", [])
 
@@ -80,8 +80,8 @@ async def test_undeliverable_proof_is_saved_and_not_falsely_marked_sent(db, fake
     monkeypatch.setattr(fake_bot, "send_photo", AsyncMock(side_effect=RuntimeError("blocked")))
     await main.photo_handler(None, message)
     assert len(db.payments) == 1
-    assert "delivery unavailable" in message.shown_text
-    assert "@XyrDeveloper" in message.shown_text
+    assert sc("delivery unavailable") in message.shown_text
+    assert sc("@XyrDeveloper") in message.shown_text
 
 
 @pytest.mark.asyncio
@@ -121,6 +121,7 @@ async def test_cancel_clears_checkout(db, press):
 @pytest.mark.parametrize("premium,source", [(False, None), (True, "redeem"), (True, None)])
 @pytest.mark.parametrize("link", ["https://t.me/c/12345/10", "https://t.me/c/12345/10-12", "https://t.me/publicname/1\nhttps://t.me/c/12345/10"])
 async def test_private_links_blocked_before_fetch_for_nonmanual_users(db, monkeypatch, premium, source, link):
+    """Requirement 1: premium-only pitch + [Buy Premium][Earn Points] on every path."""
     await db.add_user(1001, "Tester")
     db.users[1001].update(is_premium=premium, premium_source=source)
     fetch = AsyncMock()
@@ -128,7 +129,15 @@ async def test_private_links_blocked_before_fetch_for_nonmanual_users(db, monkey
     message = FakeMessage(text=link)
     await main.text_handler(None, message)
     fetch.assert_not_called()
-    assert "This bot extracts restricted content from public channels only." in message.shown_text
+    assert sc("Private Channel Access (Premium Only)") in message.shown_text
+    assert sc("available exclusively for Premium users") in message.shown_text
+    assert sc("Upgrade to Premium or refer friends to earn points!") in message.shown_text
+    assert message.button("cmd_premium").text == sc("💎 Buy Premium")
+    assert message.button("cmd_refer").text == sc("🎁 Earn Points")
+    # both buttons share a single row
+    row = next(r for r in message.shown_markup.inline_keyboard
+               if any(b.callback_data == "cmd_premium" for b in r))
+    assert [b.callback_data for b in row] == ["cmd_premium", "cmd_refer"]
 
 
 @pytest.mark.asyncio
@@ -141,8 +150,17 @@ async def test_only_owner_can_grant_private_access(db, press, monkeypatch):
     await press(FakeMessage(), "admin:addpremium")
     assert not main.admin_pending
     await db.add_user(2002, "Recipient")
-    await main.addpremium_handler(None, FakeMessage(text="/addpremium 2002 30", user=FakeUser(main.OWNER_ID)))
-    grant.assert_awaited_once_with(2002, 30)
+    message = FakeMessage(text="/addpremium 2002 30", user=FakeUser(main.OWNER_ID))
+    await main.addpremium_handler(None, message)
+    # requirement 4: the owner picks the tier before anything is granted
+    grant.assert_not_called()
+    assert sc("Select Premium Access Tier for User `2002` (30 days):") in message.shown_text
+    assert main.premium_tier_pending[main.OWNER_ID] == {"user_id": 2002, "days": 30}
+    assert message.button("premium_tier:full").text == sc("🔓 Full (Public + Private)")
+    assert message.button("premium_tier:public").text == sc("🌐 Public Only")
+    await press(message, "premium_tier:full")
+    grant.assert_awaited_once_with(2002, 30, source="manual")
+    assert not main.premium_tier_pending
 
 
 @pytest.mark.asyncio
@@ -190,7 +208,7 @@ async def test_membership_is_checked_again_on_each_extraction(db, fake_bot, monk
     monkeypatch.setattr(main, "_fetch_and_send", fetch)
     message = FakeMessage()
     assert not await main.fetch_and_send(message, FakeMessage(), main.bot, "publicname", 1)
-    assert "remain joined" in message.shown_text
+    assert sc("remain joined") in message.shown_text
     fetch.assert_not_called()
 
 
@@ -261,10 +279,12 @@ def test_mobile_button_labels_and_complete_admin_pages():
     pages = [main.admin_panel_keyboard(i) for i in range(len(main.ADMIN_PAGES))]
     names = {b.callback_data for page in pages for row in page.inline_keyboard for b in row}
     assert {"admin:addpremium", "admin:payments", "admin:addqr", "admin:removeqr", "admin:export", "admin:setfsub"} <= names
-    for markup in pages + [ui.premium_overview_keyboard(), ui.plans_keyboard(), ui.payment_keyboard("x")]:
-        assert len(markup.inline_keyboard) <= 6
+    for markup in pages + [ui.premium_overview_keyboard(), ui.plans_keyboard(), ui.payment_keyboard("x"),
+                           ui.premium_upsell_keyboard(), ui.premium_tier_keyboard(),
+                           ui.payment_review_keyboard(5, "month"), ui.setchat_check_keyboard()]:
+        assert len(markup.inline_keyboard) <= 7
         assert all(len(row) <= 2 for row in markup.inline_keyboard)
-        assert all(len(button.text) <= 24 for row in markup.inline_keyboard for button in row)
+        assert all(len(button.text) <= 28 for row in markup.inline_keyboard for button in row)
 
 
 def test_text_splitting_is_lossless_and_telegram_safe():
@@ -281,7 +301,7 @@ async def test_redeem_command_requests_one_calendar_month(db, monkeypatch):
     message = FakeMessage(text="/redeem")
     await main.redeem_handler(None, message)
     redeem.assert_awaited_once_with(1001, 100, months=1)
-    assert "1 month" in message.shown_text
+    assert sc("1 month") in message.shown_text
 
 
 @pytest.mark.asyncio
@@ -291,7 +311,7 @@ async def test_qr_delivery_failure_does_not_leave_active_checkout(db, press, fak
     message = FakeMessage()
     await press(message, "buy:year")
     assert not main.payment_pending
-    assert "Could not display" in message.shown_text
+    assert sc("Could not display") in message.shown_text
 
 
 @pytest.mark.asyncio
@@ -380,4 +400,4 @@ async def test_cancel_command_clears_every_pending_flow_with_one_confirmation(db
     await main.cancel_handler(None, message)
     assert not main.pending_action and not main.payment_pending and not main.admin_pending
     assert len(message.replies) == 1
-    assert "cancelled" in message.shown_text
+    assert sc("cancelled") in message.shown_text
