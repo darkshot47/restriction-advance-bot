@@ -501,16 +501,189 @@ async def get_maintenance():
 
 
 async def set_fsub_channel(channel: str):
-    await config_col.update_one({"type": "fsub"}, {"$set": {"channel": channel}}, upsert=True)
+    """Back-compat single-entry writer: stores the legacy document.
+
+    ``get_fsub_list()`` migrates that document into ``items[0]`` on its first
+    read, so old deployments keep working without any manual migration.
+    """
+    await config_col.update_one({"type": "fsub"}, {"$set": {"channel": str(channel)}}, upsert=True)
 
 
 async def get_fsub_channel():
-    res = await config_col.find_one({"type": "fsub"})
-    return res.get("channel") if res else None
+    """Back-compat accessor: public reference of the required chat, if any."""
+    row = await config_col.find_one({"type": "fsub"})
+    if row and row.get("channel"):
+        return row["channel"]
+    items = await get_fsub_list()
+    if not items:
+        return None
+    first = items[0]
+    return "@" + first["username"] if first.get("username") else str(first["chat_id"])
 
 
-async def delete_fsub():
+# --------------------------------------------------------------------------- #
+#  Force subscription — an unlimited list of channels and groups
+#
+#  Everything lives on one config document so a read/write is atomic:
+#      {"type": "fsub_list", "items": [item, ...]}
+# --------------------------------------------------------------------------- #
+
+#: Fields an item may carry; anything else is dropped on write.
+FSUB_ITEM_FIELDS = (
+    "chat_id", "title", "username", "invite_link",
+    "button_text", "kind", "auto_approve", "order",
+)
+
+
+def normalize_fsub_item(item: dict, order: int = 0) -> dict:
+    """Return a sanitized copy of *item* (never trust caller-supplied keys)."""
+    chat_id = item.get("chat_id")
+    try:
+        chat_id = int(chat_id)
+    except (TypeError, ValueError):
+        chat_id = 0
+    title = (item.get("title") or "").strip() or f"Chat {chat_id}"
+    username = (item.get("username") or "").strip().lstrip("@") or None
+    invite_link = (item.get("invite_link") or "").strip() or None
+    button_text = (item.get("button_text") or "").strip() or f"✅ Join {title}"
+    kind = "group" if str(item.get("kind") or "").lower().startswith("group") else "channel"
+    return {
+        "chat_id": chat_id,
+        "title": title,
+        "username": username,
+        "invite_link": invite_link,
+        "button_text": button_text,
+        "kind": kind,
+        "auto_approve": bool(item.get("auto_approve")),
+        "order": int(order),
+    }
+
+
+async def _read_fsub_doc():
+    return await config_col.find_one({"type": "fsub_list"})
+
+
+async def _write_fsub_items(items):
+    await config_col.update_one(
+        {"type": "fsub_list"}, {"$set": {"items": items}}, upsert=True
+    )
+
+
+async def _migrate_legacy_fsub() -> list:
+    """Move the old single ``{"type": "fsub"}`` document into items[0]."""
+    legacy = await config_col.find_one({"type": "fsub"})
+    if not legacy or not legacy.get("channel"):
+        return []
+    channel = str(legacy["channel"]).lstrip("@")
+    items = [normalize_fsub_item({
+        "chat_id": 0, "title": channel, "username": channel,
+        "invite_link": None, "button_text": "✅ I Joined",
+        "kind": "channel", "auto_approve": False,
+    }, order=0)]
+    await _write_fsub_items(items)
     await config_col.delete_one({"type": "fsub"})
+    return items
+
+
+async def get_fsub_list() -> list:
+    """Every required chat, in the order the owner added them."""
+    doc = await _read_fsub_doc()
+    if not doc:
+        return await _migrate_legacy_fsub()
+    items = [normalize_fsub_item(item, order=index)
+             for index, item in enumerate(doc.get("items") or [])]
+    if items != (doc.get("items") or []):
+        # keep stored documents tidy (legacy rows lacked fields)
+        await _write_fsub_items(items)
+    return items
+
+
+async def add_fsub_item(item: dict) -> int:
+    """Append *item* and return its 1-based number."""
+    items = await get_fsub_list()
+    items.append(normalize_fsub_item(item, order=len(items)))
+    await _write_fsub_items(items)
+    return len(items)
+
+
+async def remove_fsub_item(number: int):
+    """Remove the *number*-th (1-based) entry; returns it or ``None``."""
+    items = await get_fsub_list()
+    index = int(number) - 1
+    if not 0 <= index < len(items):
+        return None
+    removed = items.pop(index)
+    for position, item in enumerate(items):
+        item["order"] = position
+    await _write_fsub_items(items)
+    return removed
+
+
+async def update_fsub_item(number: int, **fields) -> bool:
+    """Patch the *number*-th (1-based) entry; ``False`` when it is missing."""
+    items = await get_fsub_list()
+    index = int(number) - 1
+    if not 0 <= index < len(items):
+        return False
+    patch = {key: value for key, value in fields.items() if key in FSUB_ITEM_FIELDS}
+    if not patch:
+        return True
+    items[index].update(patch)
+    items[index] = normalize_fsub_item(items[index], order=index)
+    await _write_fsub_items(items)
+    return True
+
+
+async def clear_fsub_list() -> int:
+    """Remove every entry; returns how many were removed."""
+    items = await get_fsub_list()
+    await config_col.delete_one({"type": "fsub_list"})
+    return len(items)
+
+
+async def delete_fsub() -> int:
+    """Back-compat alias of :func:`clear_fsub_list`."""
+    return await clear_fsub_list()
+
+
+async def set_fsub_verify_label(label: str | None):
+    await config_col.update_one(
+        {"type": "fsub_verify_label"}, {"$set": {"label": (label or "").strip() or None}},
+        upsert=True,
+    )
+
+
+async def get_fsub_verify_label():
+    row = await config_col.find_one({"type": "fsub_verify_label"})
+    return (row or {}).get("label")
+
+
+# --------------------------------------------------------------------------- #
+#  Join requests of the force-sub chats (approve list bookkeeping)
+# --------------------------------------------------------------------------- #
+
+async def record_join_request(chat_id, user_id, date=None, status: str = "pending"):
+    await db["join_requests"].update_one(
+        {"chat_id": int(chat_id), "user_id": int(user_id)},
+        {"$set": {
+            "chat_id": int(chat_id), "user_id": int(user_id),
+            "date": date or datetime.now(), "status": status,
+        }},
+        upsert=True,
+    )
+
+
+async def set_join_request_status(chat_id, user_id, status: str):
+    await db["join_requests"].update_one(
+        {"chat_id": int(chat_id), "user_id": int(user_id)},
+        {"$set": {"status": status}},
+    )
+
+
+async def get_join_request(chat_id, user_id):
+    return await db["join_requests"].find_one(
+        {"chat_id": int(chat_id), "user_id": int(user_id)}
+    )
 
 
 async def add_admin(user_id):

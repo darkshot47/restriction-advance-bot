@@ -402,12 +402,81 @@ def help_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-def fsub_keyboard(channel: str) -> InlineKeyboardMarkup:
-    handle = channel.replace("@", "")
-    return keyboard([
-        [button("📢 Join channel", url=f"https://t.me/{handle}", style="primary")],
-        [button("✅ I joined", callback_data="check_fsub", style="success")],
-    ])
+def fsub_item_url(item) -> str | None:
+    """The only place a chat link is allowed to exist: inside a URL button."""
+    if item.get("invite_link"):
+        return item["invite_link"]
+    if item.get("username"):
+        return f"https://t.me/{item['username']}"
+    return None
+
+
+def clamp_label(text: str, limit: int = 28) -> str:
+    """Keep a button label inside the mobile budget (never drops emojis)."""
+    text = text or ""
+    return text if len(text) <= limit else text[:limit]
+
+
+def fsub_keyboard(items, page: int = 0, verify_label: str | None = None) -> InlineKeyboardMarkup:
+    """Join buttons for every required chat — links live only in these buttons.
+
+    One item per row so long custom labels and emojis stay readable on a phone.
+    At most five items per page; longer lists get a Previous / Next row.  The
+    last row is always the verification button.
+    """
+    from config import FSUB_ITEMS_PER_PAGE, FSUB_VERIFY_LABEL
+    items = list(items or [])
+    per_page = FSUB_ITEMS_PER_PAGE
+    pages = max(1, -(-len(items) // per_page)) if items else 1
+    page = max(0, min(int(page or 0), pages - 1))
+    rows = []
+    for item in items[page * per_page:(page + 1) * per_page]:
+        url = fsub_item_url(item)
+        if not url:
+            continue  # no link to offer — the title still appears in the text
+        rows.append([button(clamp_label(item.get("button_text")), url=url, style="primary")])
+    if pages > 1:
+        rows.append([
+            button("⬅️ Previous", callback_data=f"fsub_page:{(page - 1) % pages}", style="primary"),
+            button("Next ➡️", callback_data=f"fsub_page:{(page + 1) % pages}", style="primary"),
+        ])
+    rows.append([button(verify_label or FSUB_VERIFY_LABEL, callback_data="fsub:check", style="success")])
+    return keyboard(rows)
+
+
+def fsub_pages(items) -> int:
+    from config import FSUB_ITEMS_PER_PAGE
+    items = list(items or [])
+    return max(1, -(-len(items) // FSUB_ITEMS_PER_PAGE)) if items else 1
+
+
+def fsub_list_keyboard(items, page: int = 0) -> InlineKeyboardMarkup:
+    """Owner management keyboard: rename / delete per entry, plus delete-all.
+
+    One entry per row (two buttons), so the page size is one lower than the
+    join keyboard to keep the total inside the seven-row mobile budget.
+    """
+    from config import FSUB_LIST_PER_PAGE
+    items = list(items or [])
+    per_page = FSUB_LIST_PER_PAGE
+    pages = max(1, -(-len(items) // per_page)) if items else 1
+    page = max(0, min(int(page or 0), pages - 1))
+    rows = []
+    for offset, item in enumerate(items[page * per_page:(page + 1) * per_page]):
+        number = page * per_page + offset + 1
+        rows.append([
+            button("✏️ Rename", callback_data=f"fsub_rename:{number}", style="primary"),
+            button("🗑 Delete", callback_data=f"fsub_del:{number}", style="danger"),
+        ])
+    if pages > 1:
+        rows.append([
+            button("⬅️ Previous", callback_data=f"fsub_list_page:{(page - 1) % pages}", style="primary"),
+            button("Next ➡️", callback_data=f"fsub_list_page:{(page + 1) % pages}", style="primary"),
+        ])
+    if items:
+        rows.append([button("🗑 Delete all", callback_data="fsub_del_all", style="danger")])
+    rows.append([home_button()])
+    return keyboard(rows)
 
 
 def download_controls(job_id: str, paused: bool = False) -> InlineKeyboardMarkup:
@@ -557,11 +626,196 @@ def personal_stats_text(user: dict, premium: bool) -> str:
     )
 
 
-def fsub_text(channel: str) -> str:
+def fsub_text(items, page: int = 0) -> str:
+    """Force-sub screen — required chats are named by title, never by link.
+
+    Links only ever appear inside the URL buttons of :func:`fsub_keyboard`,
+    so this text can be copied anywhere safely.
+    """
+    items = list(items or [])
+    if not items:
+        return "✅ **No channel to join.**"
+    lines = [
+        "⚠️ **Join required**",
+        "",
+        "Join नीचे के buttons से, फिर ✅ I Joined दबाओ।",
+        "You can use this bot only while you remain joined.",
+        "",
+    ]
+    for index, item in enumerate(items, 1):
+        icon = "👥" if item.get("kind") == "group" else "📢"
+        lines.append(f"{icon} {index}. **{item.get('title') or 'Chat'}**")
+    pages = fsub_pages(items)
+    if pages > 1:
+        lines += ["", f"Page {max(0, min(int(page or 0), pages - 1)) + 1}/{pages}"]
+    return "\n".join(lines)
+
+
+def fsub_list_pages(items) -> int:
+    from config import FSUB_LIST_PER_PAGE
+    items = list(items or [])
+    return max(1, -(-len(items) // FSUB_LIST_PER_PAGE)) if items else 1
+
+
+def fsub_list_text(items, page: int = 0) -> str:
+    """Owner listing of every force-sub entry (titles, labels and ids only)."""
+    items = list(items or [])
+    if not items:
+        return "ℹ️ **कोई force-sub entry नहीं है.**\n\n/setfsub से channel या group add करो।"
+    lines = [f"📢 **Force Sub** • {len(items)} entries", ""]
+    for index, item in enumerate(items, 1):
+        icon = "👥" if item.get("kind") == "group" else "📢"
+        auto = " · auto-approve ON" if item.get("auto_approve") else ""
+        lines.append(
+            f"{icon} {index}. **{item.get('title') or 'Chat'}** · "
+            f"button: \"{item.get('button_text')}\" · `{item.get('chat_id')}`{auto}"
+        )
+    pages = fsub_list_pages(items)
+    if pages > 1:
+        lines += ["", f"Page {max(0, min(int(page or 0), pages - 1)) + 1}/{pages}"]
+    lines += ["", "✏️ Rename / 🗑 Delete से entry बदलो, 🗑 Delete all से साफ करो।"]
+    return "\n".join(lines)
+
+
+def fsub_button_prompt_text(title: str, kind: str = "channel") -> str:
+    """Ask the owner for the custom label of the Join button."""
+    from config import FSUB_MAX_BUTTON_CHARS
+    default = default_fsub_label(title)
+    who = "group" if str(kind).lower().startswith("group") else "channel"
     return (
-        f"⚠️ **You must join {channel} first!**\n\n"
-        "You can use this bot only while you remain joined to the channel.\n\n"
-        "📢 Join now, then tap **I joined** to verify. Membership is checked again when you extract content."
+        f"🔤 **{title}** — इस {who} के Join button पर क्या लिखा दिखे?\n\n"
+        f"1–{FSUB_MAX_BUTTON_CHARS} characters, e.g. `Join` / `Join Announcement` / `📢 Join Update`\n\n"
+        f"default के लिए `-` भेजो — तब **{default}** लगेगा।"
+    )
+
+
+def default_fsub_label(title: str) -> str:
+    """Suggested label, always inside the mobile budget."""
+    from config import FSUB_MAX_BUTTON_CHARS
+    label = f"✅ Join {title}".strip()
+    return label[:FSUB_MAX_BUTTON_CHARS]
+
+
+def fsub_admin_failed_text(reason: str, title: str) -> str:
+    """Truthful reason why the bot cannot moderate a force-sub chat."""
+    if reason == "no_post_rights":
+        return (
+            f"❌ **{title}** में मैं administrator हूँ, पर **Post Messages** off है।\n\n"
+            "👉 Channel → Administrators → इस bot → **Post Messages** ON करो, फिर /setfsub दोबारा भेजो।"
+        )
+    if reason == "error":
+        return (
+            f"❌ **{title}** — Telegram ने जवाब नहीं दिया।\n\n"
+            "थोड़ी देर बाद /setfsub दोबारा भेजो।"
+        )
+    return (
+        f"❌ **{title}** — मुझे उस channel में administrator बनाओ।\n\n"
+        "👉 Chat → Administrators → Add Admin → इस bot को select करो, फिर /setfsub दोबारा भेजो।"
+    )
+
+
+def fsub_label_invalid_text() -> str:
+    """Why an owner-typed button label was refused (wizard stays open)."""
+    from config import FSUB_MAX_BUTTON_CHARS
+    return (
+        "❌ **यह label use नहीं हो सकता।**\n\n"
+        f"एक line में 1–{FSUB_MAX_BUTTON_CHARS} characters, और कोई link या @mention नहीं।\n\n"
+        "दोबारा भेजो, या default के लिए `-`।"
+    )
+
+
+def fsub_join_pending_text(title: str) -> str:
+    """The chat is approval-only: a join request was sent, nothing is stored."""
+    return (
+        f"✅ **{title}** — join request भेज दी।\n\n"
+        "Channel owner approve करे, फिर दोबारा **🔍 Check Admin Status** दबाओ।"
+    )
+
+
+def fsub_request_notify_text(name: str, user_id: int, title: str) -> str:
+    """Owner notification for an incoming join request (no links in the copy)."""
+    return (
+        "🔔 **Join request**\n\n"
+        f"👤 {name} · `{user_id}`\n"
+        f"📢 {title}\n\n"
+        "Approve करने के लिए नीचे के buttons दबाओ।"
+    )
+
+
+def fsub_request_keyboard(user_id: int, chat_id) -> InlineKeyboardMarkup:
+    """Owner-only verdict buttons for a join request."""
+    return keyboard([
+        [
+            button("✅ Approve", callback_data=f"fsub:approve:{user_id}:{chat_id}", style="success"),
+            button("❌ Decline", callback_data=f"fsub:decline:{user_id}:{chat_id}", style="danger"),
+        ],
+    ])
+
+
+def fsub_delete_all_keyboard() -> InlineKeyboardMarkup:
+    """Confirmation row for wiping the whole force-sub list."""
+    return keyboard([
+        [button("🗑 Delete all", callback_data="fsub_del_all_confirm", style="danger")],
+        [button("❌ Cancel", callback_data="cancel_action", style="primary")],
+    ])
+
+
+def fsub_request_verdict_text(base: str | None, line: str) -> str:
+    """Append the owner verdict to the original join-request notification."""
+    base = (base or "").strip()
+    return f"{base}\n\n{line}" if base else line
+
+
+def fsub_request_approved_text() -> str:
+    return "✅ **तुम्हारी join request approve हो गई**\n\nअब bot use कर सकते हो।"
+
+
+def fsub_auto_approved_text() -> str:
+    return "✅ **Request verify + approve हो गई**\n\nअब link भेजो।"
+
+
+def fsub_verified_text() -> str:
+    return "✅ **Verified!**\n\nअब link भेजो।"
+
+
+def fsub_pending_text() -> str:
+    return ("⏳ **तुम्हारी request pending है**\n\n"
+            "Admin approve करेगा तो चल जाएगा — थोड़ी देर बाद फिर try करो।")
+
+
+def fsub_empty_text() -> str:
+    return "✅ **कोई channel ज़रूरी नहीं** — सीधे link भेजो।"
+
+
+def fsub_join_instruction_text(private: bool) -> str:
+    if private:
+        return ("❌ **पहले Join दबाकर join request भेजो**, फिर **✅ I Joined** दबाओ।\n\n"
+                "Channel owner approve करने के बाद access मिल जाएगा।")
+    return "❌ **पहले Join करो**, फिर **✅ I Joined** दबाओ।"
+
+
+def fsub_added_text(item) -> str:
+    icon = "👥" if item.get("kind") == "group" else "📢"
+    return (
+        f"✅ **Force sub add हो गई**\n\n"
+        f"{icon} {item.get('title')}\n"
+        f"🔤 Button: **{item.get('button_text')}**\n\n"
+        "और add करने के लिए /setfsub दोबारा भेजो — कोई limit नहीं।"
+    )
+
+
+def fsub_removed_text(item) -> str:
+    return f"✅ **हट गई:** {item.get('title')}"
+
+
+def fsub_cleared_text(count: int) -> str:
+    return f"✅ **{count} force-sub entries हट गईं**"
+
+
+def fsub_delete_all_confirm_text(count: int) -> str:
+    return (
+        f"🗑 **सारे {count} force-sub entries हटा दें?**\n\n"
+        "यह वापस नहीं आएगा। Confirm के लिए **🗑 Delete all** दबाओ।"
     )
 
 
@@ -684,8 +938,9 @@ BANNED_CAPTION = "🚫 Banned — fraudulent payment proof"
 def setchat_prompt_text() -> str:
     return (
         "📡 **CHANNEL DUMP SETUP**\n\n"
-        "Send me the channel where you added me as an admin — link, @username or numeric ID.\n\n"
-        "Example: `https://t.me/mychannel` or `@mychannel` or `-1001234567890`\n\n"
+        "Send me the channel or group where you added me as an admin — link, "
+        "@username, numeric ID or a private invite link.\n\n"
+        "Example: `@mychannel` or `-1001234567890`\n\n"
         "I verify my admin rights before enabling automatic extraction. Use /cancel to stop."
     )
 
@@ -701,18 +956,55 @@ def setchat_admin_hint_text(title: str) -> str:
 def setchat_admin_ok_text(title: str) -> str:
     return (
         f"✅ **Admin verified in {title}!**\n\n"
-        "Final step: send a sample message link from this channel "
-        "(for example `https://t.me/mychannel/15`) so I can verify that I can read its content."
+        "Final step: send a sample message from this channel so I can verify that I can read its "
+        "content — a message link, or just the message number (for example `15`)."
     )
 
 
-def setchat_admin_failed_text() -> str:
+def setchat_admin_failed_text(reason: str = "not_admin") -> str:
+    """Tell the owner the *actual* reason the admin check failed."""
+    if reason == "no_post_rights":
+        return (
+            "❌ **Admin check failed**\n\n"
+            "मैं administrator हूँ, पर **Post Messages** off है।\n\n"
+            "👉 Channel → Administrators → इस bot → **Post Messages** ON करो, "
+            "फिर **🔍 Check Admin Status** दोबारा दबाओ।"
+        )
+    if reason == "error":
+        return (
+            "❌ **Admin check failed**\n\n"
+            "Telegram ने जवाब नहीं दिया। दोबारा **🔍 Check Admin Status** दबाओ; "
+            "और भी fail हो तो थोड़ी देर बाद try करो।"
+        )
     return (
         "❌ **Admin check failed**\n\n"
-        "I am not an administrator of that channel, or I cannot post messages there.\n\n"
-        "👉 Open the channel → **Administrators** → **Add Admin** → select this bot and enable "
-        "**Post Messages**, then tap **🔍 Check Admin Status** again."
+        "मुझे उस channel में administrator बनाओ।\n\n"
+        "👉 Channel → Administrators → Add Admin → इस bot को select करो → "
+        "**Post Messages** ON करो, फिर **🔍 Check Admin Status** दोबारा दबाओ।"
     )
+
+
+def setchat_join_request_text(title: str) -> str:
+    """Approval-only chat: the bot sent a join request and waits."""
+    return (
+        f"✅ **{title}** — join request भेज दी।\n\n"
+        "Channel owner approve करे, फिर दोबारा **🔍 Check Admin Status** दबाओ।"
+    )
+
+
+def setchat_resolve_failed_text(reason: str = "unresolved") -> str:
+    """Friendly, link-free explanation of a failed chat reference."""
+    if reason == "expired":
+        return ("❌ **यह invite link expire हो चुका है।**\n\n"
+                "Channel से नया invite link भेजो।")
+    if reason == "invalid":
+        return ("❌ **यह invite link सही नहीं लगता।**\n\n"
+                "Link ठीक से copy करके दोबारा भेजो।")
+    if reason == "no_access":
+        return ("🔒 **इस chat तक मेरी पहुँच नहीं है।**\n\n"
+                "पहले bot को channel में add करो, फिर link भेजो।")
+    return ("❌ Could not resolve that chat. Send the channel link, @username or ID again.\n\n"
+            "Public channels, private invite links, groups and supergroups are supported.")
 
 
 def setchat_done_text(title: str, chat_id) -> str:
@@ -728,14 +1020,14 @@ def setchat_done_text(title: str, chat_id) -> str:
 def setchat_sample_failed_text() -> str:
     return (
         "❌ **Verification failed**\n\n"
-        "That sample link could not be read. Make sure the message exists in the channel, that it is "
-        "not deleted, and send the link again (for example `https://t.me/mychannel/15`)."
+        "That sample message could not be read. Make sure the message exists in the channel, that it "
+        "is not deleted, and send the message link or the message number again."
     )
 
 
 def setchat_usage_text() -> str:
-    return ("Usage: `/setchat t.me/mychannel` — or use the **📡 Set channel** button in "
-            "/admin to be guided step by step.")
+    return ("Usage: `/setchat` with a channel link, @username, numeric ID or a private invite "
+            "link — or use the **📡 Set channel** button in /admin to be guided step by step.")
 
 
 def channel_not_found_text() -> str:

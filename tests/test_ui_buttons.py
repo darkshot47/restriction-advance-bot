@@ -5,10 +5,20 @@ from __future__ import annotations
 import pytest
 
 import ui
+from conftest import make_member  # noqa: F401  (real library types only)
 
 
 def flat(markup):
     return [b for row in markup.inline_keyboard for b in row]
+
+
+def fsub_item(**overrides):
+    """A force-sub entry the way database.normalize_fsub_item stores it."""
+    item = {"chat_id": -100555, "title": "My Channel", "username": "mychannel",
+            "invite_link": None, "button_text": "✅ Join My Channel",
+            "kind": "channel", "auto_approve": False, "order": 0}
+    item.update(overrides)
+    return item
 
 
 def style_of(button):
@@ -178,7 +188,7 @@ def test_every_button_has_exactly_one_action():
         ui.premium_keyboard(False, owner_id=1),
         ui.refer_keyboard("https://t.me/TestRestrictBot?start=1"),
         ui.help_keyboard(),
-        ui.fsub_keyboard("@channel"),
+        ui.fsub_keyboard([fsub_item()]),
         ui.back_keyboard(),
         ui.close_keyboard(),
         ui.download_controls("job", False),

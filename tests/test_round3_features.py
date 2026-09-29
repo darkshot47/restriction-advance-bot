@@ -25,7 +25,8 @@ import pytest
 import config
 import main
 import ui
-from conftest import FakeChat, FakeMessage, FakeUser, make_query, sc
+from conftest import (FakeChat, FakeMessage, FakeUser, make_member, make_query, sc)
+from pyrogram.enums import ChatMemberStatus
 
 
 # --------------------------------------------------------------------------- #
@@ -526,7 +527,7 @@ async def test_delchat_requires_admin_to_target_another_user(db, fake_bot):
 
 @pytest.mark.asyncio
 async def test_setchat_admin_check_fails_with_instructions(db, fake_bot, press):
-    fake_bot.members[999] = SimpleNamespace(status="member")
+    fake_bot.members[999] = make_member(ChatMemberStatus.MEMBER)
     message = FakeMessage(text="/setchat t.me/mychannel", user=FakeUser(1001))
     await main.setchat_handler(None, message)
 
@@ -540,7 +541,7 @@ async def test_setchat_admin_check_fails_with_instructions(db, fake_bot, press):
 
 @pytest.mark.asyncio
 async def test_setchat_admin_check_requires_post_permission(db, fake_bot, press):
-    fake_bot.members[999] = SimpleNamespace(status="administrator", can_post_messages=False)
+    fake_bot.members[999] = make_member(ChatMemberStatus.ADMINISTRATOR, can_post_messages=False)
     message = FakeMessage(text="/setchat t.me/mychannel", user=FakeUser(1001))
     await main.setchat_handler(None, message)
 
@@ -551,7 +552,7 @@ async def test_setchat_admin_check_requires_post_permission(db, fake_bot, press)
 
 @pytest.mark.asyncio
 async def test_setchat_full_flow_verifies_a_sample_message(db, fake_bot, press):
-    fake_bot.members[999] = SimpleNamespace(status="administrator", can_post_messages=True)
+    fake_bot.members[999] = make_member(ChatMemberStatus.ADMINISTRATOR, can_post_messages=True)
     fake_bot.messages[15] = SimpleNamespace(empty=False, id=15)
 
     message = FakeMessage(text="/setchat t.me/mychannel", user=FakeUser(1001))
@@ -559,7 +560,8 @@ async def test_setchat_full_flow_verifies_a_sample_message(db, fake_bot, press):
 
     await press(message, "setchat:check")
     assert sc("Admin verified") in message.shown_text
-    assert sc("send a sample message link") in message.shown_text
+    assert sc("send a sample message") in message.shown_text
+    assert sc("just the message number") in message.shown_text
     assert main.setchat_pending[1001]["step"] == "await_sample"
 
     sample = FakeMessage(text="https://t.me/mychannel/15", user=FakeUser(1001))
@@ -574,7 +576,7 @@ async def test_setchat_full_flow_verifies_a_sample_message(db, fake_bot, press):
 
 @pytest.mark.asyncio
 async def test_setchat_sample_must_be_readable(db, fake_bot, press):
-    fake_bot.members[999] = SimpleNamespace(status="administrator", can_post_messages=True)
+    fake_bot.members[999] = make_member(ChatMemberStatus.ADMINISTRATOR, can_post_messages=True)
     message = FakeMessage(text="/setchat t.me/mychannel", user=FakeUser(1001))
     await main.setchat_handler(None, message)
     await press(message, "setchat:check")
@@ -1088,7 +1090,7 @@ async def test_no_screen_leaks_plain_ascii_letters(db, fake_bot, press):
     # ui.* helpers return plain copy; the sender applies the font. Render them
     # the same way main.say() does.
     for raw in (ui.private_access_text(), ui.daily_limit_text(),
-                ui.setchat_admin_failed_text(), ui.feedback_link_warning(),
+                ui.setchat_admin_failed_text("no_post_rights"), ui.feedback_link_warning(),
                 ui.premium_tier_text(2002, 30), ui.premium_activated_user_text(30, "public"),
                 ui.payment_approved_user_text("Monthly", 30), ui.payment_rejected_user_text(),
                 ui.payment_banned_user_text(), ui.setchat_prompt_text(),
@@ -1114,14 +1116,19 @@ def test_smallcaps_protection_keeps_commands_and_links_verbatim():
 def test_no_button_is_a_dead_end(db):
     """Every callback_data a keyboard can emit is routed by callback_handler."""
     prefix_routes = ("dl:", "payok:", "payfake:", "payban:", "admin_page:", "admin:",
-                     "buy:", "paid:", "users_page:", "loggedusers:")
+                     "buy:", "paid:", "users_page:", "loggedusers:",
+                     "fsub:", "fsub_page:", "fsub_list_page:", "fsub_del:", "fsub_rename:",
+                     "fsub_del_all")
     direct_routes = {"home", "close", "cancel_login", "cancel_action", "redeem_points"}
     keyboards = [
         ui.start_keyboard(), ui.start_keyboard(show_admin=True), ui.settings_keyboard(True, False),
         ui.language_keyboard(), ui.login_keyboard(), ui.logout_keyboard(), ui.feedback_keyboard(),
         ui.stats_keyboard(), ui.premium_keyboard(False), ui.premium_keyboard(True),
         ui.refer_keyboard("https://t.me/x?start=1"), ui.help_keyboard(),
-        ui.fsub_keyboard("@chan"), ui.download_controls("job"),         ui.plans_keyboard(), ui.payment_keyboard("tok"), ui.admin_back_keyboard(),
+        ui.fsub_keyboard([{"chat_id": -1001, "title": "Chan", "username": "chan",
+                          "invite_link": None, "button_text": "✅ Join Chan",
+                          "kind": "channel", "auto_approve": False, "order": 0}]),
+        ui.download_controls("job"),         ui.plans_keyboard(), ui.payment_keyboard("tok"), ui.admin_back_keyboard(),
         main.admin_panel_keyboard(0), ui.admin_back_keyboard(),
         ui.premium_upsell_keyboard(), ui.private_access_keyboard(), ui.daily_limit_keyboard(),
         ui.setchat_check_keyboard(), ui.premium_tier_keyboard(),
