@@ -4,7 +4,8 @@ from datetime import datetime, timedelta
 import calendar
 from pymongo.errors import DuplicateKeyError
 from config import (FREE_DAILY_LIMIT, REDEEM_PREMIUM_MONTHS,
-                    PREMIUM_SOURCE_MANUAL, PREMIUM_SOURCE_REDEEM)
+                    PREMIUM_SOURCE_MANUAL, PREMIUM_SOURCE_REDEEM,
+                    DEFAULT_ENGINE_MODE, ENGINE_PYTHON, ENGINES, GRANT_TIERS)
 
 MONGO_URL = os.environ.get("MONGO_URL")
 
@@ -55,6 +56,11 @@ async def add_user(user_id, name, username=None):
             "referral_count": 0,
             "points": 0,
             "premium_source": None,
+            # Granular VIP flags (/addpremium tiers) — see config.GRANT_TIERS.
+            "has_private_access": False,
+            "has_models_access": False,
+            # Engine the user picked in /models (models holders only).
+            "engine_preference": None,
             "notifications": True,
             "silent_mode": False,
             "favorites": [],
@@ -123,27 +129,195 @@ async def is_premium(user_id):
         return False
     expiry = user.get("premium_expiry")
     if expiry and expiry < datetime.now():
+        # Expiry revokes the granular feature flags too, so an expired grant
+        # can never keep private-channel or C++ Turbo access alive.
         await users_col.update_one(
             {"user_id": user_id, "premium_expiry": expiry},
-            {"$set": {"is_premium": False, "premium_expiry": None}}
+            {"$set": {"is_premium": False, "premium_expiry": None,
+                      "has_private_access": False, "has_models_access": False,
+                      "premium_tier": None}}
         )
         return False
     return True
 
 
-async def add_premium(user_id, days=30, source=PREMIUM_SOURCE_MANUAL):
-    expiry = datetime.now() + timedelta(days=days)
-    await users_col.update_one(
-        {"user_id": user_id},
-        {"$set": {"is_premium": True, "premium_source": source, "premium_expiry": expiry}}
-    )
+async def add_premium(user_id, days=30, source=PREMIUM_SOURCE_MANUAL, *, tier=None,
+                      has_private_access=None, has_models_access=None,
+                      premium_expiry=None):
+    """Grant premium plus the granular feature flags of a tier.
+
+    ``tier`` is a key of ``config.GRANT_TIERS`` (``public`` / ``models`` /
+    ``private`` / ``all``): it fills in the flags *and* the matching
+    ``premium_source`` so a models-only grant can never inherit the legacy
+    "manual means private" meaning.
+
+    ``days=None`` means **lifetime**: no expiry is stored, and :func:`is_premium`
+    treats a missing expiry as "still valid".  The explicit
+    ``has_private_access`` / ``has_models_access`` arguments default to ``None``
+    = *leave the stored flag alone*, so renewing one feature never silently
+    downgrades the other.  Returns the updates that were written.
+    """
+    definition = GRANT_TIERS.get(str(tier or "").strip().lower()) if tier else None
+    if definition:
+        source = definition.get("source", source)
+        if has_private_access is None:
+            has_private_access = definition["has_private_access"]
+        if has_models_access is None:
+            has_models_access = definition["has_models_access"]
+    updates = {"is_premium": True, "premium_source": source}
+    if premium_expiry is not None:
+        updates["premium_expiry"] = premium_expiry
+    elif days is not None:
+        updates["premium_expiry"] = datetime.now() + timedelta(days=int(days))
+    else:
+        updates["premium_expiry"] = None          # lifetime — no expiry
+    if has_private_access is not None:
+        updates["has_private_access"] = bool(has_private_access)
+    if has_models_access is not None:
+        updates["has_models_access"] = bool(has_models_access)
+    if definition:
+        updates["premium_tier"] = str(tier).strip().lower()
+    await users_col.update_one({"user_id": user_id}, {"$set": updates})
+    return updates
+
+
+async def get_premium_tier(user_id):
+    """The granular tier key stored by the last :func:`add_premium` call."""
+    return (await get_user(user_id) or {}).get("premium_tier")
 
 
 async def remove_premium(user_id):
+    """Revoke VIP: premium, both feature flags, the tier and the expiry."""
     await users_col.update_one(
         {"user_id": user_id},
-        {"$set": {"is_premium": False, "premium_expiry": None}}
+        {"$set": {"is_premium": False, "premium_expiry": None, "premium_source": None,
+                  "has_private_access": False, "has_models_access": False,
+                  "premium_tier": None}},
     )
+
+
+async def has_private_access(user_id):
+    """True when the ``has_private_access`` flag is set on a live premium."""
+    user = await users_col.find_one({"user_id": user_id})
+    return bool(user and user.get("has_private_access"))
+
+
+async def has_models_access(user_id):
+    """True when the user may switch to the C++ Turbo engine (/models).
+
+    The permission is only meaningful while premium is active, so an expired
+    grant stops advertising the switcher immediately.
+    """
+    user = await users_col.find_one({"user_id": user_id})
+    if not user or not user.get("has_models_access"):
+        return False
+    expiry = user.get("premium_expiry")
+    if expiry and expiry < datetime.now():
+        return False
+    return True
+
+
+async def set_models_access(user_id, enabled: bool):
+    await users_col.update_one({"user_id": user_id},
+                               {"$set": {"has_models_access": bool(enabled)}})
+
+
+async def set_private_access(user_id, enabled: bool):
+    await users_col.update_one({"user_id": user_id},
+                               {"$set": {"has_private_access": bool(enabled)}})
+
+
+# --------------------------------------------------------------------------- #
+#  Engine preference (per user) and engine mode (global)
+# --------------------------------------------------------------------------- #
+
+async def set_user_engine(user_id, engine):
+    """Persist the engine a models holder picked in /models or /engine."""
+    from engines import normalize_engine
+    value = normalize_engine(engine)
+    await users_col.update_one({"user_id": user_id}, {"$set": {"engine_preference": value}})
+    return value
+
+
+async def get_user_engine(user_id):
+    """The stored preference (``None`` when the user never chose one)."""
+    user = await users_col.find_one({"user_id": user_id}, {"engine_preference": 1})
+    value = (user or {}).get("engine_preference")
+    return value or None
+
+
+async def get_engine_preference(user_id):
+    """Alias of :func:`get_user_engine` used by the extraction pipeline."""
+    return await get_user_engine(user_id)
+
+
+async def set_engine_mode(mode):
+    """Persist the global engine controller mode (AUTO / LOCK C++ / LOCK PYTHON)."""
+    from engines import normalize_mode
+    value = normalize_mode(mode)
+    await config_col.update_one(
+        {"type": "engine_mode"},
+        {"$set": {"mode": value, "updated_at": datetime.now()}},
+        upsert=True,
+    )
+    return value
+
+
+async def get_engine_mode():
+    """The stored global mode, defaulting to ``config.DEFAULT_ENGINE_MODE``."""
+    row = await config_col.find_one({"type": "engine_mode"})
+    if not row or not row.get("mode"):
+        return DEFAULT_ENGINE_MODE
+    from engines import normalize_mode
+    return normalize_mode(row.get("mode"))
+
+
+async def record_engine_use(engine, count: int = 1):
+    """Persist how many extractions each engine has served (analytics)."""
+    from engines import normalize_engine
+    value = normalize_engine(engine)
+    if value not in ENGINES:
+        value = ENGINE_PYTHON
+    await config_col.update_one(
+        {"type": "engine_stats"},
+        {"$inc": {f"counts.{value}": int(count)},
+         "$set": {"updated_at": datetime.now()}},
+        upsert=True,
+    )
+
+
+async def get_engine_stats():
+    """Persisted per-engine extraction counters (``0`` for untouched engines)."""
+    row = await config_col.find_one({"type": "engine_stats"})
+    counts = (row or {}).get("counts") or {}
+    return {engine: int(counts.get(engine, 0) or 0) for engine in ENGINES}
+
+
+# --------------------------------------------------------------------------- #
+#  Per-channel extraction counter (/mychannels dashboard)
+# --------------------------------------------------------------------------- #
+
+async def increment_channel_files(chat_id, count: int = 1):
+    """Count files delivered into a dump channel (shown by /mychannels)."""
+    await config_col.update_one(
+        {"type": "channel_stats", "chat_id": int(chat_id)},
+        {"$inc": {"files": int(count)}, "$set": {"updated_at": datetime.now()}},
+        upsert=True,
+    )
+
+
+async def get_channel_files(chat_id):
+    row = await config_col.find_one({"type": "channel_stats", "chat_id": int(chat_id)})
+    return int((row or {}).get("files", 0) or 0)
+
+
+async def set_channel_files(chat_id, count: int):
+    await config_col.update_one(
+        {"type": "channel_stats", "chat_id": int(chat_id)},
+        {"$set": {"files": int(count), "updated_at": datetime.now()}},
+        upsert=True,
+    )
+
 
 
 async def is_banned(user_id):
@@ -725,7 +899,10 @@ async def get_bot_stats():
         "premium": premium,
         "banned": banned,
         "admins": admins,
-        "total_downloads": downloads
+        "total_downloads": downloads,
+        # Granular VIP flags — how many users hold each feature.
+        "models_access": await users_col.count_documents({"has_models_access": True}),
+        "private_access": await users_col.count_documents({"has_private_access": True}),
     }
 
 

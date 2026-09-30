@@ -154,12 +154,15 @@ async def test_only_owner_can_grant_private_access(db, press, monkeypatch):
     await main.addpremium_handler(None, message)
     # requirement 4: the owner picks the tier before anything is granted
     grant.assert_not_called()
-    assert sc("Select Premium Access Tier for User `2002` (30 days):") in message.shown_text
+    assert sc("GRANULAR VIP GRANT") in message.shown_text
     assert main.premium_tier_pending[main.OWNER_ID] == {"user_id": 2002, "days": 30}
-    assert message.button("premium_tier:full").text == sc("🔓 Full (Public + Private)")
-    assert message.button("premium_tier:public").text == sc("🌐 Public Only")
-    await press(message, "premium_tier:full")
-    grant.assert_awaited_once_with(2002, 30, source="manual")
+    assert message.button("grant_tier:private").text == sc("3️⃣ Public + Private")
+    assert message.button("grant_tier:public").text == sc("1️⃣ Only Public")
+    # step 1 only asks for the tier — the duration comes next
+    await press(message, "grant_tier:private")
+    grant.assert_not_called()
+    await press(message, "grant_dur:private:typed:30")
+    grant.assert_awaited_once_with(2002, 30, tier="private")
     assert not main.premium_tier_pending
 
 

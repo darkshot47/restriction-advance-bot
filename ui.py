@@ -140,6 +140,13 @@ if ButtonStyle is not None:  # pragma: no cover - depends on installed library
         "danger": getattr(ButtonStyle, "DANGER", None),
     }
 
+#: Public style handles: the wire enum member when the installed library
+#: supports coloured buttons, ``None`` otherwise.  Callers and tests assert the
+#: RED **🧠 Models Architecture** button with :data:`BUTTON_DANGER`.
+BUTTON_PRIMARY = _ENUM_BY_NAME.get("primary")
+BUTTON_SUCCESS = _ENUM_BY_NAME.get("success")
+BUTTON_DANGER = _ENUM_BY_NAME.get("danger")
+
 
 def _env_mode() -> str:
     return os.environ.get("BUTTON_STYLES", "auto").strip().lower()
@@ -284,12 +291,19 @@ def premium_tier_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
-def payment_review_keyboard(user_id: int, plan: str | None = None) -> InlineKeyboardMarkup:
-    """Owner-only approve / fake / ban buttons attached to a payment proof."""
+def payment_review_keyboard(user_id: int, plan: str | None = None,
+                            turbo: bool = False) -> InlineKeyboardMarkup:
+    """Owner-only approve / fake / ban buttons attached to a payment proof.
+
+    ``callback_data`` is ``payok:<user>[:<plan>][:turbo]`` — the ``turbo`` part
+    tells the approval handler to grant the C++ Turbo ``models`` permission too.
+    """
     plan_part = f":{plan}" if plan else ""
+    turbo_part = ":turbo" if turbo else ""
     return keyboard([
         [
-            button("✅ Approve", callback_data=f"payok:{user_id}{plan_part}", style="success"),
+            button("✅ Approve", callback_data=f"payok:{user_id}{plan_part}{turbo_part}",
+                   style="success"),
             button("⚠️ Fake", callback_data=f"payfake:{user_id}", style="danger"),
         ],
         [button("🚫 Ban User", callback_data=f"payban:{user_id}", style="danger")],
@@ -297,8 +311,13 @@ def payment_review_keyboard(user_id: int, plan: str | None = None) -> InlineKeyb
 
 
 def start_keyboard(show_admin: bool = False) -> InlineKeyboardMarkup:
-    """Main menu of /start — every button runs its action directly."""
-    return keyboard([
+    """Main menu of /start — every button runs its action directly.
+
+    Layout budget (mobile): 7 rows maximum, 2 buttons maximum per row.  The
+    last row is always the red **🧠 Models Architecture** button, so the
+    dual-engine explainer is one tap away from every menu.
+    """
+    rows = [
         [
             button("🔐 Login", callback_data="cmd_login", style="success"),
             button("🚪 Logout", callback_data="cmd_logout", style="danger"),
@@ -312,14 +331,20 @@ def start_keyboard(show_admin: bool = False) -> InlineKeyboardMarkup:
             button("🎁 Refer", callback_data="cmd_refer", style="primary"),
         ],
         [
+            button("📡 Set channel", callback_data="cmd_setchat", style="primary"),
+            button("📺 My Channels", callback_data="cmd_mychannels", style="primary"),
+        ],
+        [
             button("📖 Help", callback_data="cmd_help", style="primary"),
             button("💬 Feedback", callback_data="cmd_feedback", style="primary"),
         ],
         [
             button("🌐 Language", callback_data="cmd_language", style="primary"),
-            button("📡 Set channel", callback_data="cmd_setchat", style="primary"),
-        ],
-    ] + ([[button("🛠 Admins", callback_data="cmd_admin", style="primary")]] if show_admin else []))
+        ] + ([button("🛠 Admins", callback_data="cmd_admin", style="primary")] if show_admin else []),
+        # Red (ButtonStyle.DANGER) footer button — the engine architecture page.
+        [models_architecture_button()],
+    ]
+    return keyboard(rows)
 
 
 def settings_keyboard(notifications: bool, silent: bool) -> InlineKeyboardMarkup:
@@ -525,12 +550,20 @@ def channel_caption_keyboard(token: str) -> InlineKeyboardMarkup:
 #  Screen copy
 # --------------------------------------------------------------------------- #
 
-def start_text(name: str, premium: bool) -> str:
+def start_text(name: str, premium: bool, engine_line: str | None = None) -> str:
+    """Main menu copy.
+
+    *engine_line* is the live corner badge built by :func:`active_engine_status`
+    (for example ``⚡ Active Engine: [C++ Turbo 🚀 (Peak Auto-Scale)]``).  It is
+    optional so callers that do not know the engine yet still render a menu.
+    """
     badge = "💎 Premium" if premium else "🆓 Free"
+    engine = f"{engine_line}\n" if engine_line else ""
     return (
         f"👋 **Hello {name}!**\n\n"
         f"🤖 **Restricted Content Saver Bot**\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{engine}"
         f"🎖 **Status:** {badge}\n\n"
         f"📌 Send any Telegram link to save content!\n"
         f"🆓 Free: **3 public extractions daily**. No referrals needed.\n"
@@ -547,6 +580,9 @@ def help_text() -> str:
         "Login / Logout / Status — use the buttons below\n\n"
         "**📥 Download:**\n"
         "Send a link or a range: `t.me/ch/1-20`\n\n"
+        "**🧠 Engines:**\n"
+        "/models — Python Standard ⚙️ or C++ Turbo 🚀\n"
+        "/mychannels — your dump-channel dashboard\n\n"
         "**🎨 Customization:**\n"
         "/setcaption /delcaption\n"
         "/setthumb /delthumb\n"
@@ -938,9 +974,12 @@ def premium_activated_user_text(days, tier: str = "full", plan: str | None = Non
     )
 
 
-def payment_approved_user_text(plan_title: str | None, days: int | None) -> str:
+def payment_approved_user_text(plan_title: str | None, days: int | None,
+                               turbo: bool = False) -> str:
     detail = f"\n\n📦 {plan_title} • {days} days of full access" if plan_title and days else ""
-    return "🎉 Payment Approved! Your premium has been activated." + detail
+    engine = ("\n🚀 **C++ Turbo unlocked** — switch your engine any time with /models."
+              if turbo else "")
+    return "🎉 Payment Approved! Your premium has been activated." + detail + engine
 
 
 def payment_rejected_user_text() -> str:
@@ -1099,11 +1138,13 @@ def stale_button_text() -> str:
 # Keep headings styled with Telegram formatting rather than replacing letters
 # with inaccessible Unicode lookalikes. Button labels stay short on mobile.
 def premium_overview(premium, user):
-    from config import (FREE_DAILY_LIMIT, PREMIUM_PLANS, PREMIUM_SOURCE_PUBLIC,
-                        PREMIUM_SOURCE_REDEEM, REDEEM_LIMITATION)
+    from config import (FREE_DAILY_LIMIT, PREMIUM_SOURCE_PUBLIC,
+                        PREMIUM_SOURCE_REDEEM, REDEEM_LIMITATION, TURBO_BENEFITS)
+    user = user or {}
     title = "💎 **PREMIUM ACTIVE**" if premium else "💎 **PREMIUM BENEFITS**"
     expiry = user.get("premium_expiry")
-    status = f"\n📅 Valid until: **{expiry:%d %b %Y}**" if premium and expiry else ""
+    status = f"\n📅 Valid until: **{expiry:%d %b %Y}**" if premium and expiry else (
+        "\n♾ Valid: **lifetime**" if premium else "")
     source = user.get("premium_source")
     if source == PREMIUM_SOURCE_REDEEM:
         access = REDEEM_LIMITATION
@@ -1112,51 +1153,100 @@ def premium_overview(premium, user):
     else:
         access = ("Private-channel access requires premium manually granted by the owner and your own "
                   "authorized Telegram session. Payment screenshots alone do not unlock it.")
-    prices = "\n".join(f"• **₹{p['price']}** / {p['title']}" for p in PREMIUM_PLANS.values())
+    # The C++ Turbo add-on is a separate, per-user feature flag.
+    turbo = bool(user.get("has_models_access"))
+    turbo_line = ("🚀 **C++ Turbo engine:** unlocked — switch it with /models"
+                  if turbo else
+                  "🚀 **C++ Turbo engine:** add-on available on every plan")
+    turbo_benefits = "\n".join(f"✅ {item}" for item in TURBO_BENEFITS)
     return (f"{title}{status}\n\n"
             "✨ **What you get**\n"
             "✅ Unlimited downloads from public channels\n"
             "✅ Up to 2 GB per file\n"
             "✅ No extraction watermark\n"
             "✅ Priority support\n\n"
-            f"💰 **Available plans**\n{prices}\n\n"
+            f"🚀 **C++ Turbo add-on**\n{turbo_line}\n{turbo_benefits}\n\n"
+            f"💰 **Available plans**\n{plans_table()}\n\n"
             f"🔐 **Access policy**\n{access}\n\n"
             f"🆓 Free users get **{FREE_DAILY_LIMIT} public extractions daily** — no referrals required.\n\n"
-            "👇 Tap **Buy Plan** to choose a duration. You will see the payment QR before submitting proof.")
+            "👇 Tap **Buy Plan** to choose a duration and a Standard or C++ Turbo "
+            "price. You will see the payment QR before submitting proof.")
 
 
 def premium_overview_keyboard(owner_id=None):
+    """Benefits screen actions.
+
+    ``owner_id`` is accepted for backwards compatibility; the contact button is
+    now the owner's public link from ``config.PAYMENT_CONTACT``, which needs no
+    numeric id and works for every user.
+    """
     return keyboard([
         [button("🛍 Buy Plan", callback_data="premium_plans", style="success")],
         [button("🎁 Earn Points", callback_data="cmd_refer", style="primary"), home_button()],
-    ] + ([[button("💬 Contact owner", url=f"tg://user?id={owner_id}", style="primary")]] if owner_id else []))
+        [button("🚀 C++ Turbo", callback_data="cmd_models", style="primary")],
+        [owner_contact_button()],
+    ])
 
 
 def plans_text():
     """Plan list — built from config.PREMIUM_PLANS so prices never drift."""
-    from config import PAYMENT_CONTACT, PREMIUM_PLANS, RUPEE
-    icons = ("💎", "🌟", "👑")
-    lines = "\n".join(
-        f"{icons[index % len(icons)]} **{plan['title']} — {RUPEE}{plan['price']}**"
-        for index, plan in enumerate(PREMIUM_PLANS.values())
-    )
+    from config import PAYMENT_CONTACT
     return ("🛍 **CHOOSE YOUR PLAN**\n\n"
-            f"{lines}\n\n"
-            "📲 Select a plan to view the owner's QR. Pay the exact amount, tap **I've paid**, then upload a screenshot.\n\n"
-            f"🔎 All payments are checked manually by @{PAYMENT_CONTACT} before activation.")
+            "💰 **Tiered pricing — Standard or with the C++ Turbo add-on**\n"
+            f"{plans_table()}\n\n"
+            "⚙️ **Standard** runs on the Python engine.\n"
+            "🚀 **With C++ Turbo** adds the multi-threaded, zero-copy engine and "
+            "the /models switcher for the whole plan duration.\n\n"
+            "📲 Select a plan to view the owner's QR. Pay the exact amount, tap "
+            "**I've paid**, then upload a screenshot.\n\n"
+            f"🔎 All payments are checked manually by @{PAYMENT_CONTACT} before "
+            "activation. Tap **Contact Owner** for any question.")
 
 
 def plans_keyboard():
-    from config import PREMIUM_PLANS
-    return keyboard([
-        [button(f"{p['title']} · ₹{p['price']}", callback_data=f"buy:{key}", style="success")]
-        for key, p in PREMIUM_PLANS.items()
-    ] + [[button("⬅️ Benefits", callback_data="cmd_premium", style="primary"), home_button()]])
+    """One row per plan: Standard price and, when it exists, the C++ Turbo price.
+
+    ``callback_data`` keeps the legacy ``buy:<plan>`` form for the Standard
+    price and adds ``buy:<plan>:turbo`` for the C++ Turbo add-on, so buttons
+    sent before this change still check out.  Both are plain ASCII.
+    """
+    from config import PREMIUM_PLANS, plan_addon_price, plan_base_price, plan_total_price
+    rows = []
+    for key, plan in PREMIUM_PLANS.items():
+        title = plan.get("title", key)
+        standard = button(f"💎 {title} · ₹{plan_base_price(plan)}",
+                          callback_data=f"buy:{key}", style="success")
+        if plan_addon_price(plan):
+            turbo = button(f"🚀 {title} · ₹{plan_total_price(plan)}",
+                           callback_data=f"buy:{key}:turbo", style="primary")
+            rows.append([standard, turbo])
+        else:
+            rows.append([standard])
+    rows.append([button("⬅️ Benefits", callback_data="cmd_premium", style="primary"),
+                 home_button()])
+    rows.append([owner_contact_button()])
+    return keyboard(rows)
 
 
-def payment_text(plan):
-    from config import PAYMENT_CONTACT, RUPEE
-    return (f"💳 **PAYMENT DETAILS**\n\n📦 Plan: **{plan['title']}**\n💰 Amount: **{RUPEE}{plan['price']}**\n\n"
+def payment_text(plan, turbo: bool = False):
+    """Payment-proof wizard copy — the amount follows the chosen variant.
+
+    ``turbo=True`` charges the plan **plus** the C++ Turbo add-on and lists what
+    the add-on unlocks, so the screenshot the owner reviews matches the amount.
+    """
+    from config import PAYMENT_CONTACT, RUPEE, plan_addon_price, plan_base_price, plan_total_price
+    plan = plan or {}
+    amount = plan_total_price(plan) if turbo else plan_base_price(plan)
+    title = plan.get("title", "Plan")
+    engine = ("🚀 **C++ Turbo** (multi-threaded, zero-copy) + /models switcher"
+              if turbo else "⚙️ **Python Standard** (single-stream)")
+    addon = plan_addon_price(plan)
+    breakdown = (f"\n🧩 Includes: {RUPEE}{plan_base_price(plan)} base + "
+                 f"{RUPEE}{addon} C++ Turbo add-on" if turbo and addon else "")
+    return (f"💳 **PAYMENT DETAILS**\n\n"
+            f"📦 Plan: **{title}**\n"
+            f"⚡ Engine: {engine}\n"
+            f"💰 Amount: **{RUPEE}{amount}**{breakdown}\n\n"
             "① Scan this QR in your payment app.\n"
             "② Check the recipient and pay the exact amount.\n"
             "③ Save a screenshot showing the successful transaction.\n"
@@ -1166,10 +1256,12 @@ def payment_text(plan):
 
 
 def payment_keyboard(token):
+    """Proof-wizard actions — always with the explicit owner contact URL button."""
     return keyboard([
         [button("✅ I've paid", callback_data=f"paid:{token}", style="success")],
         [button("⬅️ Plans", callback_data="premium_plans", style="primary"),
          button("❌ Cancel", callback_data="cancel_action", style="danger")],
+        [owner_contact_button()],
     ])
 
 
@@ -1193,3 +1285,969 @@ def split_text(text, limit):
         size += width
     if chunk:
         yield "".join(chunk)
+
+
+# --------------------------------------------------------------------------- #
+#  Dual execution engines — Python Standard ⚙️ / C++ Turbo 🚀
+#
+#  Every engine string a user sees is built here: the /start corner badge, the
+#  live telemetry HUD, the /models switcher and the red architecture page.
+#  engines.py owns the routing decisions, this module owns the wording.
+# --------------------------------------------------------------------------- #
+
+def _engine_object(key):
+    """The :class:`engines.Engine` for *key* (import kept lazy: ui has no deps)."""
+    from engines import get_engine
+    return get_engine(key)
+
+
+def engine_key(key) -> str:
+    """Normalised engine id (``"python"`` / ``"cpp"``) for any stored value."""
+    from engines import normalize_engine
+    return normalize_engine(key)
+
+
+def engine_display(key) -> str:
+    """``"C++ Turbo 🚀"`` — the label plus its icon."""
+    return _engine_object(key).name
+
+
+def engine_icon(key) -> str:
+    return _engine_object(key).icon
+
+
+def engine_version_label(key) -> str:
+    """``"v2.4"`` for the turbo engine, ``""`` for engines without a version."""
+    return _engine_object(key).version_label
+
+
+def active_engine_status(key=None, badge: str = "", *, icon: str | None = None) -> str:
+    """The live /start corner badge.
+
+    ``⚡ Active Engine: [C++ Turbo 🚀 (Peak Auto-Scale)]``
+    ``⚡ Active Engine: [C++ Turbo 🚀 (Global Lock)]``
+    ``🟢 Active Engine: [Python Standard ⚙️]``
+    """
+    resolved = engine_key(key)
+    turbo = resolved == "cpp"
+    lead = icon or ("⚡" if turbo else "🟢")
+    inner = engine_display(resolved)
+    if badge:
+        inner = f"{inner} ({badge})"
+    return f"{lead} **Active Engine:** [{inner}]"
+
+
+def engine_status_line(decision) -> str:
+    """:func:`active_engine_status` built straight from an ``EngineDecision``."""
+    if decision is None:
+        return active_engine_status()
+    return active_engine_status(getattr(decision, "engine", None),
+                                getattr(decision, "badge", "") or "")
+
+
+# --------------------------------------------------------------------------- #
+#  Live download telemetry HUD (terminal style)
+# --------------------------------------------------------------------------- #
+
+#: Progress-bar cells. ``█`` is a filled cell, ``░`` an empty one.
+BAR_FILLED = "█"
+BAR_EMPTY = "░"
+#: Unknown telemetry readings render as this, never as a fake zero.
+UNKNOWN_VALUE = "--"
+
+
+def progress_bar(percent, width: int | None = None) -> str:
+    """``68`` → ``[████████░░░░]`` (12 cells by default)."""
+    from config import TELEMETRY_BAR_WIDTH
+    cells = int(TELEMETRY_BAR_WIDTH if width is None else width)
+    cells = max(1, min(64, cells))
+    try:
+        value = 0 if percent is None else max(0, min(100, int(round(float(percent)))))
+    except (TypeError, ValueError):
+        value = 0
+    filled = int(max(0, min(cells, round(value * cells / 100))))
+    return f"[{BAR_FILLED * filled}{BAR_EMPTY * (cells - filled)}]"
+
+
+def format_percent(value, digits: int = 1) -> str:
+    """``19.234`` → ``19.2%``; ``None`` → ``--``."""
+    if value is None:
+        return UNKNOWN_VALUE
+    try:
+        return f"{float(value):.{digits}f}%"
+    except (TypeError, ValueError):
+        return UNKNOWN_VALUE
+
+
+def format_ping(ms) -> str:
+    """``11.4`` → ``11ms`` (whole milliseconds, the way a terminal shows it)."""
+    if ms is None:
+        return UNKNOWN_VALUE
+    try:
+        return f"{int(round(float(ms)))}ms"
+    except (TypeError, ValueError):
+        return UNKNOWN_VALUE
+
+
+def format_speed(mbps) -> str:
+    """``44.23`` → ``44.2 MB/s``; ``None`` → ``--``."""
+    if mbps is None:
+        return UNKNOWN_VALUE
+    try:
+        value = float(mbps)
+    except (TypeError, ValueError):
+        return UNKNOWN_VALUE
+    if value >= 1024:
+        return f"{value / 1024:.2f} GB/s"
+    return f"{value:.1f} MB/s"
+
+
+def format_eta(seconds) -> str:
+    """``3`` → ``00:03``, ``3725`` → ``1:02:05``; ``None`` → ``--:--``."""
+    if seconds is None:
+        return "--:--"
+    try:
+        total = int(round(float(seconds)))
+    except (TypeError, ValueError):
+        return "--:--"
+    if total < 0:
+        return "--:--"
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
+def telemetry_engine_line(key=None, state: str = "Active") -> str:
+    """``⚡ Engine: C++ Turbo v2.4 [Active]`` / ``⚙️ Engine: Python Standard [Active]``."""
+    resolved = engine_key(key)
+    icon = "⚡" if resolved == "cpp" else engine_icon(resolved)
+    version = engine_version_label(resolved)
+    name = f"{_engine_object(resolved).label} {version}".strip()
+    return f"{icon} **Engine:** {name} [{state}]"
+
+
+def telemetry_load_line(sample=None) -> str:
+    """``📊 Server Load: CPU 19.2% | RAM 41.8% | Ping 11ms``."""
+    cpu = getattr(sample, "cpu_percent", None)
+    ram = getattr(sample, "memory_percent", None)
+    ping = getattr(sample, "ping_ms", None)
+    return (f"📊 **Server Load:** CPU {format_percent(cpu)} | "
+            f"RAM {format_percent(ram)} | Ping {format_ping(ping)}")
+
+
+def telemetry_progress_line(percent=None, stage: str = "Downloading",
+                            paused: bool = False, width: int | None = None) -> str:
+    """``📥 Downloading: 68% [████████░░░░]``."""
+    label = "Paused" if paused else (stage or "Downloading")
+    shown = UNKNOWN_VALUE if percent is None else f"{max(0, min(100, int(percent)))}%"
+    return f"📥 **{label}:** {shown} {progress_bar(percent, width)}"
+
+
+def telemetry_speed_line(state=None) -> str:
+    """``🚀 Speed: 44.2 MB/s • ETA: 00:03``."""
+    speed = getattr(state, "speed_mbps", None)
+    eta = getattr(state, "eta", None)
+    return f"🚀 **Speed:** {format_speed(speed)} • **ETA:** {format_eta(eta)}"
+
+
+def telemetry_enabled() -> bool:
+    """False when ``TELEMETRY=off`` was requested in the environment."""
+    from config import TELEMETRY_ENABLED
+    return bool(TELEMETRY_ENABLED)
+
+
+def telemetry_hud(key=None, percent=None, *, sample=None, state=None,
+                  stage: str = "Downloading", paused: bool = False,
+                  width: int | None = None, engine_state: str = "Active") -> str:
+    """The full terminal-style HUD shown while a file is being extracted.
+
+    ``⚡ Engine: C++ Turbo v2.4 [Active]``
+    ``📥 Downloading: 68% [████████░░░░]``
+    ``📊 Server Load: CPU 19.2% | RAM 41.8% | Ping 11ms``
+    ``🚀 Speed: 44.2 MB/s • ETA: 00:03``
+
+    Missing readings degrade to ``--`` instead of inventing numbers, and the
+    server-load line disappears entirely when telemetry is switched off.
+    """
+    lines = [
+        telemetry_engine_line(key, engine_state),
+        telemetry_progress_line(percent, stage=stage, paused=paused, width=width),
+    ]
+    if telemetry_enabled():
+        lines.append(telemetry_load_line(sample))
+    lines.append(telemetry_speed_line(state))
+    return "\n".join(lines)
+
+
+#: Backwards friendly alias — the HUD *is* the download status text now.
+download_hud = telemetry_hud
+
+
+def channel_download_notice(percent=None, paused: bool = False, hud: str | None = None) -> str:
+    """Public-channel download notice, optionally carrying the telemetry HUD."""
+    body = channel_download_public_text(percent, paused)
+    return f"{hud}\n\n{body}" if hud else body
+
+
+# --------------------------------------------------------------------------- #
+#  /models and /engine — the user-facing engine switcher
+# --------------------------------------------------------------------------- #
+
+def models_switcher_keyboard(active=None, *, can_switch: bool = True) -> InlineKeyboardMarkup:
+    """``[ ⚙️ Python Standard ]`` / ``[ 🚀 C++ Turbo ]`` with the active one marked.
+
+    The active engine is green (success) and carries a ✅, the other stays blue.
+    When the global C++ lock is on, the choice is fixed and both buttons are
+    replaced by a single "back" row by the caller.
+    """
+    current = engine_key(active)
+
+    def pick(key: str, label: str):
+        selected = key == current
+        text = f"✅ {label}" if selected else label
+        return button(text, callback_data=f"engine_set:{key}",
+                      style="success" if selected else "primary")
+
+    rows = [
+        [pick("python", "⚙️ Python Standard")],
+        [pick("cpp", "🚀 C++ Turbo")],
+    ]
+    if not can_switch:
+        rows = []
+    rows.append([button("🧠 Architecture", callback_data="models_info", style="primary"),
+                 home_button()])
+    return keyboard(rows)
+
+
+def models_switcher_text(active=None, mode=None, *, concurrency: int = 0,
+                         peak: bool = False, threshold: int | None = None) -> str:
+    """Screen copy of the switcher for a user who holds the ``models`` feature."""
+    from engines import ENGINE_MODE_LABELS, normalize_mode
+    resolved = engine_key(active)
+    mode_key = normalize_mode(mode)
+    #: "Your Choice" only once the user actually picked an engine.
+    badge = "Your Choice" if active else ""
+    lines = [
+        "🧠 **ENGINE SWITCHER**",
+        "",
+        active_engine_status(resolved, badge),
+        "",
+        f"🎛 **Controller mode:** {ENGINE_MODE_LABELS.get(mode_key, mode_key)}",
+        f"📈 **Live traffic:** {int(concurrency)} concurrent"
+        + (f" (peak above {int(threshold)})" if threshold is not None else ""),
+        "",
+        "Pick the engine used for **all** your extractions — private chat and "
+        "dump channels alike. The choice is stored on your account.",
+        "",
+        "⚙️ **Python Standard** — single-stream, the reliable default.",
+        "🚀 **C++ Turbo** — multi-threaded workers with zero-copy stream piping.",
+    ]
+    if mode_key == "lock_cpp":
+        lines += ["", "🔒 The owner has locked **every** extraction to C++ Turbo, "
+                      "so the switcher is fixed right now."]
+    elif peak:
+        lines += ["", "⚡ Traffic is above the autoscaler threshold — requests are "
+                      "being pushed through C++ Turbo automatically."]
+    return "\n".join(lines)
+
+
+def models_locked_text(mode=None) -> str:
+    """Shown to a models holder while the global C++ lock removes the choice."""
+    from engines import ENGINE_MODE_LABELS, normalize_mode
+    return "\n".join([
+        "🧠 **ENGINE SWITCHER**",
+        "",
+        active_engine_status("cpp", "Global Lock"),
+        "",
+        f"🎛 **Controller mode:** {ENGINE_MODE_LABELS.get(normalize_mode(mode), 'Auto')}",
+        "",
+        "🔒 Every extraction on this bot is currently forced through the "
+        "**C++ Turbo** engine by the owner, so your personal preference is "
+        "already the fastest option. The switcher returns as soon as the global "
+        "lock is lifted.",
+    ])
+
+
+def models_upsell_text() -> str:
+    """Feature overview + add-on pricing for a user **without** the feature."""
+    from config import PREMIUM_PLANS, RUPEE, plan_addon_price, plan_base_price
+    rows = []
+    for plan in PREMIUM_PLANS.values():
+        addon = plan_addon_price(plan)
+        base = plan_base_price(plan)
+        if not addon:
+            continue
+        rows.append(f"• **{plan['title']}** — {RUPEE}{base} Standard · "
+                    f"+{RUPEE}{addon} with C++ Turbo = **{RUPEE}{base + addon}**")
+    pricing = "\n".join(rows) or "• C++ Turbo is sold as an add-on on every plan."
+    return "\n".join([
+        "🚀 **C++ TURBO ENGINE**",
+        "",
+        "Your account runs on the **Python Standard** engine. The C++ Turbo "
+        "engine is a paid add-on:",
+        "",
+        "✅ Multi-threaded extraction workers instead of one stream",
+        "✅ Zero-copy stream piping — the file is never re-buffered",
+        "✅ Ultra-low latency during traffic peaks",
+        "✅ Priority routing while the server is busy",
+        "✅ Live telemetry HUD with speed, ETA and server load",
+        "",
+        "💰 **Add-on pricing**",
+        pricing,
+        "",
+        "👇 Tap **Upgrade to C++ Turbo** to see the payment QR, or contact the "
+        "owner for a manual grant.",
+    ])
+
+
+def models_upsell_keyboard() -> InlineKeyboardMarkup:
+    return keyboard([
+        [button("🚀 Upgrade to C++ Turbo", callback_data="premium_plans", style="success")],
+        [button("🧠 Architecture", callback_data="models_info", style="primary"),
+         button("💎 Benefits", callback_data="cmd_premium", style="primary")],
+        [owner_contact_button()],
+        [home_button()],
+    ])
+
+
+def models_architecture_button() -> InlineKeyboardButton:
+    """The red footer button of /start (``ButtonStyle.DANGER``)."""
+    return button("🧠 Models Architecture", callback_data="models_info", style="danger")
+
+
+def models_architecture_text(active=None) -> str:
+    """The detailed Python vs C++ Turbo page opened by the red /start button."""
+    from config import (ENGINE_PEAK_THRESHOLD, ENGINE_TURBO_WORKERS,
+                        ENGINE_ZERO_COPY_MAX_MB, PAYMENT_CONTACT, PREMIUM_PLANS,
+                        RUPEE, plan_addon_price, plan_base_price)
+    workers = max(1, int(ENGINE_TURBO_WORKERS))
+    zero_copy_mb = max(0, int(ENGINE_ZERO_COPY_MAX_MB))
+    prices = "\n".join(
+        f"• **{plan['title']}** — {RUPEE}{plan_base_price(plan)} Standard · "
+        f"{RUPEE}{plan_base_price(plan) + plan_addon_price(plan)} with C++ Turbo"
+        for plan in PREMIUM_PLANS.values()
+    )
+    lines = [
+        "🧠 **MODELS ARCHITECTURE**",
+        "",
+        active_engine_status(active),
+        "",
+        "⚙️ **PYTHON STANDARD**",
+        "• Single-thread, single-stream pipeline",
+        "• One link at a time per extraction batch",
+        "• Buffered transfer: download, then re-upload",
+        "• Included in every plan, free tier included",
+        "",
+        "🚀 **C++ TURBO**",
+        f"• Multi-threaded pool — up to {workers} concurrent workers",
+        f"• Zero-copy stream piping: files up to {zero_copy_mb} MB are handed to "
+        "the uploader straight from memory — no temp file, no re-read",
+        "• Native C cipher (TgCrypto) on every MTProto chunk",
+        f"• Priority routing above {int(ENGINE_PEAK_THRESHOLD)} concurrent extractions",
+        "",
+        "📊 **TRAFFIC HANDLING**",
+        "• Python Standard: 1 stream per batch — queues grow with traffic",
+        f"• C++ Turbo: {workers} overlapping streams per batch — the download and "
+        "the upload of different files run at the same time",
+        f"• Indicative throughput: up to ~{workers}x the concurrent streams of a "
+        "single-stream batch on the same link",
+        "",
+        "🤖 **AUTO MODE (default)**",
+        "The controller watches live concurrency. During a traffic spike every "
+        "request is routed to C++ Turbo so nothing queues; when traffic returns "
+        "to normal, free users go back to Python Standard automatically.",
+        "",
+        "🔓 **HOW TO UNLOCK C++ TURBO**",
+        prices,
+        "",
+        f"Pay the add-on amount and send the screenshot, or tap **Contact Owner** "
+        f"below to reach @{PAYMENT_CONTACT} for a manual grant. The owner can also "
+        "grant it with /addpremium.",
+    ]
+    return "\n".join(lines)
+
+
+def models_architecture_keyboard(active=None, *, has_models: bool = False) -> InlineKeyboardMarkup:
+    rows = []
+    if has_models:
+        rows.append([button("🎛 Open Switcher", callback_data="cmd_models", style="success")])
+    else:
+        rows.append([button("🚀 Upgrade to C++ Turbo", callback_data="premium_plans",
+                            style="success")])
+    rows.append([owner_contact_button()])
+    rows.append([home_button()])
+    return keyboard(rows)
+
+
+# --------------------------------------------------------------------------- #
+#  /setengine — the owner's global engine controller
+# --------------------------------------------------------------------------- #
+
+def engine_controller_keyboard(mode=None) -> InlineKeyboardMarkup:
+    """AUTO / LOCK C++ / LOCK PYTHON, the active mode marked in green."""
+    from engines import normalize_mode
+    current = normalize_mode(mode)
+
+    def pick(key: str, label: str):
+        selected = key == current
+        text = f"✅ {label}" if selected else label
+        return button(text, callback_data=f"engine_mode:{key}",
+                      style="success" if selected else "primary")
+
+    return keyboard([
+        [pick("auto", "🤖 Auto (Autoscaler)")],
+        [pick("lock_cpp", "🚀 Lock to C++ Turbo")],
+        [pick("lock_python", "⚙️ Lock to Python")],
+        [button("📊 Refresh", callback_data="cmd_setengine", style="primary"), home_button()],
+    ])
+
+
+def engine_controller_text(mode=None, snapshot=None) -> str:
+    """Owner screen: the active mode, live traffic and the routing rules."""
+    from engines import ENGINE_MODE_LABELS, normalize_mode
+    snapshot = snapshot or {}
+    mode_key = normalize_mode(mode)
+    routed = snapshot.get("routed") or {}
+    autoscaler = "running" if snapshot.get("autoscaler", mode_key == "auto") else "paused"
+    peak = "⚡ PEAK" if snapshot.get("peak") else "🟢 normal"
+    lines = [
+        "🧠 **GLOBAL ENGINE CONTROLLER**",
+        "",
+        f"🎛 **Mode:** {ENGINE_MODE_LABELS.get(mode_key, mode_key)}",
+        f"🤖 **Autoscaler:** {autoscaler}",
+        f"📈 **Traffic:** {int(snapshot.get('active', 0))} concurrent • {peak}",
+        f"🎯 **Peak threshold:** {int(snapshot.get('threshold', 0))} concurrent",
+        f"🔝 **Peak reached:** {int(snapshot.get('peak_active', 0))} concurrent "
+        f"({int(snapshot.get('peak_events', 0))} spike(s))",
+        f"⚙️ **Routed to Python:** {int(routed.get('python', 0))}",
+        f"🚀 **Routed to C++ Turbo:** {int(routed.get('cpp', 0))}",
+        "",
+        "**🤖 Auto (Dynamic Autoscaler)** — default. Watches live traffic; above "
+        "the threshold every request goes to C++ Turbo to kill the queue, and "
+        "free users fall back to Python Standard when traffic normalises.",
+        "",
+        "**🚀 Lock to C++ Turbo** — global force: 100% of extractions (free and "
+        "VIP) run on C++ Turbo. The autoscaler is paused.",
+        "",
+        "**⚙️ Lock to Python** — global default locked to Python Standard and the "
+        "autoscaler disabled. Free users are locked to Python; premium users who "
+        "hold the **models** permission keep their own /models switch.",
+    ]
+    return "\n".join(lines)
+
+
+def engine_mode_set_text(mode=None) -> str:
+    from engines import ENGINE_MODE_LABELS, normalize_mode
+    return (f"✅ **Engine mode updated**\n\n"
+            f"🎛 Active mode: **{ENGINE_MODE_LABELS.get(normalize_mode(mode), 'Auto')}**\n\n"
+            "The new mode applies to every extraction from now on.")
+
+
+# --------------------------------------------------------------------------- #
+#  Owner contact + tiered pricing with the C++ Turbo add-on
+# --------------------------------------------------------------------------- #
+
+def contact_owner_url() -> str:
+    """The one place the owner contact link is built (config is the truth)."""
+    from config import OWNER_CONTACT_URL, PAYMENT_CONTACT
+    return OWNER_CONTACT_URL or f"https://t.me/{PAYMENT_CONTACT}"
+
+
+def owner_contact_button(label: str = "💬 Contact Owner") -> InlineKeyboardButton:
+    """``[ 💬 Contact Owner ]`` — a URL button, because links live only in ``url=``.
+
+    Shown on every plan display, pricing screen and payment-proof wizard.
+    """
+    return button(label, url=contact_owner_url(), style="primary")
+
+
+def plan_addon_label(plan) -> str:
+    """``"+₹50 C++ Turbo"`` — empty when a plan carries no add-on."""
+    from config import RUPEE, plan_addon_price
+    addon = plan_addon_price(plan)
+    return f"+{RUPEE}{addon} C++ Turbo" if addon else ""
+
+
+def plan_price_labels(plan) -> tuple[str, str]:
+    """``("₹99", "₹149")`` — Standard price and price with the C++ add-on."""
+    from config import RUPEE, plan_addon_price, plan_base_price, plan_total_price
+    base = f"{RUPEE}{plan_base_price(plan)}"
+    if not plan_addon_price(plan):
+        return base, base
+    return base, f"{RUPEE}{plan_total_price(plan)}"
+
+
+def plans_table() -> str:
+    """Every plan as ``Standard`` / ``with C++ Turbo`` / ``Total`` lines."""
+    from config import PREMIUM_PLANS, RUPEE, plan_addon_price, plan_base_price
+    lines = []
+    for plan in PREMIUM_PLANS.values():
+        base, addon = plan_base_price(plan), plan_addon_price(plan)
+        title = plan.get("title", "Plan")
+        if addon:
+            lines.append(f"• **{title}** — {RUPEE}{base} Standard | "
+                         f"+{RUPEE}{addon} C++ Turbo = **{RUPEE}{base + addon}**")
+        else:
+            lines.append(f"• **{title}** — {RUPEE}{base}")
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+#  Granular VIP grants (/addpremium): tier first, then duration
+# --------------------------------------------------------------------------- #
+
+def grant_tier_keyboard() -> InlineKeyboardMarkup:
+    """The four feature tiers, two per row, plus cancel.
+
+    Labels stay inside the 28-character mobile budget — the full description of
+    every tier is printed in :func:`grant_tier_text` instead of the button.
+    """
+    from config import GRANT_TIERS
+    order = ["public", "models", "private", "all"]
+    styles = {"public": "primary", "models": "success",
+              "private": "primary", "all": "success"}
+    buttons = []
+    for key in order:
+        tier = GRANT_TIERS.get(key)
+        if not tier:
+            continue
+        buttons.append(button(f"{tier['number']} {tier['label']}",
+                              callback_data=f"grant_tier:{key}", style=styles.get(key)))
+    rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
+    rows.append([button("❌ Cancel", callback_data="cancel_action", style="danger")])
+    return keyboard(rows)
+
+
+def grant_tier_text(user_id, name: str | None = None, days=None) -> str:
+    """Step 1 — which feature tier should this user get?"""
+    from config import GRANT_TIERS
+    who = f"{name} (`{user_id}`)" if name else f"`{user_id}`"
+    lines = [
+        "💎 **GRANULAR VIP GRANT**",
+        "",
+        f"👤 User: {who}",
+        "",
+        "**Step 1 of 2 — choose the feature tier**",
+        "",
+    ]
+    for key in ("public", "models", "private", "all"):
+        tier = GRANT_TIERS.get(key)
+        if not tier:
+            continue
+        lines.append(f"{tier['number']} **{tier['label']}** — {tier['description']}")
+    lines += ["", "📅 Step 2 asks for the duration once the tier is picked."]
+    if days:
+        lines.append(f"ℹ️ You typed `{days}` day(s) — that duration is offered as a "
+                     "button in step 2.")
+    return "\n".join(lines)
+
+
+def grant_duration_keyboard(tier: str, days: int | None = None) -> InlineKeyboardMarkup:
+    """Step 2 — ``[1 Month] [3 Months] [1 Year] [Lifetime] [Custom Days]``."""
+    from config import GRANT_DURATIONS
+    rows = [
+        [button(f"📅 {GRANT_DURATIONS['month']['label']}",
+                callback_data=f"grant_dur:{tier}:month", style="primary"),
+         button(f"📅 {GRANT_DURATIONS['quarter']['label']}",
+                callback_data=f"grant_dur:{tier}:quarter", style="primary")],
+        [button(f"📅 {GRANT_DURATIONS['year']['label']}",
+                callback_data=f"grant_dur:{tier}:year", style="primary"),
+         button(f"♾ {GRANT_DURATIONS['lifetime']['label']}",
+                callback_data=f"grant_dur:{tier}:lifetime", style="success")],
+        [button("🔢 Custom Days", callback_data=f"grant_dur:{tier}:custom", style="primary")],
+    ]
+    if days:
+        rows.append([button(f"✅ Use {int(days)} days",
+                            callback_data=f"grant_dur:{tier}:typed:{int(days)}",
+                            style="success")])
+    rows.append([button("⬅️ Tier", callback_data=f"grant_back:{tier}", style="primary"),
+                 button("❌ Cancel", callback_data="cancel_action", style="danger")])
+    return keyboard(rows)
+
+
+def grant_duration_text(user_id, tier: str, name: str | None = None,
+                        days: int | None = None) -> str:
+    """Step 2 copy — the chosen tier plus the duration choices."""
+    from config import GRANT_DURATIONS, GRANT_TIERS
+    definition = GRANT_TIERS.get(tier) or {}
+    who = f"{name} (`{user_id}`)" if name else f"`{user_id}`"
+    choices = " · ".join(
+        f"**{value['label']}** ({'no expiry' if value['days'] is None else str(value['days']) + ' days'})"
+        for value in GRANT_DURATIONS.values()
+    )
+    lines = [
+        "💎 **GRANULAR VIP GRANT**",
+        "",
+        f"👤 User: {who}",
+        f"🎖 Tier: **{definition.get('number', '')} {definition.get('label', tier)}**".strip(),
+        "",
+        "**Step 2 of 2 — choose the duration**",
+        "",
+        choices,
+        "",
+        "🔢 **Custom Days** asks for an exact number of days (1–36500).",
+    ]
+    if days:
+        lines.append(f"ℹ️ `{int(days)}` day(s) from your command is one tap away below.")
+    return "\n".join(lines)
+
+
+def grant_custom_days_text(user_id, tier: str, name: str | None = None) -> str:
+    who = f"{name} (`{user_id}`)" if name else f"`{user_id}`"
+    return (f"🔢 **Custom duration**\n\n👤 User: {who}\n\n"
+            "Send the number of days in your next message (1–36500).\n"
+            "Example: `45`\n\nUse /cancel to exit.")
+
+
+def grant_done_text(user_id, tier: str, days=None, name: str | None = None) -> str:
+    """Owner confirmation — exactly what was stored on the user document."""
+    from config import GRANT_TIERS
+    definition = GRANT_TIERS.get(tier) or {}
+    who = f"{name} (`{user_id}`)" if name else f"`{user_id}`"
+    return "\n".join([
+        "✅ **VIP GRANTED**",
+        "",
+        f"👤 User: {who}",
+        f"🎖 Tier: **{definition.get('number', '')} {definition.get('label', tier)}**".strip(),
+        f"🔓 Private channels: **{'yes' if definition.get('has_private_access') else 'no'}**",
+        f"🚀 C++ Turbo models: **{'yes' if definition.get('has_models_access') else 'no'}**",
+        "💎 Premium: **yes**",
+        f"📅 Expiry: **{'lifetime — no expiry' if days is None else str(int(days)) + ' day(s)'}**",
+        "",
+        "The user has been notified with the full details of their tier.",
+    ])
+
+
+def grant_activated_user_text(tier: str, days=None, name: str | None = None) -> str:
+    """The notification the granted user receives."""
+    from config import GRANT_TIERS
+    definition = GRANT_TIERS.get(tier) or {}
+    greeting = f"👋 {name}, " if name else ""
+    features = ["✅ Unlimited public-channel extractions"]
+    if definition.get("has_private_access"):
+        features.append("✅ Private and restricted channels (login required)")
+    if definition.get("has_models_access"):
+        features.append("✅ C++ Turbo engine switcher — /models")
+    else:
+        features.append("⚙️ Python Standard engine")
+    expiry = ("♾ **Lifetime — no expiry**" if days is None
+              else f"📅 Valid for **{int(days)} day(s)**")
+    return "\n".join([
+        "💎 **VIP ACTIVATED**",
+        "",
+        f"{greeting}the owner granted you a premium tier.",
+        "",
+        f"🎖 Tier: **{definition.get('number', '')} {definition.get('label', tier)}**".strip(),
+        *features,
+        expiry,
+        "",
+        "Open /start to use it. Tap 🧠 **Models Architecture** to see what the "
+        "C++ Turbo engine changes." if definition.get("has_models_access")
+        else "Open /start to use it.",
+    ])
+
+
+def grant_revoked_text(user_id, name: str | None = None) -> str:
+    who = f"{name} (`{user_id}`)" if name else f"`{user_id}`"
+    return (f"❌ **VIP REVOKED**\n\n👤 User: {who}\n\n"
+            "Premium, private-channel access and the C++ Turbo models "
+            "permission were all removed.")
+
+
+def grant_tier_unknown_text() -> str:
+    return "⚠️ **Unknown tier**\n\nRun /addpremium again and pick one of the four tiers."
+
+
+# --------------------------------------------------------------------------- #
+#  /mychannels — the user's channel management dashboard
+# --------------------------------------------------------------------------- #
+
+def mychannels_empty_text() -> str:
+    return "\n".join([
+        "📺 **MY CHANNELS**",
+        "",
+        "You have not connected a dump channel yet.",
+        "",
+        "Tap **Set channel** (or send /setchat) to link a channel or supergroup. "
+        "Every link you post there is extracted automatically, and this "
+        "dashboard then shows its permissions and file counter.",
+    ])
+
+
+def mychannels_keyboard(chat_id, *, connected: bool = True) -> InlineKeyboardMarkup:
+    """Test permissions / re-verify admin rights / disconnect."""
+    rows = []
+    if connected and chat_id is not None:
+        rows += [
+            [button("🔍 Test Permissions", callback_data=f"mych_test:{int(chat_id)}",
+                    style="primary"),
+             button("🔄 Re-verify Admin", callback_data=f"mych_verify:{int(chat_id)}",
+                    style="primary")],
+            [button("🗑 Disconnect", callback_data=f"mych_del:{int(chat_id)}", style="danger")],
+        ]
+    rows.append([button("📡 Set channel", callback_data="cmd_setchat", style="success"),
+                 home_button()])
+    return keyboard(rows)
+
+
+def mychannels_text(entry, *, admin_ok=None, admin_reason: str = "", files: int = 0,
+                    engine=None) -> str:
+    """The dashboard: title, id, posting rights and files extracted."""
+    from config import CHANNEL_TITLE_FALLBACK
+    entry = entry or {}
+    chat_id = entry.get("chat_id")
+    title = entry.get("title") or (CHANNEL_TITLE_FALLBACK.format(chat_id=chat_id)
+                                   if chat_id else "Unknown chat")
+    if admin_ok is None:
+        rights = "❔ Not checked yet — tap **Test Permissions**"
+    elif admin_ok:
+        rights = "✅ Admin with posting rights"
+    else:
+        reasons = {
+            "not_admin": "❌ The bot is not an admin there",
+            "no_post_rights": "⚠️ Admin, but **Post Messages** is disabled",
+            "error": "❔ Telegram did not answer — try again",
+        }
+        rights = reasons.get(admin_reason, "❌ Cannot post there")
+    kind = str(entry.get("type") or entry.get("kind") or "").lower()
+    kind_label = {"supergroup": "Supergroup", "group": "Group",
+                  "channel": "Channel"}.get(kind, "Channel or supergroup")
+    lines = [
+        "📺 **MY CHANNELS**",
+        "",
+        f"📌 **{title}**",
+        f"🆔 ID: `{chat_id}`",
+        f"🗂 Type: {kind_label}",
+        f"🔐 Bot posting rights: {rights}",
+        f"📦 Files extracted here: **{int(files)}**",
+    ]
+    if engine:
+        lines += ["", active_engine_status(engine)]
+    username = entry.get("username")
+    if username:
+        lines.append(f"🔗 Public handle: @{username}")
+    lines += ["", "Use the buttons below to test the bot's permissions, re-verify "
+                 "admin rights or disconnect this channel."]
+    return "\n".join(lines)
+
+
+def mychannels_test_text(title: str, ok: bool, reason: str = "") -> str:
+    """Result of the **Test Permissions** / **Re-verify Admin** buttons."""
+    if ok:
+        return (f"✅ **Permissions OK**\n\n📌 {title}\n\n"
+                "The bot is an admin and may post messages there. "
+                "Extractions into this channel will work.")
+    messages = {
+        "not_admin": "The bot is **not an admin** in this chat. Add it as an "
+                     "admin with **Post Messages** enabled, then tap "
+                     "**Re-verify Admin**.",
+        "no_post_rights": "The bot is an admin but **Post Messages** is "
+                          "disabled. Enable that right and tap **Re-verify Admin**.",
+        "error": "Telegram did not answer the permission check. This is usually "
+                 "temporary — tap **Test Permissions** again in a moment.",
+    }
+    body = messages.get(reason, "The bot cannot post in this chat.")
+    return (f"⚠️ **Permissions problem**\n\n📌 {title}\n\n{body}\n\n"
+            "You can also disconnect it with /delchat and run /setchat again.")
+
+
+def mychannels_disconnected_text(title: str) -> str:
+    return (f"🗑 **Channel disconnected**\n\n📌 {title}\n\n"
+            "The bot no longer extracts links posted there. "
+            "Run /setchat to connect a channel again.")
+
+
+# --------------------------------------------------------------------------- #
+#  Admin panel — descriptive English command labels
+# --------------------------------------------------------------------------- #
+
+#: command -> the clean English description shown in /admin and /admins.
+ADMIN_COMMAND_LABELS = {
+    "setfsub": "Add Force Subscribe",
+    "fsublist": "Manage Force Subs",
+    "delfsub": "Delete Force Sub",
+    "setchat": "Channel Setup Wizard",
+    "setengine": "Global Engine Controller (Lock / Auto)",
+    "addpremium": "Granular VIP Grant",
+    "removepremium": "Revoke VIP",
+    "stats": "Global & Engine Analytics",
+    "broadcast": "Broadcast Message",
+    "ban": "User Moderation",
+    "unban": "User Moderation",
+    "payments": "Verify Payment Proofs",
+    "maintenance": "Maintenance Mode",
+    # Everything else keeps a short, descriptive English label too.
+    "users": "All Users List",
+    "loggedusers": "Logged-in Users",
+    "newusers": "New Users Today",
+    "activeusers": "Active Users Today",
+    "topusers": "Top Users",
+    "finduser": "Find User",
+    "userinfo": "User Info",
+    "export": "Export Data",
+    "premiumlist": "Premium Users List",
+    "addqr": "Upload Payment QR",
+    "delqr": "Delete Payment QR",
+    "removeqr": "Delete Payment QR",
+    "sendmsg": "Direct Message a User",
+    "banlist": "Banned Users List",
+    "feedbacks": "User Feedback Inbox",
+    "addadmin": "Add Admin",
+    "removeadmin": "Remove Admin",
+    "adminlist": "Admin List",
+    "clearlogs": "Clear Download Logs",
+    "adminhelp": "Admin Help",
+    "fsublabel": "Rename a Join Button",
+    "fsubcheck": "Force Sub Health Check",
+    "delchat": "Disconnect a Dump Channel",
+    "redeem": "Redeem Points",
+}
+
+#: Emoji shown in front of each command in the panel text.
+ADMIN_COMMAND_ICONS = {
+    "setfsub": "📢", "fsublist": "📋", "delfsub": "🗑️", "setchat": "⚙️",
+    "setengine": "🧠", "addpremium": "💎", "removepremium": "❌", "stats": "📊",
+    "broadcast": "📢", "ban": "🚫", "unban": "🚫", "payments": "💳",
+    "maintenance": "🛠️", "users": "👥", "loggedusers": "🔐", "newusers": "🆕",
+    "activeusers": "📈", "topusers": "🏆", "finduser": "🔎", "userinfo": "ℹ️",
+    "export": "📤", "premiumlist": "💎", "addqr": "🖼", "delqr": "🗑️",
+    "removeqr": "🗑️", "sendmsg": "✉️", "banlist": "🚫", "feedbacks": "💬",
+    "addadmin": "🛡", "removeadmin": "🛡", "adminlist": "🛡", "clearlogs": "🧹",
+    "adminhelp": "❓", "fsublabel": "🏷", "fsubcheck": "🩺", "delchat": "🗑️",
+    "redeem": "🎁",
+}
+
+
+def admin_command_label(command: str) -> str:
+    """The descriptive English label of *command* (falls back to the name)."""
+    return ADMIN_COMMAND_LABELS.get(command, command.replace("_", " ").title())
+
+
+def admin_command_line(command: str) -> str:
+    """``🧠 /setengine — Global Engine Controller (Lock / Auto)``."""
+    icon = ADMIN_COMMAND_ICONS.get(command, "•")
+    return f"{icon} /{command} — {admin_command_label(command)}"
+
+
+def admin_command_lines(commands) -> str:
+    return "\n".join(admin_command_line(command) for command in commands)
+
+
+def engine_analytics_text(snapshot=None) -> str:
+    """The engine half of ``/stats`` — global analytics for the owner/admins."""
+    from engines import ENGINE_LABELS, ENGINE_MODE_LABELS, normalize_mode
+    snapshot = snapshot or {}
+    routed = snapshot.get("routed") or {}
+    stored = snapshot.get("stored") or {}
+    mode = normalize_mode(snapshot.get("mode"))
+    total = sum(int(value) for value in routed.values()) or None
+    lines = [
+        "🧠 **ENGINE ANALYTICS**",
+        "",
+        f"🎛 **Controller mode:** {ENGINE_MODE_LABELS.get(mode, mode)}",
+        f"🤖 **Autoscaler:** {'running' if snapshot.get('autoscaler') else 'paused'}",
+        f"📈 **In flight now:** {int(snapshot.get('active', 0))} concurrent "
+        f"(threshold {int(snapshot.get('threshold', 0))})",
+        f"🔝 **Peak seen:** {int(snapshot.get('peak_active', 0))} concurrent • "
+        f"{int(snapshot.get('peak_events', 0))} spike(s)",
+        "",
+        "**Routed this run**",
+        f"⚙️ {ENGINE_LABELS.get('python', 'Python Standard')}: {int(routed.get('python', 0))}",
+        f"🚀 {ENGINE_LABELS.get('cpp', 'C++ Turbo')}: {int(routed.get('cpp', 0))}",
+    ]
+    if total:
+        share = int(routed.get("cpp", 0)) * 100 / total
+        lines.append(f"📊 C++ Turbo share: {share:.1f}% of {int(total)} extractions")
+    if stored:
+        lines += [
+            "",
+            "**Routed all time (database)**",
+            f"⚙️ Python Standard: {int(stored.get('python', 0))}",
+            f"🚀 C++ Turbo: {int(stored.get('cpp', 0))}",
+        ]
+    lines += ["", "🧠 Use /setengine to change the mode or lock an engine globally."]
+    return "\n".join(lines)
+
+
+def stats_text(stats, bookmarks: int = 0, engine_block: str | None = None) -> str:
+    """The global ``/stats`` screen (users, downloads and engine analytics)."""
+    stats = stats or {}
+    lines = [
+        "📊 **BOT STATISTICS**",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━",
+        "",
+        "👥 **Users:**",
+        f"├ Total: `{int(stats.get('total', 0))}`",
+        f"├ Active Today: `{int(stats.get('active_today', 0))}`",
+        f"├ New Today: `{int(stats.get('new_today', 0))}`",
+        f"├ Premium: `{int(stats.get('premium', 0))}`",
+        f"├ Banned: `{int(stats.get('banned', 0))}`",
+        f"└ Admins: `{int(stats.get('admins', 0))}`",
+        "",
+        "🔐 **Feature grants:**",
+        f"├ Private channels: `{int(stats.get('private_access', 0))}`",
+        f"└ C++ Turbo models: `{int(stats.get('models_access', 0))}`",
+        "",
+        f"📥 Downloads: `{int(stats.get('total_downloads', 0))}`",
+        f"🔖 Bookmarks: `{int(bookmarks)}`",
+    ]
+    if engine_block:
+        lines += ["", "━━━━━━━━━━━━━━━━━━━━━━━━", "", engine_block]
+    return "\n".join(lines)
+
+
+#: The headline actions of the /admin panel.  A tuple of one or more commands
+#: per line — ``("ban", "unban")`` is rendered as the single moderation pair
+#: ``🚫 /ban & /unban — User Moderation``.
+ADMIN_FEATURED_PAIRS = (
+    ("setfsub",), ("fsublist",), ("delfsub",), ("setchat",), ("setengine",),
+    ("addpremium",), ("removepremium",), ("stats",), ("broadcast",),
+    ("ban", "unban"), ("payments",), ("maintenance",),
+)
+
+
+def admin_featured_text() -> str:
+    """The twelve most-used admin actions as descriptive English pairs."""
+    lines = []
+    for group in ADMIN_FEATURED_PAIRS:
+        icon = ADMIN_COMMAND_ICONS.get(group[0], "•")
+        commands = " & ".join(f"/{command}" for command in group)
+        lines.append(f"{icon} {commands} — {admin_command_label(group[0])}")
+    return "\n".join(lines)
+
+
+def payment_review_owner_text(user_id, plan_title: str, amount, days, turbo: bool = False) -> str:
+    """Caption the owner receives with a proof screenshot."""
+    engine = ("🚀 **C++ Turbo add-on included**" if turbo
+              else "⚙️ Standard plan (Python engine)")
+    duration = "lifetime" if days is None else f"{int(days)} days"
+    return (f"💳 **PAYMENT REVIEW**\n\n"
+            f"👤 User: `{user_id}`\n"
+            f"📦 Plan: **{plan_title}** • **{amount}**\n"
+            f"{engine}\n"
+            f"📅 Duration: {duration}\n\n"
+            "🔎 Verify this screenshot against your actual payment records.\n"
+            f"👑 Owner approval: `/addpremium {user_id}` — or tap ✅ Approve, which "
+            "grants exactly this plan and engine.")
+
+
+def payment_submitted_text(plan_title: str, amount, turbo: bool = False) -> str:
+    """Confirmation the buyer sees after uploading a screenshot."""
+    from config import PAYMENT_CONTACT
+    engine = "🚀 C++ Turbo add-on" if turbo else "⚙️ Standard plan"
+    return (f"✅ **Payment proof submitted**\n\n"
+            f"📦 {plan_title} • {amount} • {engine}\n"
+            f"⏳ Awaiting verification by @{PAYMENT_CONTACT}. This is not an "
+            "automatic payment confirmation.\n"
+            "💎 The owner will activate your premium after checking payment.")
+
+
+def payment_proof_saved_text() -> str:
+    """Shown when the proof is stored but could not be delivered to the owner."""
+    from config import PAYMENT_CONTACT
+    return (f"⚠️ **Proof saved, delivery unavailable**\n\n"
+            f"Please send your screenshot directly to @{PAYMENT_CONTACT}. "
+            "Your proof remains available to the owner in /payments.")

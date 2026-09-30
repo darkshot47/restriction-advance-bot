@@ -27,6 +27,8 @@ os.environ.setdefault("BOT_USERNAME", "TestRestrictBot")
 os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017")
 
 import main  # noqa: E402  (import after the environment is ready)
+import engines  # noqa: E402
+import telemetry  # noqa: E402
 from pyrogram.types import (  # noqa: E402
     CallbackQuery, ChatMember, ChatAdministratorRights, ChatJoiner,
 )
@@ -172,6 +174,12 @@ class FakeDB:
         self.admins: set[int] = set()
         self.profile_syncs: list[tuple] = []
         self.payments: list[dict] = []
+        #: Global engine controller mode (None → config.DEFAULT_ENGINE_MODE).
+        self.engine_mode = None
+        #: Persisted per-engine extraction counters.
+        self.engine_stats: dict[str, int] = {}
+        #: chat_id -> files extracted into that dump channel.
+        self.channel_files: dict[int, int] = {}
 
     # users -----------------------------------------------------------------
     def _new_user(self, user_id, name, username):
@@ -198,6 +206,10 @@ class FakeDB:
             "referral_count": 0,
             "points": 0,
             "premium_source": None,
+            "has_private_access": False,
+            "has_models_access": False,
+            "engine_preference": None,
+            "premium_tier": None,
             "referred_by": None,
             "notifications": True,
             "silent_mode": False,
@@ -228,17 +240,120 @@ class FakeDB:
     async def get_display_name(self, user_id, fallback="User"):
         return (self.users.get(user_id) or {}).get("name") or fallback
 
-    async def add_premium(self, user_id, days=30, source="manual"):
+    async def add_premium(self, user_id, days=30, source="manual", *, tier=None,
+                          has_private_access=None, has_models_access=None,
+                          premium_expiry=None):
+        """Mirror of database.add_premium — tier decides flags *and* source."""
+        from config import GRANT_TIERS
         user = self.users.setdefault(user_id, self._new_user(user_id, "Tester", None))
+        definition = GRANT_TIERS.get(str(tier or "").strip().lower()) if tier else None
+        if definition:
+            source = definition.get("source", source)
+            if has_private_access is None:
+                has_private_access = definition["has_private_access"]
+            if has_models_access is None:
+                has_models_access = definition["has_models_access"]
+            user["premium_tier"] = str(tier).strip().lower()
         user["is_premium"] = True
         user["premium_source"] = source
-        user["premium_expiry"] = _dt.datetime.now() + _dt.timedelta(days=days)
+        if premium_expiry is not None:
+            user["premium_expiry"] = premium_expiry
+        elif days is not None:
+            user["premium_expiry"] = _dt.datetime.now() + _dt.timedelta(days=int(days))
+        else:
+            user["premium_expiry"] = None        # lifetime
+        if has_private_access is not None:
+            user["has_private_access"] = bool(has_private_access)
+        if has_models_access is not None:
+            user["has_models_access"] = bool(has_models_access)
+        return user
 
     async def remove_premium(self, user_id):
         user = self.users.setdefault(user_id, self._new_user(user_id, "Tester", None))
         user["is_premium"] = False
         user["premium_expiry"] = None
         user["premium_source"] = None
+        user["has_private_access"] = False
+        user["has_models_access"] = False
+        user["premium_tier"] = None
+
+    async def get_premium_tier(self, user_id):
+        return (self.users.get(user_id) or {}).get("premium_tier")
+
+    # granular feature flags -------------------------------------------------
+    async def has_private_access(self, user_id):
+        return bool((self.users.get(user_id) or {}).get("has_private_access"))
+
+    async def has_models_access(self, user_id):
+        user = self.users.get(user_id) or {}
+        if not user.get("has_models_access"):
+            return False
+        expiry = user.get("premium_expiry")
+        return not (expiry and expiry < _dt.datetime.now())
+
+    async def set_models_access(self, user_id, enabled):
+        self.users.setdefault(user_id, self._new_user(user_id, "Tester", None))[
+            "has_models_access"] = bool(enabled)
+
+    async def set_private_access(self, user_id, enabled):
+        self.users.setdefault(user_id, self._new_user(user_id, "Tester", None))[
+            "has_private_access"] = bool(enabled)
+
+    # engines ----------------------------------------------------------------
+    async def set_user_engine(self, user_id, engine):
+        from engines import normalize_engine
+        value = normalize_engine(engine)
+        self.users.setdefault(user_id, self._new_user(user_id, "Tester", None))[
+            "engine_preference"] = value
+        return value
+
+    async def get_user_engine(self, user_id):
+        return (self.users.get(user_id) or {}).get("engine_preference") or None
+
+    async def get_engine_preference(self, user_id):
+        return await self.get_user_engine(user_id)
+
+    async def set_engine_mode(self, mode):
+        from engines import normalize_mode
+        self.engine_mode = normalize_mode(mode)
+        return self.engine_mode
+
+    async def get_engine_mode(self):
+        from config import DEFAULT_ENGINE_MODE
+        return self.engine_mode or DEFAULT_ENGINE_MODE
+
+    async def record_engine_use(self, engine, count=1):
+        from engines import normalize_engine
+        key = normalize_engine(engine)
+        self.engine_stats[key] = self.engine_stats.get(key, 0) + int(count)
+
+    async def get_engine_stats(self):
+        from config import ENGINES
+        return {engine: int(self.engine_stats.get(engine, 0)) for engine in ENGINES}
+
+    # per-channel counters (/mychannels) -------------------------------------
+    async def increment_channel_files(self, chat_id, count=1):
+        self.channel_files[int(chat_id)] = self.channel_files.get(int(chat_id), 0) + int(count)
+
+    async def get_channel_files(self, chat_id):
+        return int(self.channel_files.get(int(chat_id), 0))
+
+    async def set_channel_files(self, chat_id, count):
+        self.channel_files[int(chat_id)] = int(count)
+
+    async def get_bot_stats(self):
+        users = list(self.users.values())
+        return {
+            "total": len(users),
+            "active_today": 0,
+            "new_today": 0,
+            "premium": sum(1 for u in users if u.get("is_premium")),
+            "banned": sum(1 for u in users if u.get("is_banned")),
+            "admins": len(self.admins),
+            "total_downloads": sum(int(u.get("downloads", 0)) for u in users),
+            "models_access": sum(1 for u in users if u.get("has_models_access")),
+            "private_access": sum(1 for u in users if u.get("has_private_access")),
+        }
 
     async def ban_user(self, user_id):
         self.users.setdefault(user_id, self._new_user(user_id, "Tester", None))["is_banned"] = True
@@ -556,6 +671,11 @@ DB_NAMES = [
     "redeem_points", "set_qr", "get_qr", "delete_qr", "add_payment", "get_payments",
     "reserve_daily", "refund_daily", "utcnow", "sync_user_profile", "get_display_name",
     "set_user_chat", "get_user_chat", "find_user_chat_owner", "clear_user_chat", "mark_payment",
+    # Dual engines, granular VIP flags and the /mychannels counters.
+    "set_engine_mode", "get_engine_mode", "set_user_engine", "get_user_engine",
+    "get_engine_preference", "has_models_access", "has_private_access",
+    "set_models_access", "set_private_access", "record_engine_use", "get_engine_stats",
+    "get_premium_tier", "increment_channel_files", "get_channel_files",
 ]
 
 
@@ -586,6 +706,45 @@ def db(monkeypatch) -> FakeDB:
     return fake
 
 
+class FakeHost:
+    """Deterministic CPU / RAM / ping readings for the telemetry tests.
+
+    The probes return fixed values, so no test ever reads ``/proc`` or opens a
+    socket — the HUD still renders exactly what a real host would produce.
+    """
+
+    def __init__(self, cpu_percent: float = 19.2, memory_percent: float = 41.8,
+                 ping_ms: float = 11.0):
+        self.cpu_percent = cpu_percent
+        self.memory_percent = memory_percent
+        self.ping_ms = ping_ms
+        self.cpu_calls = 0
+        self.ping_calls = 0
+
+    def cpu(self):
+        """``(idle, total)`` deltas that encode exactly ``cpu_percent`` busy."""
+        self.cpu_calls += 1
+        total = 1000.0 * self.cpu_calls
+        return total * (1.0 - self.cpu_percent / 100.0), total
+
+    def memory(self):
+        return self.memory_percent
+
+    async def ping(self, host=None, port=None):
+        self.ping_calls += 1
+        return self.ping_ms
+
+
+@pytest.fixture
+def fake_host(monkeypatch) -> FakeHost:
+    """Install the deterministic host probes on the bot's telemetry monitor."""
+    host = FakeHost()
+    monkeypatch.setattr(main, "HOST_MONITOR", telemetry.HostMonitor(
+        cpu_probe=host.cpu, memory_probe=host.memory, ping_probe=host.ping,
+        sample_ttl=0.0, ping_ttl=0.0))
+    return host
+
+
 @pytest.fixture(autouse=True)
 def clean_state(monkeypatch):
     """Make sure no test leaks in-memory bot state into the next one."""
@@ -600,6 +759,16 @@ def clean_state(monkeypatch):
     monkeypatch.setattr(main, "fsub_pending", {})
     monkeypatch.setattr(main, "channel_locks", {})
     monkeypatch.setattr(main, "channel_last_request", {})
+    # A fresh engine controller per test: the mode, the autoscaler counters and
+    # the analytics must never leak from one test into the next.  The provider is
+    # re-wired so it still reads whatever the FakeDB fixture installs.
+    monkeypatch.setattr(main, "ENGINE_CONTROLLER",
+                        engines.EngineController(mode_provider=main._stored_engine_mode))
+    # Telemetry defaults to the deterministic fake host (no /proc, no sockets).
+    host = FakeHost()
+    monkeypatch.setattr(main, "HOST_MONITOR", telemetry.HostMonitor(
+        cpu_probe=host.cpu, memory_probe=host.memory, ping_probe=host.ping,
+        sample_ttl=0.0, ping_ttl=0.0))
     yield
 
 

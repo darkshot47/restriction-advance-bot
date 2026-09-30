@@ -24,7 +24,7 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Byte-compile the bot
-        run: python -m compileall -q main.py database.py ui.py
+        run: python -m compileall -q main.py database.py ui.py config.py engines.py telemetry.py
 
       - name: Run tests
         run: python -m pytest -v
