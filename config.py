@@ -1,5 +1,8 @@
 """Product and access-tier configuration for the bot."""
 
+import os
+
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "wantedkar99bot").lstrip("@")
 FREE_DAILY_LIMIT = 3
 FREE_PRIVATE_LINKS = False
 WATERMARK = "Extracted by @wantedkar99bot"
@@ -48,6 +51,8 @@ FEEDBACK_LINK_WARNING = (
 CHANNEL_CLEANUP_SECONDS = 5
 #: Minimum delay between two channel-dump extraction requests (anti-ban guard).
 CHANNEL_EXTRACT_COOLDOWN = 3.0
+#: Timeout (in seconds) for asking the owner whether to use the custom caption in a channel dump.
+CHANNEL_CAPTION_TIMEOUT = int(os.environ.get("CHANNEL_CAPTION_TIMEOUT", "60"))
 
 # --------------------------------------------------------------------------- #
 #  Force subscription (multi-channel) limits and wording
