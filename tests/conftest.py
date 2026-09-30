@@ -366,11 +366,20 @@ class FakeDB:
     async def set_caption(self, user_id, caption):
         self.users.setdefault(user_id, self._new_user(user_id, "Tester", None))["caption"] = caption
 
+    async def del_caption(self, user_id):
+        self.users.setdefault(user_id, self._new_user(user_id, "Tester", None))["caption"] = None
+
     async def get_caption(self, user_id):
         return (self.users.get(user_id) or {}).get("caption")
 
+    async def set_prefix(self, user_id, prefix):
+        self.users.setdefault(user_id, self._new_user(user_id, "Tester", None))["prefix"] = prefix
+
     async def get_prefix(self, user_id):
         return (self.users.get(user_id) or {}).get("prefix")
+
+    async def set_suffix(self, user_id, suffix):
+        self.users.setdefault(user_id, self._new_user(user_id, "Tester", None))["suffix"] = suffix
 
     async def get_suffix(self, user_id):
         return (self.users.get(user_id) or {}).get("suffix")
@@ -649,8 +658,12 @@ class FakeBot:
         self.invoked: list = []
 
     async def send_message(self, chat_id, text, **kwargs):
+        msg = FakeMessage(text=text, message_id=len(self.sent) + 1000)
+        msg.chat = FakeChat(chat_id)
+        if "reply_markup" in kwargs:
+            msg.markups.append(kwargs["reply_markup"])
         self.sent.append({"chat_id": chat_id, "text": text, **kwargs})
-        return None
+        return msg
 
     async def send_photo(self, chat_id, photo, **kwargs):
         self.sent.append({"chat_id": chat_id, "photo": photo, **kwargs})

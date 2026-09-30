@@ -92,8 +92,8 @@ async def test_admin_check_reports_telegram_errors_as_error(db, fake_bot):
 async def test_admin_failure_copy_matches_the_reason():
     assert sc("Admin check failed") in sc(ui.setchat_admin_failed_text())
     assert sc("Post Messages") in sc(ui.setchat_admin_failed_text("no_post_rights"))
-    assert sc("administrator बनाओ") in sc(ui.setchat_admin_failed_text("not_admin"))
-    assert sc("जवाब नहीं दिया") in sc(ui.setchat_admin_failed_text("error"))
+    assert sc("administrator") in sc(ui.setchat_admin_failed_text("not_admin"))
+    assert sc("Telegram did not respond") in sc(ui.setchat_admin_failed_text("error"))
 
 
 # --------------------------------------------------------------------------- #
@@ -144,7 +144,7 @@ async def test_setchat_already_inside_the_private_channel(db, fake_bot, press):
 
 @pytest.mark.asyncio
 async def test_setchat_expired_and_invalid_invite_links(db, fake_bot):
-    for behaviour, expected in (("expired", "expire"), ("invalid", "सही नहीं")):
+    for behaviour, expected in (("expired", "expired"), ("invalid", "invalid")):
         fake_bot.invites["Gone123"] = behaviour
         message = FakeMessage(text="/setchat t.me/+Gone123", user=FakeUser(1001))
         await main.setchat_handler(None, message)
@@ -160,7 +160,7 @@ async def test_setchat_approval_only_invite_keeps_the_wizard_alive(db, fake_bot,
     message = FakeMessage(text="/setchat t.me/+ZzZzzz", user=FakeUser(1001))
     await main.setchat_handler(None, message)
 
-    assert sc("join request भेज दी") in message.shown_text
+    assert sc("join request sent") in message.shown_text
     assert sc("approve") in message.shown_text
     assert message.button("setchat:check")           # retry button is offered
     assert await db.get_user_chat(1001) is None      # nothing stored yet
@@ -283,7 +283,7 @@ async def test_fsub_check_auto_approves_a_pending_request(db, fake_bot, press):
 
     assert fake_bot.approved == [(-100555, 1001)]
     assert db.join_requests[(-100555, 1001)]["status"] == "approved"
-    assert sc("approve हो गई") in " ".join(query.answer.texts)
+    assert sc("approved") in " ".join(query.answer.texts)
     assert message.deleted is True
 
 
@@ -297,7 +297,7 @@ async def test_fsub_check_reports_a_pending_request_without_auto_approve(db, fak
     query = await press(message, "fsub:check")
 
     assert fake_bot.approved == []
-    assert sc("request pending है") in " ".join(query.answer.texts)
+    assert sc("request is pending") in " ".join(query.answer.texts)
     assert query.answer.calls[-1]["show_alert"] is True
 
 
@@ -308,11 +308,11 @@ async def test_fsub_check_explains_the_next_step(db, fake_bot, press):
 
     message = FakeMessage(user=FakeUser(1001))
     query = await press(message, "fsub:check")
-    assert sc("पहले Join करो") in " ".join(query.answer.texts)
+    assert sc("Join the channels first") in " ".join(query.answer.texts)
 
     db.fsub_items = [fsub_item(invite_link="https://t.me/+secret", username=None)]
     query = await press(message, "fsub:check")
-    assert sc("join request भेजो") in " ".join(query.answer.texts)
+    assert sc("send a join request first") in " ".join(query.answer.texts)
 
 
 @pytest.mark.asyncio
@@ -326,7 +326,7 @@ async def test_fsub_check_verifies_every_entry_before_clearing(db, fake_bot, pre
     query = await press(message, "fsub:check")
 
     assert message.deleted is False
-    assert sc("पहले Join करो") in " ".join(query.answer.texts)
+    assert sc("Join the channels first") in " ".join(query.answer.texts)
 
     fake_bot.not_members.discard((-100556, 1001))
     fake_bot.members[(-100556, 1001)] = make_member(ChatMemberStatus.MEMBER)
@@ -338,7 +338,7 @@ async def test_fsub_check_verifies_every_entry_before_clearing(db, fake_bot, pre
 async def test_fsub_check_without_entries_is_a_noop(db, fake_bot, press):
     message = FakeMessage(user=FakeUser(1001))
     query = await press(message, "fsub:check")
-    assert sc("कोई channel ज़रूरी नहीं") in " ".join(query.answer.texts)
+    assert sc("No force-sub required") in " ".join(query.answer.texts)
 
 
 # --------------------------------------------------------------------------- #
@@ -359,7 +359,7 @@ async def test_inbound_join_request_is_stored_and_auto_approved(db, fake_bot):
     assert fake_bot.approved == [(-100555, 1001)]
     assert db.join_requests[(-100555, 1001)]["status"] == "approved"
     assert [m["chat_id"] for m in fake_bot.sent] == [1001]      # the user is told
-    assert sc("join request approve हो गई") in fake_bot.sent[0]["text"]
+    assert sc("join request was approved") in fake_bot.sent[0]["text"]
 
 
 @pytest.mark.asyncio
@@ -450,7 +450,7 @@ async def test_setfsub_wizard_asks_for_the_label_and_stores_it(db, fake_bot):
     message = FakeMessage(text="/setfsub @mychannel", user=FakeUser(main.OWNER_ID))
     await main.setfsub_handler(None, message)
 
-    assert sc("Join button पर क्या लिखा दिखे") in message.shown_text
+    assert sc("what should the Join button say") in message.shown_text
     assert main.fsub_pending[main.OWNER_ID]["step"] == "await_label"
     assert db.fsub_items == []                     # nothing stored before the label
 
@@ -463,7 +463,7 @@ async def test_setfsub_wizard_asks_for_the_label_and_stores_it(db, fake_bot):
     assert items[0]["chat_id"] == fake_bot.channel_id
     assert items[0]["username"] == "mychannel"
     assert main.OWNER_ID not in main.fsub_pending
-    assert any(sc("Force sub add हो गई") in reply["text"] for reply in label.replies)
+    assert any(sc("Force-sub added") in reply["text"] for reply in label.replies)
 
 
 @pytest.mark.asyncio
@@ -493,7 +493,7 @@ async def test_setfsub_rejects_unusable_labels(db, fake_bot, typed):
     await main.text_handler(None, label)
 
     assert await db.get_fsub_list() == []                     # nothing stored
-    assert sc("use नहीं हो सकता") in label.shown_text
+    assert sc("cannot be used") in label.shown_text
     assert main.fsub_pending[main.OWNER_ID]["step"] == "await_label"   # wizard stays open
 
 
@@ -538,7 +538,7 @@ async def test_delfsub_removes_one_entry_then_all_of_them(db, press):
 
     confirm = FakeMessage(text="/delfsub all", user=FakeUser(main.OWNER_ID))
     await main.delfsub_handler(None, confirm)
-    assert sc("साफ") in confirm.shown_text or sc("हटा दें") in confirm.shown_text
+    assert sc("Delete all") in confirm.shown_text
     assert confirm.button("fsub_del_all_confirm")
 
     await press(confirm, "fsub_del_all_confirm")
@@ -576,7 +576,7 @@ async def test_rename_button_asks_for_the_new_label(db, press):
     db.fsub_items = [fsub_item(title="One")]
     message = FakeMessage(user=FakeUser(main.OWNER_ID))
     query = await press(message, "fsub_rename:1")
-    assert sc("क्या लिखा दिखे") in " ".join(query.answer.texts) or message.shown_text
+    assert sc("what should the Join button say") in " ".join(query.answer.texts) or message.shown_text
     assert main.fsub_pending[main.OWNER_ID] == {"step": "await_rename", "number": 1}
 
     typed = FakeMessage(text="Join Now", user=FakeUser(main.OWNER_ID))

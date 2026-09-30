@@ -20,11 +20,12 @@ from pyrogram.errors import (
 )
 
 import ui
-from config import (FREE_DAILY_LIMIT, FREE_PRIVATE_LINKS, WATERMARK, REFER_POINTS,
+from config import (BOT_USERNAME, FREE_DAILY_LIMIT, FREE_PRIVATE_LINKS, WATERMARK, REFER_POINTS,
                     REDEEM_POINTS, REDEEM_PREMIUM_DAYS, REDEEM_PREMIUM_MONTHS, PAYMENT_CONTACT,
                     PREMIUM_PLANS, PREMIUM_BENEFITS, REDEEM_LIMITATION, RUPEE,
                     PREMIUM_SOURCE_MANUAL, PREMIUM_SOURCE_PUBLIC,
                     PURCHASE_PREMIUM_SOURCE, CHANNEL_CLEANUP_SECONDS, CHANNEL_EXTRACT_COOLDOWN,
+                    CHANNEL_CAPTION_TIMEOUT,
                     FSUB_MAX_BUTTON_CHARS, FSUB_ITEMS_PER_PAGE, FSUB_JOINER_SCAN_LIMIT,
                     FSUB_VERIFY_LABEL, CHANNEL_TITLE_FALLBACK)  # noqa: F401
 from database import (
@@ -57,7 +58,6 @@ API_ID = int(os.environ.get("API_ID"))
 API_HASH = os.environ.get("API_HASH")
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OWNER_ID = int(os.environ.get("OWNER_ID", 0))
-BOT_USERNAME = os.environ.get("BOT_USERNAME", "wantedkar99bot").lstrip("@")
 
 bot = Client("bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -67,6 +67,8 @@ pending_action = {}
 admin_pending = {}
 active_downloads = {}
 payment_pending = {}
+#: token -> {"future", "owner_id", "question_msg", "token"} for channel custom caption questions.
+caption_pending = {}
 #: owner_id -> {"user_id": int, "days": int} while /addpremium waits for a tier.
 premium_tier_pending = {}
 #: user_id -> {"chat_id", "title", "username", "step"} for the /setchat wizard.
@@ -363,7 +365,7 @@ def attribution_text():
     return WATERMARK.format(bot_username=BOT_USERNAME)
 
 
-async def apply_copy_caption_and_attribution(message, fetch_client, copied, source, premium, user_id):
+async def apply_copy_caption_and_attribution(message, fetch_client, copied, source, premium, user_id, *, use_custom_caption: bool = True):
     """Apply caption and attribution to a copied message.
 
     Free extractions add attribution at the end. Premium and owner extractions
@@ -379,7 +381,7 @@ async def apply_copy_caption_and_attribution(message, fetch_client, copied, sour
 
     if caption_media:
         source_caption = getattr(source, "caption", None) or ""
-        base_caption = await apply_custom_caption(user_id, source_caption)
+        base_caption = await apply_custom_caption(user_id, source_caption) if use_custom_caption else source_caption
         if not premium:
             final_caption = f"{base_caption}\n{credit}" if base_caption else credit
         else:
@@ -439,7 +441,7 @@ async def apply_copy_caption_and_attribution(message, fetch_client, copied, sour
 
     source_text = getattr(source, "text", None)
     if source_text:
-        base_text = await apply_custom_caption(user_id, source_text)
+        base_text = source_text
         if not premium:
             final_text = f"{base_text}\n{credit}" if base_text else credit
         else:
@@ -543,7 +545,7 @@ async def check_access(message, *, enforce_fsub: bool = True):
     return True
 
 
-async def try_native_copy(message, fetch_client, chat_target, msg_id):
+async def try_native_copy(message, fetch_client, chat_target, msg_id, *, use_custom_caption: bool = True):
     user_id = message.from_user.id
 
     print(
@@ -582,7 +584,10 @@ async def try_native_copy(message, fetch_client, chat_target, msg_id):
 
     premium = user_id == OWNER_ID or await is_premium(user_id)
     try:
-        await apply_copy_caption_and_attribution(message, fetch_client, copied, msg, premium, user_id)
+        await apply_copy_caption_and_attribution(
+            message, fetch_client, copied, msg, premium, user_id,
+            use_custom_caption=use_custom_caption
+        )
     except Exception as e:
         # The copy has already been delivered.  Never download it a second
         # time just because Telegram rejected an edit attempt.
@@ -602,7 +607,7 @@ async def try_native_copy(message, fetch_client, chat_target, msg_id):
 
 async def fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
                          enforce_fsub: bool = True, cleanup_errors: bool = False,
-                         cleanup_delay=None):
+                         cleanup_delay=None, use_custom_caption: bool = True):
     """Enforce access and atomically reserve a free slot on every extraction path.
 
     ``cleanup_errors`` deletes the error status after
@@ -630,6 +635,7 @@ async def fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
                 result = await _fetch_and_send(
                     message, status, fetch_client, chat_target, msg_id,
                     cleanup_errors=cleanup_errors, cleanup_delay=cleanup_delay,
+                    use_custom_caption=use_custom_caption,
                 )
                 break
             except FloodWaitPause as pause:
@@ -657,18 +663,22 @@ async def fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
 
 
 async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
-                          cleanup_errors: bool = False, cleanup_delay=None):
+                          cleanup_errors: bool = False, cleanup_delay=None,
+                          use_custom_caption: bool = True):
     user_id = message.from_user.id
     file_path = None
     thumb_path = None
     delivered = False
+    dm_status = None
+    job_id = None
 
     try:
         copied = await try_native_copy(
             message,
             fetch_client,
             chat_target,
-            msg_id
+            msg_id,
+            use_custom_caption=use_custom_caption,
         )
 
         if copied:
@@ -721,7 +731,21 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
             )
             return False
 
-        job_id = str(status.id)
+        is_channel = isinstance(message, ChannelRequester) or getattr(message.chat, "type", None) in ("channel", "supergroup", "group") or message.chat.id != user_id
+        is_private_content = fetch_client is not bot
+
+        if is_channel and not is_private_content:
+            try:
+                dm_status = await bot.send_message(user_id, "⬇️ Downloading...")
+                if dm_status and getattr(dm_status, "id", None):
+                    job_id = str(dm_status.id)
+            except Exception:
+                dm_status = None
+                job_id = None
+
+        if not job_id:
+            job_id = str(status.id)
+
         pause_event = asyncio.Event()
         pause_event.set()
         job = {
@@ -732,7 +756,12 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
             "last_update": 0,
         }
         active_downloads[job_id] = job
-        await say_edit(status, "⬇️ Downloading...", reply_markup=ui.download_controls(job_id))
+
+        if dm_status:
+            await say_edit(dm_status, "⬇️ Downloading...", reply_markup=ui.download_controls(job_id))
+            await say_edit(status, ui.channel_download_public_text(), reply_markup=ui.open_bot_keyboard())
+        else:
+            await say_edit(status, "⬇️ Downloading...", reply_markup=ui.download_controls(job_id))
 
         async def download_progress(current, total):
             if job.get("cancelled"):
@@ -747,22 +776,55 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
             job["last_update"] = now
             percent = int(current * 100 / total) if total else 0
             paused_label = " (paused)" if job["paused"] else ""
-            try:
-                await say_edit(status,
-                    f"⬇️ Downloading... {percent}%{paused_label}",
-                    reply_markup=ui.download_controls(job_id, job["paused"])
-                )
-            except Exception:
-                pass
+            if dm_status:
+                try:
+                    await say_edit(
+                        dm_status,
+                        f"⬇️ Downloading... {percent}%{paused_label}",
+                        reply_markup=ui.download_controls(job_id, job["paused"])
+                    )
+                except Exception:
+                    pass
+                try:
+                    await say_edit(
+                        status,
+                        ui.channel_download_public_text(percent, job["paused"]),
+                        reply_markup=ui.open_bot_keyboard()
+                    )
+                except Exception:
+                    pass
+            else:
+                try:
+                    await say_edit(
+                        status,
+                        f"⬇️ Downloading... {percent}%{paused_label}",
+                        reply_markup=ui.download_controls(job_id, job["paused"])
+                    )
+                except Exception:
+                    pass
 
         file_path = await fetch_client.download_media(msg, progress=download_progress)
         if not file_path:
+            if dm_status:
+                try:
+                    await say_edit(dm_status, "❌ Download failed.", reply_markup=None)
+                except Exception:
+                    pass
             await say_edit(status, "❌ Download failed.", reply_markup=None)
             return False
 
+        if dm_status:
+            try:
+                await say_edit(dm_status, "⬆️ Uploading...", reply_markup=None)
+            except Exception:
+                pass
         await say_edit(status, "⬆️ Uploading...", reply_markup=None)
+
         premium = user_id == OWNER_ID or await is_premium(user_id)
-        caption = await apply_custom_caption(user_id, msg.caption) if premium else (msg.caption or "")
+        if use_custom_caption:
+            caption = await apply_custom_caption(user_id, msg.caption) if premium else (msg.caption or "")
+        else:
+            caption = msg.caption or ""
         if not premium:
             credit = attribution_text()
             caption = f"{caption}\n{credit}" if caption else credit
@@ -807,12 +869,22 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
         if overflow_caption or msg.video_note or msg.sticker:
             for chunk in ui.split_text(overflow_caption or caption or "", 4096):
                 await message.reply(chunk, parse_mode=ParseMode.DISABLED)
+        if dm_status:
+            try:
+                await dm_status.delete()
+            except Exception:
+                pass
         await status.delete()
         media_type = "photo" if msg.photo else "video" if msg.video else "document" if msg.document else "media"
         await add_download(user_id, f"msg_{msg_id}", media_type)
         return True
 
     except asyncio.CancelledError:
+        if dm_status:
+            try:
+                await say_edit(dm_status, "⛔ Download stopped.", reply_markup=None)
+            except Exception:
+                pass
         try:
             await say_edit(status, "⛔ Download stopped.", reply_markup=None)
         except Exception:
@@ -823,6 +895,11 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
         print(f"[FLOODWAIT] {e}", flush=True)
         raise FloodWaitPause(floodwait_seconds(e), e)
     except Exception as e:
+        if dm_status:
+            try:
+                await say_edit(dm_status, f"❌ Error: {e}", reply_markup=None)
+            except Exception:
+                pass
         try:
             await say_edit(status, f"❌ Error: {e}", reply_markup=None)
         except Exception:
@@ -833,7 +910,7 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
         # Otherwise deleting the progress message could bypass the free quota.
         return delivered
     finally:
-        if "job_id" in locals():
+        if job_id:
             active_downloads.pop(job_id, None)
         for path in [file_path, thumb_path]:
             if path and os.path.exists(path):
@@ -3177,6 +3254,36 @@ async def extract_channel_links(message, user_row, *, sleeper=asyncio.sleep):
             await say(message, ui.daily_limit_text(used=current), reply_markup=ui.daily_limit_keyboard())
             return 0, 0
 
+    use_custom_caption = False
+    custom_caption = await get_caption(user_id)
+    if custom_caption:
+        import secrets
+        token = secrets.token_hex(6)
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        question_msg = await say(
+            message,
+            ui.channel_caption_question_text(),
+            reply_markup=ui.channel_caption_keyboard(token)
+        )
+        caption_pending[token] = {
+            "future": future,
+            "owner_id": user_id,
+            "question_msg": question_msg,
+            "token": token,
+        }
+        try:
+            use_custom_caption = await asyncio.wait_for(future, timeout=CHANNEL_CAPTION_TIMEOUT)
+        except asyncio.TimeoutError:
+            caption_pending.pop(token, None)
+            try:
+                await question_msg.delete()
+            except Exception:
+                pass
+            return 0, 0
+        finally:
+            caption_pending.pop(token, None)
+
     requester = ChannelRequester(message, user_row)
     success = failed = 0
     async with channel_rate_limit(chat_id, sleeper=sleeper):
@@ -3202,6 +3309,7 @@ async def extract_channel_links(message, user_row, *, sleeper=asyncio.sleep):
                 ok = await fetch_and_send(
                     requester, status, fetch_client, chat_target, msg_id,
                     enforce_fsub=False, cleanup_errors=True,
+                    use_custom_caption=use_custom_caption,
                 )
             except FloodWait as error:
                 # Defensive: pausing is always better than hammering Telegram.
@@ -3314,6 +3422,36 @@ async def handle_download_controls(query):
             await query.answer(ui_text("⛔ Stopping download..."))
     except Exception:
         await query.answer(ui_text("Could not control this download."), show_alert=True)
+
+
+async def handle_caption_choice(client, query):
+    """Handle ✅ Yes / ❌ No choice for custom caption in dump channels."""
+    action, token = query.data.split(":", 1)
+    entry = caption_pending.get(token)
+    if not entry or entry["future"].done():
+        await query.answer(ui_text("⚠️ This question has expired."), show_alert=True)
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        return
+
+    if query.from_user.id != entry["owner_id"]:
+        await query.answer(ui_text("⚠️ Only the channel owner can answer this."), show_alert=True)
+        return
+
+    choice = (action == "cap_yes")
+    await query.answer()
+    try:
+        await entry["question_msg"].delete()
+    except Exception:
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
+    if not entry["future"].done():
+        entry["future"].set_result(choice)
 
 
 # --------------------------------------------------------------------------- #
@@ -3469,6 +3607,7 @@ async def callback_handler(client, query):
     # Force-sub buttons keep their own wizard state (a rename prompt must
     # survive the very button press that opened it).
     if not data.startswith("dl:") and not data.startswith("fsub") \
+            and not data.startswith("cap_") \
             and data not in {"cancel_login", "cancel_action"}:
         pending_action.pop(uid, None)
         admin_pending.pop(uid, None)
@@ -3483,6 +3622,9 @@ async def callback_handler(client, query):
         fsub_pending.pop(uid, None)
     if data.startswith("dl:"):
         await handle_download_controls(query)
+        return
+    if data.startswith(("cap_yes:", "cap_no:")):
+        await handle_caption_choice(client, query)
         return
     if data.startswith(("payok:", "payfake:", "payban:")):
         # Owner-only payment verdicts.

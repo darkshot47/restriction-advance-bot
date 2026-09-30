@@ -510,10 +510,7 @@ async def test_text_message_copy_edits_text_for_free_and_premium(db):
     )
     msg_prem = FakeMessage(user=FakeUser(2002))
     assert await main.try_native_copy(msg_prem, fetch_client_prem, "channel", 61)
-    copied_prem.edit_text.assert_awaited_once_with(
-        "VIP Text Replacement",
-        parse_mode=main.ParseMode.DISABLED,
-    )
+    copied_prem.edit_text.assert_not_called()
 
 
 @pytest.mark.asyncio
