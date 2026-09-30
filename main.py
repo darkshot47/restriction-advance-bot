@@ -20,14 +20,23 @@ from pyrogram.errors import (
 )
 
 import ui
+import engines
+import telemetry
 from config import (BOT_USERNAME, FREE_DAILY_LIMIT, FREE_PRIVATE_LINKS, WATERMARK, REFER_POINTS,
                     REDEEM_POINTS, REDEEM_PREMIUM_DAYS, REDEEM_PREMIUM_MONTHS, PAYMENT_CONTACT,
                     PREMIUM_PLANS, PREMIUM_BENEFITS, REDEEM_LIMITATION, RUPEE,
-                    PREMIUM_SOURCE_MANUAL, PREMIUM_SOURCE_PUBLIC,
+                    PREMIUM_SOURCE_MANUAL, PREMIUM_SOURCE_PUBLIC, PREMIUM_SOURCE_MODELS,
                     PURCHASE_PREMIUM_SOURCE, CHANNEL_CLEANUP_SECONDS, CHANNEL_EXTRACT_COOLDOWN,
                     CHANNEL_CAPTION_TIMEOUT,
                     FSUB_MAX_BUTTON_CHARS, FSUB_ITEMS_PER_PAGE, FSUB_JOINER_SCAN_LIMIT,
-                    FSUB_VERIFY_LABEL, CHANNEL_TITLE_FALLBACK)  # noqa: F401
+                    FSUB_VERIFY_LABEL, CHANNEL_TITLE_FALLBACK,
+                    OWNER_CONTACT_URL, plan_addon_price, plan_base_price, plan_total_price,
+                    ENGINE_PYTHON, ENGINE_CPP, ENGINE_PEAK_THRESHOLD, ENGINE_TURBO_WORKERS,
+                    ENGINE_ZERO_COPY_MAX_BYTES,
+                    ENGINE_MODE_AUTO, ENGINE_MODE_LOCK_CPP, ENGINE_MODE_LOCK_PYTHON,
+                    DEFAULT_ENGINE_MODE, GRANT_TIERS, GRANT_TIER_KEYS, GRANT_DURATIONS,
+                    GRANT_CUSTOM_DAYS_KEY, GRANT_MAX_DAYS, LEGACY_TIER_ALIASES,
+                    TELEMETRY_EDIT_INTERVAL)  # noqa: F401
 from database import (
     add_user, get_user, is_premium, is_banned, check_daily_limit,
     increment_daily, save_session, get_session, delete_session,
@@ -51,7 +60,11 @@ from database import (
     remove_premium, ban_user, unban_user, get_points, award_referral,
     redeem_points, set_qr, get_qr, delete_qr, add_payment, get_payments,
     reserve_daily, refund_daily, utcnow, sync_user_profile, get_display_name,
-    set_user_chat, get_user_chat, find_user_chat_owner, clear_user_chat, mark_payment
+    set_user_chat, get_user_chat, find_user_chat_owner, clear_user_chat, mark_payment,
+    set_engine_mode, get_engine_mode, set_user_engine, get_user_engine,
+    get_engine_preference, has_models_access, has_private_access,
+    set_models_access, set_private_access, record_engine_use, get_engine_stats,
+    get_premium_tier, increment_channel_files, get_channel_files
 )  # noqa: F401
 
 API_ID = int(os.environ.get("API_ID"))
@@ -211,14 +224,108 @@ def parse_link(link):
 
 
 async def private_access(user_id):
+    """True when this user may extract private/restricted links.
+
+    ``has_private_access`` — the granular flag written by /addpremium — is
+    authoritative, and it is only honoured while premium is actually live.
+    Documents granted before the flag existed fall back to ``premium_source``,
+    which is where "full/manual means private" used to be recorded.
+    """
     if user_id == OWNER_ID:
         return True
+    if not await is_premium(user_id):
+        return False
     row = await get_user(user_id) or {}
-    # Only a full (owner-granted) tier unlocks private/restricted links; a
-    # public-only grant or a points redemption stays on public channels.
-    return await is_premium(user_id) and row.get("premium_source") in {
-        PREMIUM_SOURCE_MANUAL, PURCHASE_PREMIUM_SOURCE,
-    }
+    if row.get("has_private_access"):
+        return True
+    # Legacy grants: only a full (manual) tier unlocked private links; a
+    # public-only grant or a points redemption never did.
+    return row.get("premium_source") in {PREMIUM_SOURCE_MANUAL, PURCHASE_PREMIUM_SOURCE}
+
+
+# --------------------------------------------------------------------------- #
+#  Dual execution engines — Python Standard ⚙️ / C++ Turbo 🚀
+#
+#  engines.py owns the routing matrix (AUTO autoscaler + the two global locks),
+#  telemetry.py samples the host, ui.py renders every string.  This section is
+#  the glue: it reads the persisted mode and the user's ``models`` permission,
+#  asks the controller for a decision and keeps the concurrency counter honest
+#  while an extraction is in flight.
+# --------------------------------------------------------------------------- #
+
+#: The process-wide engine controller (autoscaler + global lock modes).
+ENGINE_CONTROLLER = engines.CONTROLLER
+#: The host sampler behind the live download HUD.
+HOST_MONITOR = telemetry.MONITOR
+
+
+async def _stored_engine_mode():
+    """Read the persisted mode through the module global.
+
+    Going through the global (instead of binding ``database.get_engine_mode``
+    directly) is what lets the test fakes replace it.
+    """
+    return await get_engine_mode()
+
+
+ENGINE_CONTROLLER.mode_provider = _stored_engine_mode
+ENGINE_CONTROLLER.monitor.peak_threshold = ENGINE_PEAK_THRESHOLD
+
+
+async def models_access(user_id) -> bool:
+    """True when the user holds the ``models`` (C++ Turbo) permission."""
+    if user_id == OWNER_ID:
+        return True
+    return bool(await has_models_access(user_id))
+
+
+async def engine_preference_of(user_id, *, models: bool | None = None) -> str | None:
+    """The engine this user picked in /models (``None`` when they never did)."""
+    if models is None:
+        models = await models_access(user_id)
+    if not models:
+        # Without the permission a stored preference must never take effect.
+        return None
+    return await get_user_engine(user_id)
+
+
+async def resolve_engine_for(user_id, *, record: bool = True) -> engines.EngineDecision:
+    """Which engine runs the next extraction for *user_id*.
+
+    Reads the global controller mode, the user's ``models`` permission and
+    their stored preference, then lets the controller apply the autoscaler.
+    """
+    await ENGINE_CONTROLLER.load_mode()
+    models = await models_access(user_id)
+    preference = await engine_preference_of(user_id, models=models)
+    return ENGINE_CONTROLLER.decide(has_models=models, preference=preference,
+                                    record=record)
+
+
+async def engine_status_snapshot() -> dict:
+    """Live controller state + the persisted per-engine counters, for /stats."""
+    snapshot = ENGINE_CONTROLLER.snapshot()
+    try:
+        snapshot["stored"] = await get_engine_stats()
+    except Exception as exc:  # analytics must never break a command
+        print(f"[ENGINE STATS FAILED] {exc}", flush=True)
+        snapshot["stored"] = {}
+    return snapshot
+
+
+async def record_engine_routing(decision) -> None:
+    """Persist one routed extraction (best effort — never blocks a download)."""
+    try:
+        await record_engine_use(decision.engine)
+    except Exception as exc:
+        print(f"[ENGINE STATS FAILED] {exc}", flush=True)
+
+
+async def set_engine_preference(user_id, engine):
+    """Store the engine picked in /models and return the normalised id."""
+    value = engines.normalize_engine(engine)
+    await set_user_engine(user_id, value)
+    return value
 
 
 def joined_channel(member):
@@ -607,13 +714,20 @@ async def try_native_copy(message, fetch_client, chat_target, msg_id, *, use_cus
 
 async def fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
                          enforce_fsub: bool = True, cleanup_errors: bool = False,
-                         cleanup_delay=None, use_custom_caption: bool = True):
+                         cleanup_delay=None, use_custom_caption: bool = True,
+                         engine=None):
     """Enforce access and atomically reserve a free slot on every extraction path.
 
     ``cleanup_errors`` deletes the error status after
     :data:`config.CHANNEL_CLEANUP_SECONDS` seconds, which keeps dump channels
     tidy.  FloodWait answers are absorbed: the bot sleeps for the requested
     amount of seconds and retries instead of crashing.
+
+    ``engine`` is a pre-resolved :class:`engines.EngineDecision` (a dump-channel
+    batch resolves once and reuses it).  When it is omitted the engine is
+    resolved here from the global controller mode, the user's ``models``
+    permission and their stored preference.  Either way the extraction holds a
+    concurrency slot, which is the signal the AUTO autoscaler scales on.
     """
     uid = message.from_user.id
     if not await check_access(message, enforce_fsub=enforce_fsub):
@@ -627,33 +741,42 @@ async def fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
     if reserved and not await reserve_daily(uid, FREE_DAILY_LIMIT, reservation_date):
         await edit_daily_limit(status)
         return False
+    decision = engine if isinstance(engine, engines.EngineDecision) \
+        else await resolve_engine_for(uid)
     result = False
     try:
-        retries = 0
-        while True:
-            try:
-                result = await _fetch_and_send(
-                    message, status, fetch_client, chat_target, msg_id,
-                    cleanup_errors=cleanup_errors, cleanup_delay=cleanup_delay,
-                    use_custom_caption=use_custom_caption,
-                )
-                break
-            except FloodWaitPause as pause:
-                retries += 1
-                print(f"[FLOODWAIT] pausing {pause.seconds}s (attempt {retries})", flush=True)
-                if retries > FLOODWAIT_MAX_RETRIES:
-                    await say_edit(status, ui.channel_floodwait_text(pause.seconds))
-                    result = False
+        # One concurrency slot per real extraction: this is what the autoscaler
+        # counts, so the counter stays truthful even when requests overlap.
+        with ENGINE_CONTROLLER.slot(decision):
+            retries = 0
+            while True:
+                try:
+                    result = await _fetch_and_send(
+                        message, status, fetch_client, chat_target, msg_id,
+                        cleanup_errors=cleanup_errors, cleanup_delay=cleanup_delay,
+                        use_custom_caption=use_custom_caption, engine=decision,
+                    )
                     break
-                await floodwait_sleep(pause.seconds)
-            except FloodWait as error:
-                seconds = floodwait_seconds(error)
-                retries += 1
-                print(f"[FLOODWAIT] pausing {seconds}s (attempt {retries})", flush=True)
-                if retries > FLOODWAIT_MAX_RETRIES:
-                    result = False
-                    break
-                await floodwait_sleep(seconds)
+                except FloodWaitPause as pause:
+                    retries += 1
+                    print(f"[FLOODWAIT] pausing {pause.seconds}s (attempt {retries})", flush=True)
+                    if retries > FLOODWAIT_MAX_RETRIES:
+                        await say_edit(status, ui.channel_floodwait_text(pause.seconds))
+                        result = False
+                        break
+                    await floodwait_sleep(pause.seconds)
+                except FloodWait as error:
+                    seconds = floodwait_seconds(error)
+                    retries += 1
+                    print(f"[FLOODWAIT] pausing {seconds}s (attempt {retries})", flush=True)
+                    if retries > FLOODWAIT_MAX_RETRIES:
+                        result = False
+                        break
+                    await floodwait_sleep(seconds)
+        print(f"[ENGINE] user={uid} engine={decision.engine} mode={decision.mode} "
+              f"reason={decision.reason} concurrent={ENGINE_CONTROLLER.concurrent}",
+              flush=True)
+        await record_engine_routing(decision)
         if result is True:
             await increment_daily(uid, count_daily=not reserved)
         return result
@@ -664,13 +787,16 @@ async def fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
 
 async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
                           cleanup_errors: bool = False, cleanup_delay=None,
-                          use_custom_caption: bool = True):
+                          use_custom_caption: bool = True, engine=None):
     user_id = message.from_user.id
     file_path = None
     thumb_path = None
     delivered = False
     dm_status = None
     job_id = None
+    decision = engine if isinstance(engine, engines.EngineDecision) \
+        else await resolve_engine_for(user_id)
+    engine_key = decision.engine
 
     try:
         copied = await try_native_copy(
@@ -754,14 +880,40 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
             "paused": False,
             "task": asyncio.current_task(),
             "last_update": 0,
+            # Which engine is serving this job (shown in the HUD).
+            "engine": engine_key,
+            "mode": decision.mode,
         }
         active_downloads[job_id] = job
 
+        #: Live transfer maths: percent, smoothed MB/s and ETA for the HUD.
+        meter = telemetry.TransferMeter(file_size)
+
+        async def telemetry_sample():
+            """One host reading (CPU/RAM/ping), or ``None`` when unavailable.
+
+            Telemetry must never break a download: a failed probe simply leaves
+            that HUD value as ``--``.
+            """
+            if not ui.telemetry_enabled():
+                return None
+            try:
+                return await HOST_MONITOR.sample()
+            except Exception as exc:  # pragma: no cover - defensive
+                print(f"[TELEMETRY FAILED] {exc}", flush=True)
+                return None
+
+        async def hud(stage="Downloading", percent=None, state=None, paused=False):
+            return ui.telemetry_hud(engine_key, percent, sample=await telemetry_sample(),
+                                    state=state, stage=stage, paused=paused)
+
+        starting = await hud(percent=meter.state.percent, state=meter.state)
         if dm_status:
-            await say_edit(dm_status, "⬇️ Downloading...", reply_markup=ui.download_controls(job_id))
-            await say_edit(status, ui.channel_download_public_text(), reply_markup=ui.open_bot_keyboard())
+            await say_edit(dm_status, starting, reply_markup=ui.download_controls(job_id))
+            await say_edit(status, ui.channel_download_notice(hud=starting),
+                           reply_markup=ui.open_bot_keyboard())
         else:
-            await say_edit(status, "⬇️ Downloading...", reply_markup=ui.download_controls(job_id))
+            await say_edit(status, starting, reply_markup=ui.download_controls(job_id))
 
         async def download_progress(current, total):
             if job.get("cancelled"):
@@ -771,39 +923,40 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
                 raise asyncio.CancelledError()
 
             now = asyncio.get_running_loop().time()
-            if now - job["last_update"] < 2 and current < total:
+            state = meter.update(current, total)
+            if now - job["last_update"] < TELEMETRY_EDIT_INTERVAL and state.percent < 100:
                 return
             job["last_update"] = now
-            percent = int(current * 100 / total) if total else 0
-            paused_label = " (paused)" if job["paused"] else ""
+            text = await hud(percent=state.percent, state=state, paused=job["paused"])
+            controls = ui.download_controls(job_id, job["paused"])
             if dm_status:
                 try:
-                    await say_edit(
-                        dm_status,
-                        f"⬇️ Downloading... {percent}%{paused_label}",
-                        reply_markup=ui.download_controls(job_id, job["paused"])
-                    )
+                    await say_edit(dm_status, text, reply_markup=controls)
                 except Exception:
                     pass
                 try:
                     await say_edit(
                         status,
-                        ui.channel_download_public_text(percent, job["paused"]),
+                        ui.channel_download_notice(state.percent, job["paused"], hud=text),
                         reply_markup=ui.open_bot_keyboard()
                     )
                 except Exception:
                     pass
             else:
                 try:
-                    await say_edit(
-                        status,
-                        f"⬇️ Downloading... {percent}%{paused_label}",
-                        reply_markup=ui.download_controls(job_id, job["paused"])
-                    )
+                    await say_edit(status, text, reply_markup=controls)
                 except Exception:
                     pass
 
-        file_path = await fetch_client.download_media(msg, progress=download_progress)
+        #: 🚀 C++ Turbo pipes a small-enough file straight through memory: the
+        #: downloader returns a ``BytesIO`` that is handed to the uploader as it
+        #: is, so the payload is never written to disk and never re-read.  Above
+        #: the budget — and on every ⚙️ Python Standard job — the transfer keeps
+        #: the streamed-to-disk path, which bounds RAM for multi-GB files.
+        zero_copy = bool(decision.engine_object.zero_copy) \
+            and bool(file_size) and int(file_size) <= ENGINE_ZERO_COPY_MAX_BYTES
+        file_path = await fetch_client.download_media(
+            msg, progress=download_progress, in_memory=zero_copy)
         if not file_path:
             if dm_status:
                 try:
@@ -813,12 +966,14 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
             await say_edit(status, "❌ Download failed.", reply_markup=None)
             return False
 
+        meter.finish()
+        uploading = await hud(stage="Uploading", percent=100, state=meter.state)
         if dm_status:
             try:
-                await say_edit(dm_status, "⬆️ Uploading...", reply_markup=None)
+                await say_edit(dm_status, uploading, reply_markup=None)
             except Exception:
                 pass
-        await say_edit(status, "⬆️ Uploading...", reply_markup=None)
+        await say_edit(status, uploading, reply_markup=None)
 
         premium = user_id == OWNER_ID or await is_premium(user_id)
         if use_custom_caption:
@@ -913,10 +1068,22 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
         if job_id:
             active_downloads.pop(job_id, None)
         for path in [file_path, thumb_path]:
-            if path and os.path.exists(path):
+            if not path:
+                continue
+            if not isinstance(path, str):
+                # An in-memory (zero-copy) transfer: release the buffer instead
+                # of looking for a file that was never written.
+                close = getattr(path, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:  # pragma: no cover - freeing is best effort
+                        pass
+                continue
+            if os.path.exists(path):
                 try:
                     os.remove(path)
-                except:
+                except Exception:  # pragma: no cover - cleanup is best effort
                     pass
 
 
@@ -1037,7 +1204,11 @@ async def show_start(source):
     await refresh_profile(user)
     premium = await is_premium(user.id)
     show_admin = user.id == OWNER_ID or await is_admin(user.id)
-    await render(source, ui.start_text(user.first_name, premium), ui.start_keyboard(show_admin))
+    # Live corner badge: which engine is serving this user right now.
+    decision = await resolve_engine_for(user.id, record=False)
+    await render(source, ui.start_text(user.first_name, premium,
+                                       ui.engine_status_line(decision)),
+                 ui.start_keyboard(show_admin))
 
 
 async def show_help(source):
@@ -1123,6 +1294,91 @@ async def show_premium(source):
 async def cb_premium_plans(client, query):
     await query.answer()
     await render(query, ui.plans_text(), ui.plans_keyboard())
+
+
+# --------------------------------------------------------------------------- #
+#  /models and /engine — the user's engine switcher
+# --------------------------------------------------------------------------- #
+
+async def show_models(source):
+    """The engine switcher for models holders, the pitch for everybody else.
+
+    Three cases, all driven by the granular ``models`` permission and the
+    global controller mode:
+
+    * no permission → C++ Turbo feature overview + add-on pricing + upgrade CTA;
+    * permission + global C++ lock → the engine is already forced, say so;
+    * permission → the interactive ⚙️ / 🚀 switcher.
+    """
+    uid = source.from_user.id
+    await ensure_user(source.from_user)
+    await ENGINE_CONTROLLER.load_mode()
+    mode = ENGINE_CONTROLLER.mode
+    if not await models_access(uid):
+        await render(source, ui.models_upsell_text(), ui.models_upsell_keyboard())
+        return
+    preference = await get_user_engine(uid)
+    decision = ENGINE_CONTROLLER.decide(has_models=True, preference=preference,
+                                       record=False)
+    if mode == ENGINE_MODE_LOCK_CPP:
+        await render(source, ui.models_locked_text(mode),
+                     ui.models_architecture_keyboard(decision.engine, has_models=True))
+        return
+    await render(
+        source,
+        ui.models_switcher_text(preference, mode,
+                                concurrency=ENGINE_CONTROLLER.concurrent,
+                                peak=ENGINE_CONTROLLER.peak,
+                                threshold=ENGINE_CONTROLLER.monitor.peak_threshold),
+        ui.models_switcher_keyboard(preference),
+    )
+
+
+async def show_models_info(source):
+    """The red **🧠 Models Architecture** page from the /start footer."""
+    uid = source.from_user.id
+    decision = await resolve_engine_for(uid, record=False)
+    has_models = await models_access(uid)
+    await render(source, ui.models_architecture_text(decision.engine),
+                 ui.models_architecture_keyboard(decision.engine, has_models=has_models))
+
+
+@callback_action("cmd_models")
+async def cb_models(client, query):
+    await query.answer()
+    await show_models(query)
+
+
+@callback_action("models_info")
+async def cb_models_info(client, query):
+    await query.answer()
+    await show_models_info(query)
+
+
+async def apply_engine_choice(query, engine):
+    """Store the engine picked in the switcher and re-render it."""
+    uid = query.from_user.id
+    if not await models_access(uid):
+        # The permission is re-checked at press time: a revoked grant must stop
+        # working immediately, even on a keyboard that is still on screen.
+        await query.answer(ui_text("🔒 The C++ Turbo engine is a paid add-on."),
+                           show_alert=True)
+        await show_models(query)
+        return False
+    value = await set_engine_preference(uid, engine)
+    await query.answer(ui_text(f"✅ Engine set to {ui.engine_display(value)}"))
+    await show_models(query)
+    return True
+
+
+@callback_action("engine_set:python")
+async def cb_engine_set_python(client, query):
+    await apply_engine_choice(query, ENGINE_PYTHON)
+
+
+@callback_action("engine_set:cpp")
+async def cb_engine_set_cpp(client, query):
+    await apply_engine_choice(query, ENGINE_CPP)
 
 
 async def show_refer(source):
@@ -1605,7 +1861,7 @@ async def handle_fsub_callback(client, query, data: str):
     await query.answer(ui_text(ui.stale_button_text()), show_alert=True)
 
 
-COMMAND_NAMES = ["start", "help", "login", "logout", "status", "cancel", "setcaption", "delcaption", "setthumb", "delthumb", "setprefix", "setsuffix", "mystats", "myinfo", "history", "settings", "language", "refer", "bookmark", "bookmarks", "favorite", "favorites", "share", "feedback", "premium", "stats", "users", "loggedusers", "activeusers", "newusers", "topusers", "broadcast", "ban", "unban", "banlist", "finduser", "userinfo", "addpremium", "removepremium", "premiumlist", "addadmin", "removeadmin", "adminlist", "setfsub", "fsublist", "delfsub", "fsublabel", "fsubcheck", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export", "adminhelp", "admin", "admins", "addqr", "delqr", "removeqr", "payments", "redeem", "setchat", "delchat"]
+COMMAND_NAMES = ["start", "help", "login", "logout", "status", "cancel", "setcaption", "delcaption", "setthumb", "delthumb", "setprefix", "setsuffix", "mystats", "myinfo", "history", "settings", "language", "refer", "bookmark", "bookmarks", "favorite", "favorites", "share", "feedback", "premium", "stats", "users", "loggedusers", "activeusers", "newusers", "topusers", "broadcast", "ban", "unban", "banlist", "finduser", "userinfo", "addpremium", "removepremium", "premiumlist", "addadmin", "removeadmin", "adminlist", "setfsub", "fsublist", "delfsub", "fsublabel", "fsubcheck", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export", "adminhelp", "admin", "admins", "addqr", "delqr", "removeqr", "payments", "redeem", "setchat", "delchat", "models", "engine", "mychannels", "setengine"]
 ABORT_GROUP = -1
 
 
@@ -1658,7 +1914,11 @@ async def start_handler(client, message):
             pass
     premium = await is_premium(user.id)
     show_admin = user.id == OWNER_ID or await is_admin(user.id)
-    await render(message, ui.start_text(user.first_name, premium), ui.start_keyboard(show_admin))
+    # Same live engine badge as the 🏠 Main Menu button, so both screens match.
+    decision = await resolve_engine_for(user.id, record=False)
+    await render(message, ui.start_text(user.first_name, premium,
+                                        ui.engine_status_line(decision)),
+                 ui.start_keyboard(show_admin))
 
 
 @bot.on_message(filters.command("help") & filters.private)
@@ -1857,24 +2117,23 @@ async def feedback_handler(client, message):
 async def premium_handler(client, message):
     await show_premium(message)
 
+@bot.on_message(filters.command(["models", "engine"]) & filters.private)
+async def models_handler(client, message):
+    """/models and /engine — the C++ Turbo switcher (or its upgrade pitch)."""
+    await show_models(message)
+
+@bot.on_message(filters.command("mychannels") & filters.private)
+async def mychannels_handler(client, message):
+    """/mychannels — the user's dump-channel dashboard."""
+    await show_mychannels(message)
+
 @bot.on_message(filters.command("stats") & filters.private)
 @admin_only
 async def stats_handler(client, message):
-    stats = await get_bot_stats()
+    stats = await get_bot_stats() or {}
     total_bm = await total_bookmarks_count()
-    await say(message,
-        f"📊 **BOT STATISTICS**\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"👥 **Users:**\n"
-        f"├ Total: `{stats['total']}`\n"
-        f"├ Active Today: `{stats['active_today']}`\n"
-        f"├ New Today: `{stats['new_today']}`\n"
-        f"├ Premium: `{stats['premium']}`\n"
-        f"├ Banned: `{stats['banned']}`\n"
-        f"└ Admins: `{stats['admins']}`\n\n"
-        f"📥 Downloads: `{stats['total_downloads']}`\n"
-        f"🔖 Bookmarks: `{total_bm}`"
-    )
+    await say(message, ui.stats_text(stats, total_bm or 0,
+                                     ui.engine_analytics_text(await engine_status_snapshot())))
 
 
 USERS_PAGE_SIZE = 30
@@ -2136,10 +2395,15 @@ async def userinfo_handler(client, message):
 @bot.on_message(filters.command("addpremium") & filters.private)
 @owner_only
 async def addpremium_handler(client, message):
-    """Ask the owner which tier to grant instead of granting immediately."""
+    """Step 1 of the granular VIP grant — pick the feature tier.
+
+    Nothing is granted here: the owner chooses one of the four tiers first and
+    the duration second, and only then are the flags written to the database.
+    """
     args = (message.text or "").split()
     if len(args) < 2:
-        await say(message, "Usage: `/addpremium USER_ID [days]`")
+        await say(message, "Usage: `/addpremium USER_ID [days]`\n\n"
+                           "The feature tier and the duration are picked with buttons.")
         return
     try:
         target = int(args[1])
@@ -2147,8 +2411,8 @@ async def addpremium_handler(client, message):
     except ValueError:
         await say(message, "❌ Invalid")
         return
-    if days <= 0 or days > 36500:
-        await say(message, "❌ Choose a duration between 1 and 36,500 days.")
+    if days <= 0 or days > GRANT_MAX_DAYS:
+        await say(message, f"❌ Choose a duration between 1 and {GRANT_MAX_DAYS} days.")
         return
     if not await get_user(target):
         await say(message, "❌ Ask this user to /start the bot first.")
@@ -2156,42 +2420,210 @@ async def addpremium_handler(client, message):
     premium_tier_pending[message.from_user.id] = {"user_id": target, "days": days}
     # The stored name is read now (not cached) so a rename is reflected here too.
     name = await get_display_name(target)
-    await render(message, ui.premium_tier_text(target, days, name), ui.premium_tier_keyboard())
+    await render(message, ui.grant_tier_text(target, name, days), ui.grant_tier_keyboard())
 
 
-async def grant_premium_tier(source, tier: str):
-    """Finish /addpremium: grant the tier the owner picked and notify the user."""
+def _fold_tier_word(value) -> str:
+    """``"All-in-One"`` → ``"all_in_one"`` — punctuation-insensitive tier keys."""
+    return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+
+
+#: Human spellings of the four tiers, derived from the config labels so the two
+#: can never drift apart, plus the legacy two-button ids and a few synonyms.
+TIER_ALIASES = {
+    "all_in_one": "all", "allinone": "all", "everything": "all", "full_vip": "all",
+    "models_only": "models", "cpp": "models", "turbo": "models", "c": "models",
+    "private_only": "private", "public_only": "public", "standard": "public",
+    "basic": "public",
+}
+for _tier_key, _tier_definition in GRANT_TIERS.items():
+    TIER_ALIASES.setdefault(_fold_tier_word(_tier_definition.get("label")), _tier_key)
+for _legacy, _modern in LEGACY_TIER_ALIASES.items():
+    TIER_ALIASES.setdefault(_fold_tier_word(_legacy), _modern)
+
+
+def normalize_tier(value) -> str | None:
+    """Fold a tier id — legacy, synonym or human-spelled — onto GRANT_TIERS.
+
+    ``None`` means "not a tier": callers must refuse the grant rather than
+    guess one, because each tier writes different access flags.
+    """
+    key = _fold_tier_word(value)
+    if not key:
+        return None
+    if key in GRANT_TIERS:
+        return key
+    return TIER_ALIASES.get(key)
+
+
+def parse_grant_duration(key: str) -> tuple[str, int | None]:
+    """``("ok", days)`` — ``days`` is ``None`` for lifetime.
+
+    Also returns ``("custom", None)`` when the owner has to type a number and
+    ``("invalid", None)`` for anything unusable, so a malformed button can never
+    be mistaken for a lifetime grant.
+    """
+    key = str(key or "").strip().lower()
+    if key == GRANT_CUSTOM_DAYS_KEY:
+        return "custom", None
+    if key.startswith("typed:"):
+        try:
+            days = int(key.split(":", 1)[1])
+        except ValueError:
+            return "invalid", None
+        return ("ok", days) if 0 < days <= GRANT_MAX_DAYS else ("invalid", None)
+    entry = GRANT_DURATIONS.get(key)
+    if entry is None:
+        return "invalid", None
+    return "ok", entry["days"]
+
+
+async def answer_source(source, text, *, show_alert: bool = False):
+    """Answer a callback query; a plain message has nothing to answer."""
+    answer = getattr(source, "answer", None)
+    if answer is None:
+        return
+    try:
+        await answer(ui_text(text), show_alert=show_alert)
+    except Exception:  # pragma: no cover - an answer must never break a grant
+        pass
+
+
+async def start_grant_duration(source, tier: str):
+    """Step 2 — ask how long the tier the owner just picked should last."""
     uid = source.from_user.id
     if uid != OWNER_ID:
-        await source.answer(ui_text("👑 Owner only."), show_alert=True)
+        await answer_source(source, "👑 Owner only.", show_alert=True)
+        return False
+    order = premium_tier_pending.get(uid)
+    if not order:
+        await answer_source(source, "This grant expired — run /addpremium again.",
+                            show_alert=True)
+        return False
+    resolved = normalize_tier(tier)
+    if not resolved:
+        await render(source, ui.grant_tier_unknown_text(), ui.admin_back_keyboard())
+        return False
+    order["tier"] = resolved
+    premium_tier_pending[uid] = order
+    name = await get_display_name(order["user_id"])
+    await render(source, ui.grant_duration_text(order["user_id"], resolved, name,
+                                                order.get("days")),
+                 ui.grant_duration_keyboard(resolved, order.get("days")))
+    return True
+
+
+#: "No duration was passed at all" — distinct from ``None``, which is a real
+#: answer: the Lifetime button grants a premium tier with **no expiry**.
+UNSET_DAYS = object()
+
+
+async def grant_premium_tier(source, tier: str, days=UNSET_DAYS):
+    """Finish /addpremium: store the tier flags and notify the user.
+
+    ``days`` overrides the duration typed in the command (the duration buttons
+    and the custom-days prompt both pass one); ``None`` means lifetime, and
+    :data:`UNSET_DAYS` keeps the duration the owner typed in ``/addpremium``.
+    """
+    uid = source.from_user.id
+    if uid != OWNER_ID:
+        await answer_source(source, "👑 Owner only.", show_alert=True)
         return False
     order = premium_tier_pending.pop(uid, None)
     if not order:
-        await source.answer(ui_text("This selection expired — run /addpremium again."), show_alert=True)
+        await answer_source(source, "This selection expired — run /addpremium again.",
+                            show_alert=True)
         return False
-    target, days = order["user_id"], order["days"]
-    source_name = PREMIUM_SOURCE_MANUAL if tier == "full" else PREMIUM_SOURCE_PUBLIC
-    await add_premium(target, days, source=source_name)
+    resolved = normalize_tier(tier)
+    if not resolved:
+        await render(source, ui.grant_tier_unknown_text(), ui.admin_back_keyboard())
+        return False
+    target = order["user_id"]
+    duration = order.get("days", 30) if days is UNSET_DAYS else days
+    # The tier decides the flags *and* the premium_source, so a models-only
+    # grant can never inherit the legacy "manual means private" meaning.
+    await add_premium(target, duration, tier=resolved)
     name = await get_display_name(target)   # re-checked at grant time
-    await render(source, ui.premium_tier_granted_text(target, days, tier, name),
+    await render(source, ui.grant_done_text(target, resolved, duration, name),
                  ui.admin_back_keyboard())
     try:
-        await say_message(bot, target, ui.premium_activated_user_text(days, tier=tier))
+        await say_message(bot, target,
+                          ui.grant_activated_user_text(resolved, duration, name))
     except Exception as exc:
         print(f"[PREMIUM NOTIFY FAILED] {exc}", flush=True)
     return True
 
 
+async def handle_grant_callback(client, query, data: str):
+    """``grant_tier:<tier>`` / ``grant_dur:<tier>:<duration>`` / ``grant_back:<tier>``."""
+    action, _, rest = data.partition(":")
+    uid = query.from_user.id
+    if uid != OWNER_ID:
+        # Only the owner may grant VIP — a forged callback changes nothing.
+        await query.answer(ui_text("👑 Owner only."), show_alert=True)
+        return
+    if action == "grant_back":
+        order = premium_tier_pending.get(uid)
+        if not order:
+            await query.answer(ui_text("This grant expired — run /addpremium again."),
+                               show_alert=True)
+            return
+        order.pop("tier", None)
+        name = await get_display_name(order["user_id"])
+        await query.answer()
+        await render(query, ui.grant_tier_text(order["user_id"], name, order.get("days")),
+                     ui.grant_tier_keyboard())
+        return
+    if action == "grant_tier":
+        tier = normalize_tier(rest)
+        if not tier:
+            await query.answer(ui_text("⚠️ Unknown tier."), show_alert=True)
+            return
+        await query.answer(ui_text(f"🎖 {GRANT_TIERS[tier]['label']} selected."))
+        await start_grant_duration(query, tier)
+        return
+    if action == "grant_dur":
+        tier_part, _, duration = rest.partition(":")
+        tier = normalize_tier(tier_part)
+        if not tier:
+            await query.answer(ui_text("⚠️ Unknown tier."), show_alert=True)
+            return
+        state, days = parse_grant_duration(duration)
+        if state == "invalid":
+            await query.answer(ui_text("⚠️ Invalid duration."), show_alert=True)
+            return
+        if state == "custom":
+            order = premium_tier_pending.get(uid)
+            if not order:
+                await query.answer(ui_text("This grant expired — run /addpremium again."),
+                                   show_alert=True)
+                return
+            order["tier"] = tier
+            premium_tier_pending[uid] = order
+            pending_action[uid] = "grant_custom_days"
+            name = await get_display_name(order["user_id"])
+            await query.answer(ui_text("🔢 Send the number of days."))
+            await say(query.message, ui.grant_custom_days_text(order["user_id"], tier, name),
+                      reply_markup=ui.feedback_keyboard())
+            return
+        await query.answer(ui_text("💎 Granting VIP…"))
+        await grant_premium_tier(query, tier, days=days)
+        return
+    await query.answer(ui_text("⚠️ Unknown grant action."), show_alert=True)
+
+
 @callback_action("premium_tier:public")
 async def cb_premium_tier_public(client, query):
+    """Legacy two-button grant — still honoured, maps onto the granular tiers."""
     await query.answer(ui_text("🌐 Public-only premium"))
     await grant_premium_tier(query, "public")
 
 
 @callback_action("premium_tier:full")
 async def cb_premium_tier_full(client, query):
+    """Legacy two-button grant — "full" meant public + private."""
     await query.answer(ui_text("🔓 Full premium"))
-    await grant_premium_tier(query, "full")
+    await grant_premium_tier(query, "private")
 
 
 @bot.on_message(filters.command("removepremium") & filters.private)
@@ -2204,8 +2636,9 @@ async def removepremium_handler(client, message):
     try:
         target = int(args[1])
         await remove_premium(target)
-        await say(message, f"✅ Premium removed from `{target}`")
-    except:
+        name = await get_display_name(target)
+        await say(message, ui.grant_revoked_text(target, name))
+    except ValueError:
         await say(message, "❌ Invalid ID")
 
 
@@ -2670,16 +3103,22 @@ async def update_review_caption(query, status_line: str):
         pass
 
 
-async def latest_payment_plan(user_id):
-    """Plan key of the newest stored proof of *user_id* (callback fallback)."""
+async def latest_payment_note(user_id):
+    """Stored note of the newest proof of *user_id* (callback-data fallback)."""
     try:
         rows = await get_payments()
     except Exception:
         return None
     for row in rows:
         if row.get("user_id") == user_id and isinstance(row.get("note"), dict):
-            return row["note"].get("plan")
+            return row["note"]
     return None
+
+
+async def latest_payment_plan(user_id):
+    """Plan key of the newest stored proof of *user_id* (callback fallback)."""
+    note = await latest_payment_note(user_id)
+    return (note or {}).get("plan")
 
 
 async def handle_payment_review(client, query, data: str):
@@ -2695,19 +3134,26 @@ async def handle_payment_review(client, query, data: str):
     except (ValueError, IndexError):
         await query.answer(ui_text("Unknown payment reference."), show_alert=True)
         return
-    plan_key = parts[1] if len(parts) > 1 and parts[1] else None
-    if not plan_key:
-        plan_key = await latest_payment_plan(target)
+    #: ``payok:<user>[:<plan>][:turbo]`` — older proofs carry neither extra part.
+    extras = [part.strip().lower() for part in parts[1:] if part.strip()]
+    turbo = "turbo" in extras
+    plan_key = next((part for part in extras if part != "turbo"), None)
+    if not plan_key or not turbo:
+        note = await latest_payment_note(target) or {}
+        plan_key = plan_key or note.get("plan")
+        turbo = turbo or bool(note.get("turbo"))
     plan = PREMIUM_PLANS.get(plan_key) if plan_key else None
     days = plan["days"] if plan else 30
     title = plan["title"] if plan else None
 
     if action == "payok":
-        await add_premium(target, days, source=PURCHASE_PREMIUM_SOURCE)
+        # A Standard purchase grants public + private exactly as before; the
+        # C++ Turbo variant adds the granular ``models`` permission on top.
+        await add_premium(target, days, tier="all" if turbo else "private")
         await mark_payment(target, "approved", reviewer=uid, plan=plan_key)
         await query.answer(ui_text("✅ Payment approved — premium activated."))
         await update_review_caption(query, ui.APPROVED_CAPTION)
-        user_text = ui.payment_approved_user_text(title, days)
+        user_text = ui.payment_approved_user_text(title, days, turbo=turbo)
     elif action == "payfake":
         await mark_payment(target, "rejected", reviewer=uid)
         await query.answer(ui_text("⚠️ Screenshot marked as fake."))
@@ -2812,6 +3258,83 @@ async def cb_setchat_check(client, query):
         await render(query, ui.setchat_admin_failed_text(reason), ui.setchat_check_keyboard())
 
 
+# --------------------------------------------------------------------------- #
+#  /mychannels — the user's dump-channel dashboard
+# --------------------------------------------------------------------------- #
+
+async def show_mychannels(source):
+    """List the connected dump channel with its rights and file counter."""
+    uid = source.from_user.id
+    await ensure_user(source.from_user)
+    entry = await get_user_chat(uid)
+    if not entry:
+        await render(source, ui.mychannels_empty_text(),
+                     ui.mychannels_keyboard(None, connected=False))
+        return
+    files = await get_channel_files(entry["chat_id"])
+    decision = await resolve_engine_for(uid, record=False)
+    await render(source, ui.mychannels_text(entry, files=files, engine=decision.engine),
+                 ui.mychannels_keyboard(entry["chat_id"]))
+
+
+@callback_action("cmd_mychannels")
+async def cb_mychannels(client, query):
+    await query.answer()
+    await show_mychannels(query)
+
+
+async def mychannels_permission_check(query, entry, *, reverify: bool = False):
+    """Run the real admin/posting-rights probe behind the dashboard buttons.
+
+    **Test Permissions** only reports; **Re-verify Admin** additionally refreshes
+    the stored title and username when Telegram says the rights are fine again.
+    """
+    uid = query.from_user.id
+    chat_id = int(entry["chat_id"])
+    title = entry.get("title") or CHANNEL_TITLE_FALLBACK.format(chat_id=chat_id)
+    await query.answer(ui_text("🔍 Checking bot permissions…"))
+    ok, reason = await describe_channel_admin(chat_id)
+    if reverify and ok:
+        try:
+            chat = await bot.get_chat(chat_id)
+            title = chat_title(chat, chat_id)
+            await set_user_chat(uid, chat_id, title, getattr(chat, "username", None))
+        except Exception as exc:
+            print(f"[MYCHANNELS] refresh failed for {chat_id}: {exc}", flush=True)
+    await render(query, ui.mychannels_test_text(title, ok, reason),
+                 ui.mychannels_keyboard(chat_id))
+
+
+async def handle_mychannels_callback(client, query, data: str):
+    """``mych_test:<id>`` / ``mych_verify:<id>`` / ``mych_del:<id>``.
+
+    The id in the button is checked against the caller's own stored channel, so
+    a stale or hand-forged callback can never touch somebody else's dump chat.
+    """
+    action, _, raw = data.partition(":")
+    uid = query.from_user.id
+    try:
+        chat_id = int(raw)
+    except (TypeError, ValueError):
+        await query.answer(ui_text("⚠️ This dashboard is out of date — send /mychannels."),
+                           show_alert=True)
+        return
+    entry = await get_user_chat(uid)
+    if not entry or int(entry["chat_id"]) != chat_id:
+        await query.answer(ui_text("⚠️ That channel is no longer connected."), show_alert=True)
+        await show_mychannels(query)
+        return
+    if action == "mych_del":
+        title = entry.get("title") or CHANNEL_TITLE_FALLBACK.format(chat_id=chat_id)
+        await clear_user_chat(uid)
+        setchat_pending.pop(uid, None)
+        await query.answer(ui_text("🗑 Channel disconnected."))
+        await render(query, ui.mychannels_disconnected_text(title),
+                     ui.mychannels_keyboard(None, connected=False))
+        return
+    await mychannels_permission_check(query, entry, reverify=(action == "mych_verify"))
+
+
 def bot_self_id():
     """Id of the bot account, or ``None`` while the client is still connecting."""
     try:
@@ -2861,6 +3384,94 @@ async def channel_dump_handler(client, message):
         await floodwait_sleep(floodwait_seconds(error))
     except Exception as exc:
         print(f"[CHANNEL DUMP ERROR] {exc}", flush=True)
+
+
+# --------------------------------------------------------------------------- #
+#  /setengine — the owner's global engine controller (AUTO / LOCK C++ / LOCK PY)
+# --------------------------------------------------------------------------- #
+
+async def show_engine_controller(source):
+    """Render the controller screen: mode, live traffic and the routing rules."""
+    await ENGINE_CONTROLLER.load_mode()
+    snapshot = await engine_status_snapshot()
+    await render(source, ui.engine_controller_text(ENGINE_CONTROLLER.mode, snapshot),
+                 ui.engine_controller_keyboard(ENGINE_CONTROLLER.mode))
+
+
+async def apply_engine_mode(source, mode: str):
+    """Persist a controller mode and apply it to this process immediately.
+
+    Writing to the database first is what makes a lock survive a restart; the
+    in-memory controller is updated right after, so the very next extraction is
+    already routed by the new mode.
+    """
+    resolved = engines.normalize_mode(mode)
+    try:
+        await set_engine_mode(resolved)
+    except Exception as exc:
+        print(f"[ENGINE MODE PERSIST FAILED] {exc}", flush=True)
+        await render(source, "⚠️ **Could not save the engine mode**\n\n"
+                             "The database did not accept the change, so nothing "
+                             "was applied. Please try again.")
+        return None
+    ENGINE_CONTROLLER.set_mode(resolved)
+    print(f"[ENGINE MODE] {resolved} (set by {getattr(source.from_user, 'id', '?')})",
+          flush=True)
+    await query_answer_if_possible(source, f"✅ {engines.ENGINE_MODE_LABELS[resolved]}")
+    await render(source, ui.engine_mode_set_text(resolved),
+                 ui.engine_controller_keyboard(resolved))
+    return resolved, await engine_status_snapshot()
+
+
+async def query_answer_if_possible(source, text):
+    """Toast a callback press; a typed command has nothing to toast."""
+    answer = getattr(source, "answer", None)
+    if answer is None:
+        return
+    try:
+        await answer(ui_text(text))
+    except Exception:  # pragma: no cover - a toast must never break a mode change
+        pass
+
+
+@bot.on_message(filters.command("setengine") & filters.private)
+@owner_only
+async def setengine_handler(client, message):
+    """/setengine — panel, or ``/setengine auto|cpp|python`` to lock it directly."""
+    args = (message.text or "").split()[1:]
+    if not args:
+        await show_engine_controller(message)
+        return
+    mode = engines.parse_mode_argument(args[0])
+    if mode is None:
+        await say(message, "❌ **Unknown engine mode**\n\n"
+                           "Use `/setengine auto`, `/setengine cpp` or "
+                           "`/setengine python` — or send /setengine alone for "
+                           "the button panel.")
+        return
+    await apply_engine_mode(message, mode)
+
+
+@callback_action("cmd_setengine")
+async def cb_setengine(client, query):
+    if query.from_user.id != OWNER_ID and not await is_admin(query.from_user.id):
+        await query.answer(ui_text("🚫 Admin access only."), show_alert=True)
+        return
+    await query.answer()
+    await show_engine_controller(query)
+
+
+async def handle_engine_mode_callback(client, query, data: str):
+    """``engine_mode:auto|lock_cpp|lock_python`` — owner only, it is a global force."""
+    if query.from_user.id != OWNER_ID:
+        await query.answer(ui_text("👑 Owner only — this lock is global."), show_alert=True)
+        return
+    mode = engines.parse_mode_argument(data.split(":", 1)[1])
+    if mode is None:
+        await query.answer(ui_text("⚠️ Unknown engine mode."), show_alert=True)
+        return
+    # apply_engine_mode answers the press itself, so the owner sees the new mode.
+    await apply_engine_mode(query, mode)
 
 
 @bot.on_message(filters.command(["admin", "admins"]) & filters.private)
@@ -3285,44 +3896,95 @@ async def extract_channel_links(message, user_row, *, sleeper=asyncio.sleep):
             caption_pending.pop(token, None)
 
     requester = ChannelRequester(message, user_row)
+    #: One decision per batch: every link of this post runs on the same engine,
+    #: which is also what the telemetry HUD reports.
+    decision = await resolve_engine_for(user_id)
+    engine = decision.engine_object
+    #: The C++ Turbo engine spreads a batch over its worker pool; the Python
+    #: engine (and any single-link post) keeps the strict single stream.
+    workers = engine.workers if len(links) > 1 else 1
     success = failed = 0
+    stop = False
+
+    async def run_link(index, link):
+        """Extract one link; returns ``True`` / ``False`` / ``"cancelled"``."""
+        chat_target, msg_id, is_private = parse_link(link)
+        if chat_target is None:
+            return False
+        status = await say(message,
+                           f"⏳ Fetching {index}/{len(links)}… {ui.engine_icon(decision.engine)}")
+        if is_private and not await private_access(user_id):
+            await say_edit(status, ui.private_access_text(),
+                           reply_markup=ui.private_access_keyboard())
+            return False
+        fetch_client = bot
+        if is_private:
+            fetch_client = await get_user_client(user_id)
+            if not fetch_client:
+                await say_edit(status, "🔒 **Private link!**\n\nPlease /login first.")
+                return False
+        try:
+            return await fetch_and_send(
+                requester, status, fetch_client, chat_target, msg_id,
+                enforce_fsub=False, cleanup_errors=True,
+                use_custom_caption=use_custom_caption, engine=decision,
+            )
+        except FloodWait as error:
+            # Defensive: pausing is always better than hammering Telegram.
+            seconds = floodwait_seconds(error)
+            await say_edit(status, ui.channel_floodwait_text(seconds))
+            await sleeper(seconds)
+            return False
+
+    def tally(result) -> bool:
+        """Count one finished link; ``False`` means "stop the batch"."""
+        nonlocal success, failed
+        if result == "cancelled":
+            return False
+        success += 1 if result else 0
+        failed += 0 if result else 1
+        return True
+
     async with channel_rate_limit(chat_id, sleeper=sleeper):
-        for index, link in enumerate(links, 1):
-            chat_target, msg_id, is_private = parse_link(link)
-            if chat_target is None:
-                failed += 1
-                continue
-            status = await say(message, f"⏳ Fetching {index}/{len(links)}…")
-            if is_private and not await private_access(user_id):
-                await say_edit(status, ui.private_access_text(),
-                               reply_markup=ui.private_access_keyboard())
-                failed += 1
-                continue
-            fetch_client = bot
-            if is_private:
-                fetch_client = await get_user_client(user_id)
-                if not fetch_client:
-                    await say_edit(status, "🔒 **Private link!**\n\nPlease /login first.")
-                    failed += 1
+        if workers <= 1:
+            # Python Standard — one stream, strictly in the order posted.
+            for index, link in enumerate(links, 1):
+                if not tally(await run_link(index, link)):
+                    break
+                await sleeper(CHANNEL_EXTRACT_COOLDOWN)
+        else:
+            # C++ Turbo — a bounded worker pool.  Starts stay spaced by the
+            # anti-ban cooldown so Telegram is never hammered, while the slow
+            # parts (download + re-upload) of different files overlap.
+            start_gate = asyncio.Lock()
+            slots = asyncio.Semaphore(workers)
+
+            async def worker(index, link):
+                nonlocal stop
+                async with start_gate:
+                    if stop:
+                        return None
+                    if index > 1:
+                        await sleeper(CHANNEL_EXTRACT_COOLDOWN)
+                async with slots:
+                    if stop:
+                        return None
+                    result = await run_link(index, link)
+                    if result == "cancelled":
+                        stop = True
+                    return result
+
+            for result in await asyncio.gather(
+                    *(worker(index, link) for index, link in enumerate(links, 1))):
+                if result is None:      # never started: the batch was stopped
                     continue
-            try:
-                ok = await fetch_and_send(
-                    requester, status, fetch_client, chat_target, msg_id,
-                    enforce_fsub=False, cleanup_errors=True,
-                    use_custom_caption=use_custom_caption,
-                )
-            except FloodWait as error:
-                # Defensive: pausing is always better than hammering Telegram.
-                seconds = floodwait_seconds(error)
-                await say_edit(status, ui.channel_floodwait_text(seconds))
-                await sleeper(seconds)
-                failed += 1
-                continue
-            if ok == "cancelled":
-                break
-            success += 1 if ok else 0
-            failed += 0 if ok else 1
-            await sleeper(CHANNEL_EXTRACT_COOLDOWN)
+                tally(result)
+    if success:
+        # /mychannels reports how many files landed in this channel.
+        try:
+            await increment_channel_files(chat_id, success)
+        except Exception as exc:
+            print(f"[CHANNEL STATS FAILED] {exc}", flush=True)
     return success, failed
 
 
@@ -3334,9 +3996,14 @@ async def submit_payment_proof(message):
         await say(message, "⚠️ Checkout expired. Open /premium and choose your plan again.")
         return
     plan = PREMIUM_PLANS[order["plan"]]
-    # Persist proof + selected plan before attempting delivery to Telegram.
+    #: The C++ Turbo variant charges base + add-on and grants the models flag.
+    turbo = bool(order.get("turbo"))
+    amount = plan_total_price(plan) if turbo else plan_base_price(plan)
+    price_label = f"{RUPEE}{amount}"
+    # Persist proof + plan + variant before attempting delivery to Telegram.
     saved = await add_payment(uid, message.photo.file_id, {
-        "plan": order["plan"], "price": plan["price"], "days": plan["days"],
+        "plan": order["plan"], "price": amount, "days": plan["days"],
+        "turbo": turbo,
         "message_id": message.id, "checkout": order["token"],
     })
     pending_action.pop(uid, None)
@@ -3345,11 +4012,9 @@ async def submit_payment_proof(message):
         await say(message, "ℹ️ **This payment proof is already submitted for review.**")
         return
     delivered = False
-    caption = (f"💳 **PAYMENT REVIEW**\n\n👤 User: `{uid}`\n"
-               f"📦 Plan: **{plan['title']}** • **{RUPEE}{plan['price']}**\n"
-               f"🔎 Verify this screenshot against your actual payment records.\n"
-               f"👑 Owner approval: `/addpremium {uid} {plan['days']}`")
-    review_keyboard = ui.payment_review_keyboard(uid, order["plan"])
+    caption = ui.payment_review_owner_text(uid, plan["title"], price_label,
+                                           plan["days"], turbo)
+    review_keyboard = ui.payment_review_keyboard(uid, order["plan"], turbo=turbo)
     # A bot cannot initiate a private chat. OWNER_ID should belong to
     # @XyrDeveloper, who must /start this bot; the username is a best-effort copy.
     for recipient in dict.fromkeys([OWNER_ID, PAYMENT_CONTACT]):
@@ -3362,12 +4027,9 @@ async def submit_payment_proof(message):
         except Exception:
             continue
     if delivered:
-        text = (f"✅ **Payment proof submitted**\n\n📦 {plan['title']} • {RUPEE}{plan['price']}\n"
-                f"⏳ Awaiting verification by @{PAYMENT_CONTACT}. This is not an automatic payment confirmation.\n"
-                "💎 The owner will activate your premium after checking payment.")
+        text = ui.payment_submitted_text(plan["title"], price_label, turbo)
     else:
-        text = (f"⚠️ **Proof saved, delivery unavailable**\n\nPlease send your screenshot directly to @{PAYMENT_CONTACT}. "
-                "Your proof remains available to the owner in /payments.")
+        text = ui.payment_proof_saved_text()
     await say(message, text, reply_markup=ui.back_keyboard())
 
 
@@ -3467,10 +4129,10 @@ ADMIN_PAGES = [
       "finduser", "userinfo", "export"]),
     ("💎 Premium & Payments",
      ["addpremium", "removepremium", "premiumlist", "payments", "addqr", "delqr", "removeqr"]),
+    ("🧠 Engine & Channels",
+     ["setengine", "setchat", "delchat"]),
     ("📢 Community",
      ["broadcast", "sendmsg", "ban", "unban", "banlist", "feedbacks"]),
-    ("📡 Channel Dump",
-     ["setchat", "delchat"]),
     ("📢 Force Sub",
      ["setfsub", "fsublist", "delfsub", "fsublabel", "fsubcheck"]),
     ("⚙️ Administration",
@@ -3505,24 +4167,34 @@ ADMIN_VALUE_EXAMPLES = {
 #: Commands only the owner may run.
 ADMIN_OWNER_COMMANDS = {
     "addpremium", "addadmin", "removeadmin", "setfsub", "fsublist", "delfsub",
-    "fsublabel", "fsubcheck", "maintenance",
+    "fsublabel", "fsubcheck", "maintenance", "setengine",
     "addqr", "delqr", "removeqr", "clearlogs",
 }
 
 
 def admin_help_text() -> str:
-    """The full command list shown by /admins and /adminhelp."""
+    """The full command list shown by /admins and /adminhelp.
+
+    Every command is printed as a descriptive English pair
+    (``🧠 /setengine — Global Engine Controller (Lock / Auto)``) built from the
+    labels in :mod:`ui`, so the panel, this list and the docs never drift apart.
+    """
     lines = [
         "👑 **ADMIN COMMANDS**",
         "",
         "Every command below also exists as a button in the paginated /admin panel.",
         "",
+        "**⭐ Most used**",
+        ui.admin_featured_text(),
+        "",
     ]
     for title, commands in ADMIN_PAGES:
         lines.append(f"**{title}**")
-        lines.append("  ".join(f"/{cmd}" for cmd in commands))
+        lines.append(ui.admin_command_lines(commands))
         lines.append("")
     lines.append("💎 Payment proofs carry ✅ Approve / ⚠️ Fake / 🚫 Ban buttons for the owner.")
+    lines.append("🧠 /setengine controls the global engine: AUTO autoscaler, or a hard "
+                 "lock to C++ Turbo / Python.")
     return ui.smallcaps("\n".join(lines).strip())
 
 
@@ -3539,11 +4211,14 @@ def admin_panel_keyboard(page=0):
 
 
 def admin_panel_text(page=0):
+    """One panel page: the commands as descriptive English pairs."""
+    title, commands = ADMIN_PAGES[page]
     return (f"🛠 **ADMIN PANEL** • {page+1}/{len(ADMIN_PAGES)}\n\n"
-            f"**{ADMIN_PAGES[page][0]}**\n\n"
+            f"**{title}**\n\n"
+            f"{ui.admin_command_lines(commands)}\n\n"
             "Tap an action or use its slash command. Browse with Previous / Next.\n"
             "Send /admins for the complete command list.\n"
-            "👑 Only the owner can grant private-access premium.")
+            "👑 Only the owner can grant VIP tiers or lock the global engine.")
 
 
 
@@ -3564,6 +4239,7 @@ ADMIN_INLINE_HANDLERS = {
     "maintenance": maintenance_handler, "addqr": addqr_handler, "delqr": delqr_handler,
     "removeqr": delqr_handler, "clearlogs": clearlogs_handler, "export": export_handler,
     "setchat": setchat_handler, "delchat": delchat_handler,
+    "setengine": setengine_handler,
 }
 
 
@@ -3630,6 +4306,17 @@ async def callback_handler(client, query):
         # Owner-only payment verdicts.
         await handle_payment_review(client, query, data)
         return
+    if data.startswith(("grant_tier:", "grant_dur:", "grant_back:")):
+        # Owner-only granular VIP grant wizard (tier → duration).
+        await handle_grant_callback(client, query, data)
+        return
+    if data.startswith("engine_mode:"):
+        # Owner-only global engine controller (AUTO / LOCK C++ / LOCK PYTHON).
+        await handle_engine_mode_callback(client, query, data)
+        return
+    if data.startswith(("mych_test:", "mych_verify:", "mych_del:")):
+        await handle_mychannels_callback(client, query, data)
+        return
     if data.startswith("admin_page:"):
         if uid != OWNER_ID and not await is_admin(uid):
             await query.answer(ui_text("🚫 Admin access only."), show_alert=True)
@@ -3660,7 +4347,10 @@ async def callback_handler(client, query):
         await show_premium(query)
         return
     if data.startswith("buy:"):
-        plan_key = data.split(":", 1)[1]
+        #: ``buy:<plan>`` (Standard) or ``buy:<plan>:turbo`` (with the C++ add-on).
+        parts = data.split(":")[1:]
+        plan_key = parts[0] if parts else ""
+        turbo = len(parts) > 1 and parts[1].strip().lower() == "turbo"
         plan = PREMIUM_PLANS.get(plan_key)
         if not plan:
             await query.answer(ui_text("Unknown plan"), show_alert=True)
@@ -3672,10 +4362,11 @@ async def callback_handler(client, query):
             return
         import secrets
         token = secrets.token_hex(6)
-        payment_pending[uid] = {"plan": plan_key, "token": token}
+        payment_pending[uid] = {"plan": plan_key, "token": token, "turbo": turbo}
         await query.answer(ui_text("💳 Your payment QR is ready."))
         try:
-            await bot.send_photo(uid, qr, caption=ui_text(ui.payment_text(plan)),
+            await bot.send_photo(uid, qr,
+                                 caption=ui_text(ui.payment_text(plan, turbo=turbo)),
                                  reply_markup=ui.payment_keyboard(token))
         except Exception:
             payment_pending.pop(uid, None)
@@ -3745,7 +4436,7 @@ async def callback_handler(client, query):
     "addadmin", "removeadmin", "adminlist", "setfsub", "fsublist", "delfsub",
     "fsublabel", "fsubcheck", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export",
     "adminhelp", "admin", "admins", "addqr", "delqr", "removeqr", "payments", "redeem",
-    "setchat", "delchat",
+    "setchat", "delchat", "models", "engine", "mychannels", "setengine",
 ]))
 async def text_handler(client, message):
     user_id = message.from_user.id
@@ -3805,6 +4496,25 @@ async def text_handler(client, message):
             return
         if action == "qr_upload":
             await say(message, "Please upload the QR image as a photo.")
+            return
+        if action == "grant_custom_days":
+            # Step 2b of /addpremium — the owner typed a custom duration.
+            order = premium_tier_pending.get(user_id)
+            if user_id != OWNER_ID or not order:
+                pending_action.pop(user_id, None)
+                premium_tier_pending.pop(user_id, None)
+                await say(message, "👑 **Owner only command!**")
+                return
+            try:
+                days = int(text.strip())
+            except ValueError:
+                await say(message, f"❌ Send a whole number of days (1–{GRANT_MAX_DAYS}).")
+                return
+            if days <= 0 or days > GRANT_MAX_DAYS:
+                await say(message, f"❌ Choose a duration between 1 and {GRANT_MAX_DAYS} days.")
+                return
+            pending_action.pop(user_id, None)
+            await grant_premium_tier(message, order.get("tier") or "public", days=days)
             return
         if action == "caption":
             await set_caption(user_id, text)
@@ -4097,6 +4807,14 @@ if __name__ == "__main__":
     Thread(target=run_web, daemon=True).start()
     print("✅ Flask started")
     print(f"🎨 Inline button styles: {ui.style_support_label()}")
+    turbo = engines.ENGINE_REGISTRY[ENGINE_CPP]
+    print(f"🧠 Engines: Python Standard ⚙️ (single-stream) + "
+          f"C++ Turbo {turbo.version_label} 🚀 "
+          f"({turbo.workers} workers, zero-copy={turbo.zero_copy})")
+    print(f"🧠 Controller starts in {ENGINE_CONTROLLER.mode_label}; the stored mode is "
+          f"read from MongoDB on the first extraction (peak above "
+          f"{ENGINE_PEAK_THRESHOLD} concurrent).")
+    print(f"📊 Telemetry HUD: {'on' if ui.telemetry_enabled() else 'off'}")
     print("✅ Bot starting...")
     bot.run()
     
