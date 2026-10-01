@@ -44,6 +44,8 @@ from config import (BOT_USERNAME, FREE_DAILY_LIMIT, FREE_PRIVATE_LINKS, WATERMAR
                     GIVEAWAY_DAILY_INTERVAL_SECONDS, GIVEAWAY_PARTICIPANTS_PER_PAGE,
                     GIVEAWAY_MAX_BENEFIT_CHARS, GIVEAWAY_MAX_DAYS,
                     GIVEAWAY_BENEFIT_SUGGESTIONS, CHANNEL_SHARE_TOKEN_TTL,
+                    GIVEAWAY_BROADCAST_DELAY, GIVEAWAY_BROADCAST_FLOOD_RETRIES,
+                    CHANNEL_PICKER_BUTTON_ID, ECHO_SWALLOW_WINDOW_SECONDS,
                     ENGINE_MODE_AUTO, ENGINE_MODE_LOCK_CPP, ENGINE_MODE_LOCK_PYTHON,
                     DEFAULT_ENGINE_MODE, GRANT_TIERS, GRANT_TIER_KEYS, GRANT_DURATIONS,
                     GRANT_CUSTOM_DAYS_KEY, GRANT_MAX_DAYS, LEGACY_TIER_ALIASES,
@@ -747,11 +749,19 @@ def resolve_delivery_target(message, user_id, fetch_client) -> DeliveryTarget:
     channel the destination is the channel id, which is why that path was always
     fine.
 
-    The rule is therefore: **a user session may never deliver to its own id.**
-    When that combination is detected the native copy is refused and the
-    delivery falls back to the bot — download with the user session, upload with
-    ``bot.send_*`` into the bot chat.  Caption and attribution behaviour is
-    identical on whichever path ends up delivering.
+    Round 14 changed the answer for the private-chat case.  Refusing the copy
+    there used to force the **download → re-upload** path, which is the one
+    thing the bot must never do with restricted content: the bytes then stream
+    through this server.  So instead of giving up on the copy, the user's own
+    session is pointed at the **bot's chat** — the private chat the user shares
+    with the bot, whose id is the bot's id and not the user's.  The copy lands
+    there directly, the server never sees a byte, and the echo the bot receives
+    back is swallowed exactly once by :func:`consume_echo_guard`.
+
+    The rule is therefore: **a user session may never deliver to its own id**,
+    and when that combination is detected the destination becomes the bot's own
+    chat rather than a download.  Caption and attribution behaviour is identical
+    on whichever path ends up delivering.
     """
     chat = getattr(message, "chat", None)
     raw_chat_id = getattr(chat, "id", None)
@@ -768,11 +778,56 @@ def resolve_delivery_target(message, user_id, fetch_client) -> DeliveryTarget:
         own_id = None
 
     if own_id is not None and chat_id == own_id and is_user_session(fetch_client, own_id):
-        # Private chat + the user's own session = Saved Messages. Refuse the
-        # server-side copy and deliver through the bot instead.
+        # Private chat + the user's own session = Saved Messages.  Point the
+        # session at the bot's own chat instead: the copy is made there by the
+        # user's account, so nothing is ever downloaded onto this server.
+        bot_id = bot_self_id()
+        if bot_id and int(bot_id) != int(chat_id):
+            return DeliveryTarget(int(bot_id), fetch_client, bot,
+                                  reason="bot_dm_native_copy")
         return DeliveryTarget(chat_id, None, bot, reason="saved_messages_guard")
 
     return DeliveryTarget(chat_id, fetch_client, bot, reason="direct")
+
+
+# --------------------------------------------------------------------------- #
+#  The echo guard — swallow a native copy exactly once
+# --------------------------------------------------------------------------- #
+#: user_id -> {"chat_id", "message_id", "expires"} while the bot waits for the
+#: copy it asked the user's session to make.  A user session posting into the
+#: bot's chat produces an ordinary incoming message, so without this the bot
+#: would read its own delivery as a fresh request and extract it a second time.
+ECHO_GUARD: dict = {}
+
+
+def arm_echo_guard(user_id, chat_id=None, message_id=None) -> None:
+    """Watch for the echo of the copy that is about to land in the bot's chat."""
+    ECHO_GUARD[int(user_id)] = {
+        "chat_id": int(chat_id) if chat_id is not None else None,
+        "message_id": int(message_id) if message_id is not None else None,
+        "expires": time.monotonic() + float(ECHO_SWALLOW_WINDOW_SECONDS),
+    }
+
+
+def consume_echo_guard(user_id, message=None) -> bool:
+    """Swallow the echo of a native copy — **once**, and only while it is live.
+
+    Returns ``True`` when *message* is the copy the bot itself caused: the
+    caller must then stop without extracting, replying or editing anything.
+    A guard that has expired is dropped rather than honoured, so a message that
+    arrives long after the copy is treated as a brand-new request.
+    """
+    guard = ECHO_GUARD.get(int(user_id))
+    if not guard:
+        return False
+    if time.monotonic() > float(guard.get("expires") or 0.0):
+        ECHO_GUARD.pop(int(user_id), None)
+        return False
+    #: The guard is single-use by design: one copy, one swallow.
+    ECHO_GUARD.pop(int(user_id), None)
+    print(f"[ECHO SWALLOWED] user={user_id} msg={getattr(message, 'id', None)} "
+          f"— the copy the bot asked for, not a new request", flush=True)
+    return True
 
 
 async def try_native_copy(message, fetch_client, chat_target, msg_id, *, use_custom_caption: bool = True):
@@ -838,6 +893,13 @@ async def try_native_copy(message, fetch_client, chat_target, msg_id, *, use_cus
                 await message.reply(attribution_text(), parse_mode=ParseMode.DISABLED)
             except Exception:
                 pass
+
+    #: Round 14 — when the user's own session made the copy straight into the
+    #: bot's chat, the bot receives that copy back as an ordinary message.  Arm
+    #: the guard now so the echo is swallowed once instead of being extracted
+    #: a second time.
+    if target.reason == "bot_dm_native_copy":
+        arm_echo_guard(user_id, target.chat_id, getattr(copied, "id", None))
 
     print("[COPY SUCCESS]", flush=True)
     return True
@@ -2522,29 +2584,21 @@ async def broadcast_handler(client, message):
         await say(message, "📢 Reply to a message with /broadcast, or send "
                            "`/broadcast Your message` (use `{name}` to greet each user).")
         return
+    #: Round 13 item 9 — the inline-button builder is for a **direct user
+    #: send** only.  A broadcast is not one: it goes out exactly as it was
+    #: typed, with no colour step, no link step and no half-designed message
+    #: left sitting in the chat.  The C++ pool still personalises every copy.
     if typed and not message.reply_to_message:
-        #: Typed text: the button wizard offers colours and links first (the
-        #: prepared broadcast goes out through the C++ formatting pool).
-        await start_button_wizard(message, {
-            "kind": WIZARD_KIND_BROADCAST,
-            "chat_id": None,
-            "text": typed,
-            "preview": f"📢 Broadcast → {len(await get_all_users())} users",
-        })
+        users = await get_all_users()
+        total = len(users)
+        status = await say(message, f"📢 Broadcasting to {total}...")
+        delivered = await run_button_broadcast(typed, [])
+        await say_edit(status,
+            f"✅ **Broadcast Complete!**\n\n"
+            f"Total: {total}\n✅ Sent: {len(delivered)}\n"
+            f"❌ Not delivered: {max(0, total - len(delivered))}"
+        )
         return
-    if message.reply_to_message is not None and not typed:
-        replied = message.reply_to_message
-        #: A replied *text* message can carry buttons, so it takes the wizard;
-        #: a replied media message is copied as it is (copy keeps the caption).
-        replied_text = getattr(replied, "text", None) or getattr(replied, "caption", None)
-        if replied_text and not getattr(replied, "media", None):
-            await start_button_wizard(message, {
-                "kind": WIZARD_KIND_BROADCAST,
-                "chat_id": None,
-                "text": replied_text,
-                "preview": f"📢 Broadcast → {len(await get_all_users())} users",
-            })
-            return
     users = await get_all_users()
     total = len(users)
     status = await say(message, f"📢 Broadcasting to {total}...")
@@ -3547,12 +3601,22 @@ async def cb_setchat(client, query):
 
 @callback_action("setchat:share")
 async def cb_setchat_share(client, query):
-    """Round 7 — register a **private** channel by sharing one of its posts.
+    """Round 14 — hand a channel over with Telegram's **own** chat chooser.
 
-    A private channel has no public link, so instead of asking for one the bot
-    waits for a forward and reads the channel identity off it.  Nothing is
-    stored until both verifications pass, and no invite link or raw chat id is
-    ever printed into the conversation.
+    Round 7 used a share-sheet deep link: the user shared it *into* the channel
+    and the bot read the channel off the message that landed there.  That was
+    the last flow that posted into a channel at all — it left a bot link
+    sitting in the channel and it could not work for a channel the user did not
+    want to write in.  So it is gone.
+
+    The chooser is opened by a reply-keyboard button carrying ``request_chat``;
+    Telegram shows the account's own channel list and hands the chosen chat
+    straight back in ``message.chat_shared``.  Nothing is pasted, nothing is
+    forwarded and **nothing is posted inside the channel**.
+
+    Typing a message link, an ``@username`` or a numeric id is still accepted
+    as the fallback — ``pending_action`` stays on ``setchat_share`` for exactly
+    that, and ``/cancel`` is the way out.
     """
     uid = query.from_user.id
     entries = await get_user_channels(uid)
@@ -3564,11 +3628,94 @@ async def cb_setchat_share(client, query):
     await query.answer()
     setchat_pending.pop(uid, None)
     pending_action[uid] = "setchat_share"
-    #: The deep link is minted per user and per click: the share sheet sends it
-    #: into the channel, the bot (an admin there) reads it and the channel
-    #: registers itself — no link pasted, nothing forwarded.
-    await render(query, ui.setchat_share_prompt_text(),
-                 ui.setchat_share_prompt_keyboard(share_deep_link(uid, "setchat")))
+    #: A reply keyboard cannot be attached to an existing message, so the picker
+    #: is a fresh send rather than an edit of the message the button came from.
+    await say(query.message, ui.setchat_picker_text(),
+              reply_markup=ui.setchat_picker_keyboard())
+
+
+#: The ``request_id`` Telegram must echo back for a pick to be ours.
+PICKER_BUTTON_IDS = frozenset({int(CHANNEL_PICKER_BUTTON_ID)})
+
+
+def shared_chat_of(message):
+    """The chat Telegram handed over, or ``None`` when nothing was picked.
+
+    ``ChatShared`` carries the chosen chat directly on modern builds
+    (``shared.chat``) and only its id on older ones (``shared.chat_id``), and
+    the pick is only honoured when it carries the button id this bot asked for.
+    """
+    shared = getattr(message, "chat_shared", None)
+    if shared is None:
+        return None
+    button_id = getattr(shared, "button_id", None)
+    if button_id is None:
+        button_id = getattr(shared, "request_id", None)
+    if button_id is not None and int(button_id) not in PICKER_BUTTON_IDS:
+        print(f"[PICKER] ignored a pick for button_id={button_id!r}", flush=True)
+        return None
+    chat = getattr(shared, "chat", None)
+    if chat is not None and getattr(chat, "id", None) is not None:
+        return chat
+    chat_id = getattr(shared, "chat_id", None)
+    if chat_id is None:
+        return None
+    return SimpleNamespace(id=int(chat_id), title=None, username=None, type="channel")
+
+
+@bot.on_message(filters.chat_shared & filters.private)
+async def chat_shared_handler(client, message):
+    """Round 14 — the owner picked a channel in Telegram's own chooser.
+
+    The choice arrives here with the full chat attached, so the wizard can run
+    the exact same two verifications the link path runs — the picker
+    administers the channel, and the bot may post in it — and then store it.
+    No link, no forward, no message id and nothing posted in the channel.
+    """
+    if getattr(message, "from_user", None) is None:
+        return
+    uid = message.from_user.id
+    chat = shared_chat_of(message)
+    if chat is None:
+        #: A pick we did not ask for (or an unreadable one) is simply not ours.
+        return
+    if pending_action.get(uid) != "setchat_share" and uid not in setchat_pending:
+        #: The chooser can be opened from anywhere, so a stray pick is guided
+        #: rather than silently dropped.
+        await say(message, ui.setchat_picker_text(),
+                  reply_markup=ui.setchat_picker_keyboard())
+        return
+    await register_picked_channel(message, uid, chat)
+
+
+async def register_picked_channel(message, uid, chat) -> bool:
+    """Verify and store the channel the owner just picked.
+
+    Shares its whole verification tail with the link path, so the two ways in
+    can never drift apart: the cap, the requester's admin rights, the bot's
+    posting rights and the final confirmation are identical.
+    """
+    chat_id = int(getattr(chat, "id", 0) or 0)
+    kind = chat_type_value(chat)
+    title = chat_title(chat, chat_id)
+    username = getattr(chat, "username", None)
+    if not chat_id or kind not in {"channel", "supergroup", "group"}:
+        await say(message, ui.setchat_share_failed_text("not_a_channel"),
+                  reply_markup=ui.remove_keyboard())
+        return True
+
+    entries = await get_user_channels(uid)
+    known = {int(entry["chat_id"]) for entry in entries}
+    if chat_id not in known and len(entries) >= max(1, int(MAX_USER_CHANNELS)):
+        pending_action.pop(uid, None)
+        await say(message, ui.channel_slots_full_text(entries),
+                  reply_markup=ui.mychannels_keyboard(entries))
+        return True
+
+    await say(message, ui.setchat_share_resolved_text(title))
+    return await finish_channel_registration(
+        message, uid, chat_id=chat_id, title=title, username=username,
+        kind=kind or "channel", done_keyboard=ui.remove_keyboard())
 
 
 async def register_shared_channel(message, uid) -> bool:
@@ -3589,10 +3736,44 @@ async def register_shared_channel(message, uid) -> bool:
     """
     text = (getattr(message, "text", None) or "").strip()
     chat_target, msg_id, _is_private = parse_link(text)
+
+    #: Round 14 — the fallback accepts a message link, an ``@username`` or a
+    #: numeric id.  A link doubles as the readability proof; a bare reference
+    #: has no post to point at, so the two admin checks carry it alone.
     if chat_target is None or msg_id is None:
-        await say(message, ui.setchat_share_failed_text("not_received"),
-                  reply_markup=ui.feedback_keyboard())
-        return True
+        kind, value = classify_chat_ref(text)
+        if kind == "unknown":
+            await say(message, ui.setchat_share_failed_text("not_received"),
+                      reply_markup=ui.feedback_keyboard())
+            return True
+        ref = value if kind == "numeric" else text
+        try:
+            resolved = await resolve_chat_target(ref)
+        except InviteRequestSent:
+            await say(message, ui.setchat_join_request_text("this channel"),
+                      reply_markup=ui.feedback_keyboard())
+            return True
+        except InviteLinkError as exc:
+            reason = "bot_not_in_chat" if exc.reason == "no_access" else "cannot_see"
+            await say(message, ui.setchat_share_failed_text(reason),
+                      reply_markup=ui.feedback_keyboard())
+            return True
+        except Exception as exc:
+            print(f"[SETCHAT LINK] cannot resolve {text!r}: {exc}", flush=True)
+            await say(message, ui.setchat_share_failed_text("cannot_see"),
+                      reply_markup=ui.feedback_keyboard())
+            return True
+        if not resolved or not resolved.get("chat_id"):
+            await say(message, ui.setchat_share_failed_text("cannot_see"),
+                      reply_markup=ui.feedback_keyboard())
+            return True
+        await say(message, ui.setchat_share_resolved_text(
+            resolved.get("title") or str(resolved["chat_id"])))
+        return await finish_channel_registration(
+            message, uid, chat_id=int(resolved["chat_id"]),
+            title=resolved.get("title") or str(resolved["chat_id"]),
+            username=resolved.get("username"),
+            kind=resolved.get("type") or "channel")
 
     try:
         resolved = await resolve_chat_target(text)
@@ -3675,6 +3856,58 @@ async def register_shared_channel(message, uid) -> bool:
     pending_action.pop(uid, None)
     await say(message, ui.setchat_done_text(title, chat_id), reply_markup=ui.back_keyboard())
     print(f"[SETCHAT] message link registered chat={chat_id} for user={uid}", flush=True)
+    return True
+
+
+async def finish_channel_registration(message, uid, *, chat_id, title, username,
+                                      kind, done_keyboard=None) -> bool:
+    """The verification tail both ways in share: requester, bot, store, confirm.
+
+    Round 14's picker and the link/username fallback must never drift apart, so
+    the two checks that decide whether a channel may be connected — the picker
+    administers it, and the bot may post in it — live here once and are run by
+    both.  ``done_keyboard`` lets the picker hand back a
+    :class:`ReplyKeyboardRemove` instead of an inline menu, because the picker
+    screen is the only one that put a reply keyboard on the screen.
+    """
+    chat_id = int(chat_id)
+
+    #: Verification 1 (round 5): the person connecting it must administer it.
+    person_ok, person_reason = await describe_requester_admin(chat_id, uid)
+    if not person_ok:
+        setchat_pending.pop(uid, None)
+        pending_action.pop(uid, None)
+        await say(message, ui.setchat_requester_failed_text(person_reason, title),
+                  reply_markup=done_keyboard or ui.back_keyboard())
+        return True
+
+    #: Verification 2: the bot must be an admin with Post Messages.
+    ok, reason = await describe_channel_admin(chat_id)
+    if not ok:
+        #: The wizard stays alive so the rights can be fixed and re-checked.
+        setchat_pending[uid] = {
+            "chat_id": chat_id, "title": title, "username": username,
+            "step": "await_check", "invite_link": None, "type": kind or "channel",
+        }
+        await say(message, ui.setchat_admin_failed_text(reason),
+                  reply_markup=ui.setchat_check_keyboard())
+        return True
+
+    stored, why = await add_user_channel(uid, chat_id, title, username, kind or "channel")
+    if not stored:
+        if why == "full":
+            entries = await get_user_channels(uid)
+            await say(message, ui.channel_slots_full_text(entries),
+                      reply_markup=ui.mychannels_keyboard(entries))
+        else:
+            await say(message, ui.setchat_share_failed_text("cannot_see"),
+                      reply_markup=ui.feedback_keyboard())
+        return True
+    setchat_pending.pop(uid, None)
+    pending_action.pop(uid, None)
+    await say(message, ui.setchat_done_text(title, chat_id),
+              reply_markup=done_keyboard or ui.back_keyboard())
+    print(f"[SETCHAT] registered chat={chat_id} for user={uid}", flush=True)
     return True
 
 
@@ -4192,6 +4425,9 @@ async def resolve_chat_target(ref):
     ``InviteRequestSent`` is re-raised unchanged so callers can explain the
     approval-only case to the owner.
     """
+    #: A numeric id may arrive as an int (``/pin`` resolves a link's chat id),
+    #: and the reference grammar below is written for text.
+    ref = "" if ref is None else str(ref).strip()
     kind, value = classify_chat_ref(ref)
     if kind == "unknown":
         raise InviteLinkError("unresolved", f"unrecognised chat reference {ref!r}")
@@ -4999,6 +5235,10 @@ async def submit_payment_proof(message):
 async def photo_handler(client, message):
     await refresh_profile(getattr(message, "from_user", None))
     user_id = message.from_user.id
+    #: Round 14 — a photo the user's session just copied into this chat is the
+    #: delivery itself.  Swallow the echo once, never re-process it.
+    if consume_echo_guard(user_id, message):
+        return
     if pending_action.get(user_id) == "payment_proof":
         await submit_payment_proof(message)
         return
@@ -5140,59 +5380,6 @@ async def dm_user(uid, text, keyboard=None, **kwargs):
         return None
 
 
-async def register_channel_from_ping(message, uid, chat) -> bool:
-    """A shared deep link landed in a channel: register it for *uid*.
-
-    Everything is verified exactly like the manual wizard — the person must
-    administer the chat and the bot must be an admin with Post Messages — but
-    the chat identity comes from the message itself, so no link is ever pasted
-    and nothing is printed into the channel.
-    """
-    chat_id = int(getattr(chat, "id", 0) or 0)
-    kind = chat_type_value(chat)
-    title = chat_title(chat, chat_id)
-    username = getattr(chat, "username", None)
-    if not chat_id or kind not in {"channel", "supergroup", "group"}:
-        await dm_user(uid, ui.setchat_share_failed_text("not_a_channel"))
-        return True
-
-    entries = await get_user_channels(uid)
-    known = {int(entry["chat_id"]) for entry in entries}
-    if chat_id not in known and len(entries) >= max(1, int(MAX_USER_CHANNELS)):
-        await dm_user(uid, ui.channel_slots_full_text(entries),
-                      ui.mychannels_keyboard(entries))
-        return True
-
-    person_ok, person_reason = await describe_requester_admin(chat_id, uid)
-    if not person_ok:
-        await dm_user(uid, ui.setchat_requester_failed_text(person_reason, title))
-        return True
-    ok, reason = await describe_channel_admin(chat_id)
-    if not ok:
-        #: Both checks must pass; the button below re-runs them after a fix.
-        setchat_pending[uid] = {
-            "chat_id": chat_id, "title": title, "username": username,
-            "step": "await_check", "invite_link": None, "type": kind or "channel",
-        }
-        await dm_user(uid, ui.setchat_admin_failed_text(reason),
-                      ui.setchat_check_keyboard())
-        return True
-
-    stored, why = await add_user_channel(uid, chat_id, title, username, kind)
-    if not stored:
-        if why == "full":
-            await dm_user(uid, ui.channel_slots_full_text(await get_user_channels(uid)),
-                          ui.mychannels_keyboard(await get_user_channels(uid)))
-        else:
-            await dm_user(uid, ui.setchat_sample_failed_text("unreadable"))
-        return True
-    setchat_pending.pop(uid, None)
-    pending_action.pop(uid, None)
-    await dm_user(uid, ui.setchat_done_text(title, chat_id), ui.back_keyboard())
-    print(f"[SETCHAT] shared link registered chat={chat_id} for user={uid}", flush=True)
-    return True
-
-
 async def register_dump_from_ping(message, uid, chat) -> bool:
     """A shared deep link landed in the owner's dump channel: connect it."""
     if int(uid) != OWNER_ID:
@@ -5218,9 +5405,12 @@ async def register_dump_from_ping(message, uid, chat) -> bool:
 async def handle_share_deep_link(message) -> bool:
     """Handle *any* message that carries a live bot deep link.
 
-    Inside a channel the link *is* the registration proof; in a private chat the
-    user shared it with the bot itself, so they get the instruction screen
-    instead of a silent no-op.
+    Round 14 changed what a **setchat** link means.  It used to be the
+    registration proof when it was shared *into* a channel; that is exactly the
+    behaviour the round removed, because posting a bot link into the channel is
+    the one thing the new flow promises never to happen.  A channel link is now
+    only ever a hint: the owner is told, in their private chat, to use the
+    chooser instead.  The dump-channel link is untouched.
     """
     text = (getattr(message, "text", None) or getattr(message, "caption", None) or "")
     if "start=" not in text or BOT_USERNAME.lower() not in text.lower():
@@ -5232,15 +5422,17 @@ async def handle_share_deep_link(message) -> bool:
     chat = getattr(message, "chat", None)
     if is_channel_context(message):
         if entry["kind"] == "setchat":
-            return await register_channel_from_ping(message, uid, chat)
+            return await guide_channel_link_in_channel(message, uid, chat)
         return await register_dump_from_ping(message, uid, chat)
 
     # The user shared the link back to the bot: explain what to do with it.
     if entry["kind"] == "setchat":
         try:
+            #: Arm the typed fallback too, so a link, @username or id works from
+            #: this screen exactly as it does from /setchat.
+            pending_action[int(uid)] = "setchat_share"
             await say(message, ui.setchat_deep_link_private_text(),
-                      reply_markup=ui.setchat_share_prompt_keyboard(
-                          share_deep_link(uid, "setchat")))
+                      reply_markup=ui.setchat_share_prompt_keyboard(None))
         except Exception:
             pass
     else:
@@ -5252,14 +5444,32 @@ async def handle_share_deep_link(message) -> bool:
     return True
 
 
+async def guide_channel_link_in_channel(message, uid, chat) -> bool:
+    """A setchat deep link landed **inside** a channel: point at the chooser.
+
+    Nothing is registered from the message that landed in the channel and
+    nothing is answered there — the channel stays exactly as it was.  The
+    explanation goes to the user's private chat, where the picker can actually
+    be opened.
+    """
+    chat_id = int(getattr(chat, "id", 0) or 0)
+    if chat_id:
+        print(f"[SETCHAT] a share link was posted inside chat={chat_id}; "
+              f"the chooser is the only way in now (user={uid})", flush=True)
+    pending_action[int(uid)] = "setchat_share"
+    await dm_user(uid, ui.setchat_share_link_in_channel_text(),
+                  ui.setchat_picker_keyboard())
+    return True
+
+
 async def setchat_deep_link_in_private(message, token) -> bool:
-    """``/start ch…`` — the token arrived in a private chat, guide the user."""
+    """``/start ch…`` — the token arrived in a private chat, open the picker."""
     entry = SHARE_TOKENS.get(token)
     if not entry or entry.get("kind") != "setchat":
         return False
-    await say(message, ui.setchat_deep_link_private_text(),
-              reply_markup=ui.setchat_share_prompt_keyboard(
-                  share_deep_link(message.from_user.id, "setchat")))
+    pending_action[int(message.from_user.id)] = "setchat_share"
+    await say(message, ui.setchat_picker_text(),
+              reply_markup=ui.setchat_picker_keyboard())
     return True
 
 
@@ -5508,7 +5718,7 @@ async def cb_dump_off(client, query):
 # --------------------------------------------------------------------------- #
 
 def pin_target_chat(message):
-    """``(chat_id, title)`` — where /pin acts.
+    """``(chat_id, title)`` — where /pin acts when no link was given.
 
     Inside a channel the command acts on that channel.  In a private chat it
     acts on the owner's dump channel when one is connected (that is the channel
@@ -5520,25 +5730,73 @@ def pin_target_chat(message):
     return None, None
 
 
-def pin_message_id(message):
-    """The message id /pin was pointed at (reply, link or bare number)."""
+def pin_argument(message) -> str:
+    """Whatever the user typed after ``/pin`` (a link or a bare message id)."""
+    parts = (getattr(message, "text", None) or "").split(maxsplit=1)
+    return parts[1].strip() if len(parts) > 1 else ""
+
+
+def pin_message_ref(message):
+    """``(kind, ref, msg_id)`` — what /pin was pointed at.
+
+    Round 14 gave each of the three shapes its own destination, because a link
+    is a destination and not merely an id:
+
+    ``reply``  the chat the command was typed in;
+    ``link``   the chat **the link itself names** — never re-pointed at the
+               dump channel, which is what used to happen and made a link to
+               some other chat pin in the wrong place;
+    ``id``     the chat the command was typed in, or the dump channel when it
+               was typed here in private.
+    """
     reply = getattr(message, "reply_to_message", None)
     if reply is not None and getattr(reply, "id", None):
-        return int(reply.id)
-    parts = (getattr(message, "text", None) or "").split(maxsplit=1)
-    arg = parts[1].strip() if len(parts) > 1 else ""
+        return "reply", None, int(reply.id)
+    arg = pin_argument(message)
     if not arg:
-        return None
+        return None, None, None
     target, msg_id, _is_private = parse_link(arg)
     if target is not None and msg_id:
-        return int(msg_id)
+        kind, value = classify_chat_ref(arg)
+        return "link", (value if kind == "numeric" else arg), int(msg_id)
     if arg.isdigit():
-        return int(arg)
-    return None
+        return "id", None, int(arg)
+    return None, None, None
+
+
+def pin_message_id(message):
+    """The message id /pin was pointed at (reply, link or bare number)."""
+    _kind, _ref, msg_id = pin_message_ref(message)
+    return msg_id
 
 
 async def resolve_pin_scope(message):
-    """``(chat_id, title, msg_id)`` for /pin, or a ``(None, reason, None)`` error."""
+    """``(chat_id, title, msg_id)`` for /pin, or a ``(None, reason, None)`` error.
+
+    The reasons are the plain-English keys :func:`ui.pin_failed_text` renders:
+    ``no_target``, ``no_access`` and ``not_found``.
+    """
+    kind, ref, msg_id = pin_message_ref(message)
+    if kind is None:
+        return None, "no_target", None
+
+    if kind == "link":
+        #: A link names its own chat: open it and pin there, never somewhere
+        #: else just because a dump channel happens to be connected.
+        try:
+            resolved = await resolve_chat_target(ref)
+        except InviteRequestSent:
+            return None, "no_access", None
+        except InviteLinkError as exc:
+            return None, ("no_access" if exc.reason == "no_access" else "not_found"), None
+        except Exception as exc:
+            print(f"[PIN SCOPE] cannot resolve {ref!r}: {exc}", flush=True)
+            return None, "no_access", None
+        chat_id = resolved.get("chat_id")
+        if not chat_id:
+            return None, "not_found", None
+        return int(chat_id), resolved.get("title") or str(chat_id), msg_id
+
     chat_id, title = pin_target_chat(message)
     if chat_id is None:
         entry = await get_dump_channel()
@@ -5547,27 +5805,50 @@ async def resolve_pin_scope(message):
         else:
             chat_id = int(message.chat.id)
             title = "this chat"
-    msg_id = pin_message_id(message)
-    if msg_id is None:
-        return None, "no_target", None
     return chat_id, title, msg_id
 
 
 async def pin_in_chat(chat_id, msg_id) -> tuple[bool, str]:
-    """Pin one message, translating Telegram's answers into plain English."""
+    """Pin one message, translating Telegram's answers into plain English.
+
+    Round 14 replaced the single ``error`` bucket with the reasons that
+    actually tell the owner what to change: ``already_pinned``, ``no_rights``,
+    ``no_access``, ``floodwait``, ``not_found`` and — only as a last resort —
+    ``error``.  The chat is opened first, which is what makes ``no_access`` and
+    ``already_pinned`` detectable at all.
+    """
+    try:
+        chat = await floodwait_guard(bot.get_chat, chat_id)
+    except FloodWait as error:
+        await floodwait_sleep(floodwait_seconds(error))
+        return False, "floodwait"
+    except (ChannelPrivate, ChatAdminRequired, PeerIdInvalid, UserNotParticipant) as exc:
+        print(f"[PIN NO ACCESS] chat={chat_id}: {type(exc).__name__}: {exc}", flush=True)
+        return False, "no_access"
+    except Exception as exc:
+        print(f"[PIN CHAT FAILED] chat={chat_id}: {type(exc).__name__}: {exc}", flush=True)
+        return False, "no_access"
+
+    pinned = getattr(chat, "pinned_message", None)
+    if pinned is not None and getattr(pinned, "id", None) == int(msg_id):
+        return False, "already_pinned"
+
     try:
         await floodwait_guard(bot.pin_chat_message, chat_id, int(msg_id),
                               disable_notification=False)
         return True, "ok"
     except FloodWait as error:
         await floodwait_sleep(floodwait_seconds(error))
-        return False, "error"
+        return False, "floodwait"
     except ChatAdminRequired:
         return False, "no_rights"
     except Exception as exc:
+        detail = str(exc).lower()
         print(f"[PIN FAILED] chat={chat_id} msg={msg_id}: {type(exc).__name__}: {exc}",
               flush=True)
-        return False, "not_found" if "not found" in str(exc).lower() else "error"
+        missing = ("not found" in detail or "message_id_invalid" in detail
+                   or "message empty" in detail or "message to pin" in detail)
+        return False, "not_found" if missing else "error"
 
 
 @bot.on_message(filters.command("pin") & (filters.private | filters.channel | filters.group))
@@ -5608,12 +5889,18 @@ async def pinned_handler(client, message):
         else:
             chat_id = int(message.chat.id)
             title = "this chat"
+    #: Round 14 — the same reason vocabulary /pin uses, so "I cannot reach that
+    #: chat" and "Telegram asked me to slow down" read the same everywhere.
     try:
         chat = await floodwait_guard(bot.get_chat, chat_id)
         pinned = getattr(chat, "pinned_message", None)
     except FloodWait as error:
         await floodwait_sleep(floodwait_seconds(error))
-        await say(message, ui.pin_failed_text("error"), reply_markup=ui.feedback_keyboard())
+        await say(message, ui.pin_failed_text("floodwait"), reply_markup=ui.feedback_keyboard())
+        return
+    except (ChannelPrivate, ChatAdminRequired, PeerIdInvalid, UserNotParticipant) as exc:
+        print(f"[PINNED NO ACCESS] chat={chat_id}: {type(exc).__name__}: {exc}", flush=True)
+        await say(message, ui.pin_failed_text("no_access"), reply_markup=ui.feedback_keyboard())
         return
     except Exception as exc:
         print(f"[PINNED FAILED] chat={chat_id}: {exc}", flush=True)
@@ -5626,7 +5913,10 @@ async def pinned_handler(client, message):
         await floodwait_guard(bot.unpin_chat_message, chat_id, int(pinned.id))
     except FloodWait as error:
         await floodwait_sleep(floodwait_seconds(error))
-        await say(message, ui.pin_failed_text("error"), reply_markup=ui.feedback_keyboard())
+        await say(message, ui.pin_failed_text("floodwait"), reply_markup=ui.feedback_keyboard())
+        return
+    except ChatAdminRequired:
+        await say(message, ui.pin_failed_text("no_rights"), reply_markup=ui.feedback_keyboard())
         return
     except Exception as exc:
         print(f"[UNPIN FAILED] chat={chat_id}: {exc}", flush=True)
@@ -5916,6 +6206,16 @@ GIVEAWAY_TASK = None
 #: Flips once the participant index has been requested.
 GIVEAWAY_INDEXES_READY = False
 GIVEAWAY_GOVERNOR = native_engine.Governor(2000)
+#: Round 14 — the one DM fan-out that may be running (one giveaway at a time).
+GIVEAWAY_BROADCAST_TASK = None
+
+#: Telegram answers that mean this account will never receive a DM from us.
+#: They are matched by name so the module keeps importing on library versions
+#: that do not export every one of them.
+BROADCAST_BLOCKED_ERRORS = frozenset({
+    "UserIsBlocked", "PeerIdInvalid", "InputUserDeactivated", "UserDeactivated",
+    "UserIdInvalid", "UserBannedInChannel", "UserIsBot",
+})
 
 
 def giveaway_link(token: str) -> str:
@@ -6169,6 +6469,95 @@ async def giveaway_loop():
         await asyncio.sleep(max(15, int(GIVEAWAY_LIVE_REFRESH_SECONDS)))
 
 
+# --------------------------------------------------------------------------- #
+#  Round 14 — the giveaway fan-out: every user, in their DM, the moment it
+#  goes live.  It runs as a background task so a long list can never block the
+#  wizard, every FloodWait is slept out and retried, and the owner is handed a
+#  delivery report when the last message has landed.
+# --------------------------------------------------------------------------- #
+
+async def giveaway_broadcast_dm(uid, text, keyboard, report) -> str:
+    """Deliver one giveaway DM.  Returns ``sent`` / ``blocked`` / ``paused``.
+
+    A FloodWait is never an error here: it is slept out and retried up to
+    :data:`config.GIVEAWAY_BROADCAST_FLOOD_RETRIES` times, and only a user who
+    keeps being rate-limited is written off.  That is what keeps a fan-out to
+    hundreds of accounts from earning the bot a restriction.
+    """
+    for attempt in range(1, GIVEAWAY_BROADCAST_FLOOD_RETRIES + 2):
+        try:
+            await say_message(bot, int(uid), text, reply_markup=keyboard)
+            return "sent"
+        except FloodWait as error:
+            seconds = floodwait_seconds(error)
+            report["pauses"] += 1
+            report["wait_seconds"] += float(seconds)
+            GIVEAWAY_GOVERNOR.penalize(f"gwb:{uid}", seconds)
+            print(f"[GIVEAWAY BROADCAST FLOODWAIT] {seconds}s user={uid} "
+                  f"attempt={attempt}", flush=True)
+            if attempt > GIVEAWAY_BROADCAST_FLOOD_RETRIES:
+                return "paused"
+            await floodwait_sleep(seconds)
+        except Exception as exc:
+            name = type(exc).__name__
+            print(f"[GIVEAWAY BROADCAST FAILED] user={uid}: {name}: {exc}", flush=True)
+            return "blocked" if name in BROADCAST_BLOCKED_ERRORS else "failed"
+    return "paused"
+
+
+async def run_giveaway_broadcast(gw) -> dict:
+    """Send the announcement to every user and return the delivery report."""
+    text = ui.giveaway_broadcast_text(gw)
+    keyboard = ui.giveaway_broadcast_keyboard(giveaway_link(gw.get("token") or ""))
+    report = {"total": 0, "sent": 0, "failed": 0, "blocked": 0, "paused": 0,
+              "pauses": 0, "wait_seconds": 0.0}
+    users = await get_all_users()
+    report["total"] = len(users)
+    recipients = [int(entry.get("user_id") or 0) for entry in users]
+    recipients = [uid for uid in recipients if uid and uid != OWNER_ID]
+    for index, uid in enumerate(recipients):
+        outcome = await giveaway_broadcast_dm(uid, text, keyboard, report)
+        report[outcome] = int(report.get(outcome, 0)) + 1
+        if index + 1 < len(recipients):
+            await broadcast_gap()      # between two sends, never after the last
+    return report
+
+
+async def broadcast_gap() -> None:
+    """The deliberate pause between two giveaway DMs.
+
+    A burst of hundreds of sends is exactly what earns a FloodWait, so the
+    fan-out is paced rather than fired off as fast as the loop can turn.
+    """
+    if GIVEAWAY_BROADCAST_DELAY > 0:
+        await asyncio.sleep(GIVEAWAY_BROADCAST_DELAY)
+
+
+async def _giveaway_broadcast_task(gw) -> None:
+    """Run the fan-out, then report to the owner.  Never raises."""
+    try:
+        report = await run_giveaway_broadcast(gw)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # pragma: no cover - the fan-out must survive
+        print(f"[GIVEAWAY BROADCAST FAILED] {type(exc).__name__}: {exc}", flush=True)
+        return
+    await dm_user(OWNER_ID, ui.giveaway_broadcast_report_text(report))
+
+
+def start_giveaway_broadcast(gw):
+    """Kick the fan-out off in the background; returns the task (or ``None``)."""
+    global GIVEAWAY_BROADCAST_TASK
+    if GIVEAWAY_BROADCAST_TASK is not None and not GIVEAWAY_BROADCAST_TASK.done():
+        return GIVEAWAY_BROADCAST_TASK
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:  # pragma: no cover - no loop yet
+        return None
+    GIVEAWAY_BROADCAST_TASK = loop.create_task(_giveaway_broadcast_task(gw))
+    return GIVEAWAY_BROADCAST_TASK
+
+
 def ensure_giveaway_loop():
     """Start the scheduler lazily (first update of this process).
 
@@ -6410,6 +6799,17 @@ async def create_giveaway_from_wizard(uid, wizard, channel_id, channel_title):
         await post_giveaway_message(gw, 0)
         gw = await get_active_giveaway() or gw
     ensure_giveaway_loop()
+    #: Round 14 — going live means two things happen at once: the message is
+    #: pinned in the channel (``post_giveaway_message``) **and** the same
+    #: announcement is fanned out to every user in their DM.  The fan-out is a
+    #: background task, so the wizard is never blocked by a long user list.
+    if gw:
+        try:
+            audience = len(await get_all_users())
+        except Exception:
+            audience = 0
+        start_giveaway_broadcast(gw)
+        await dm_user(OWNER_ID, ui.giveaway_broadcast_started_text(audience))
     return gw or doc
 
 
@@ -6454,7 +6854,13 @@ async def native_handler(client, message):
 @bot.on_message(filters.command("post") & filters.private)
 @owner_only
 async def post_to_channel_handler(client, message):
-    """``/post <text>`` — publish a message in the dump channel, buttons optional."""
+    """``/post <text>`` — publish a message in the dump channel.
+
+    Round 13 item 9: a channel post is **not** a direct user send, so the
+    inline-button builder is not offered here either.  The text is published as
+    it was typed and the send is confirmed; the one-tap **pin** offer that
+    follows is part of the pin flow, not the button builder.
+    """
     args = (message.text or "").split(maxsplit=1)
     text = args[1].strip() if len(args) > 1 else ""
     if not text:
@@ -6465,13 +6871,26 @@ async def post_to_channel_handler(client, message):
         await say(message, ui.dump_status_text(None, DUMP_MIRROR.snapshot()),
                   reply_markup=ui.dump_status_keyboard(False))
         return
-    await start_button_wizard(message, {
-        "kind": WIZARD_KIND_CHANNEL,
-        "chat_id": int(entry["chat_id"]),
-        "title": entry.get("title"),
-        "text": text,
-        "preview": text,
-    })
+    chat_id = int(entry["chat_id"])
+    title = entry.get("title")
+    uid = message.from_user.id
+    try:
+        posted = await bot.send_message(chat_id, text, parse_mode=ParseMode.DISABLED)
+    except FloodWait as error:
+        await floodwait_sleep(floodwait_seconds(error))
+        posted = await bot.send_message(chat_id, text, parse_mode=ParseMode.DISABLED)
+    message_id = getattr(posted, "id", None)
+    await say(message, ui.message_sent_text(), reply_markup=ui.back_keyboard())
+    #: Pinning a channel post is usually the next thing wanted, so the same
+    #: one-tap offer the other sends end with is offered here too.
+    if message_id:
+        BUTTON_WIZARD[uid] = {
+            "stage": "pin_offer", "buttons": [],
+            "payload": {"kind": WIZARD_KIND_PIN, "chat_id": chat_id,
+                        "title": title, "message_id": message_id, "text": text},
+        }
+        await say_message(bot, uid, ui.pin_offer_text(),
+                          reply_markup=ui.pin_offer_keyboard())
 
 
 
@@ -7058,6 +7477,12 @@ async def text_handler(client, message):
     await add_user(user_id, message.from_user.first_name, message.from_user.username)
     # A rename on Telegram must show up everywhere the bot displays this user.
     await refresh_profile(message.from_user)
+
+    #: Round 14 — the echo of a native copy the user's own session just posted
+    #: into this very chat.  Swallow it exactly once: it is the delivery, not a
+    #: new request, and extracting it again is the loop this guard exists for.
+    if consume_echo_guard(user_id, message):
+        return
 
     if user_id in fsub_pending and fsub_pending[user_id].get("step") == "await_label":
         if user_id != OWNER_ID:

@@ -280,6 +280,26 @@ GIVEAWAY_BENEFIT_SUGGESTIONS = (
     "C++ Turbo engine: 4 worker slots, zero-copy streaming, no speed cap",
     "Private channel access + the C++ Turbo switcher, full VIP",
 )
+#: Seconds to wait between two giveaway DMs.  The fan-out is deliberately
+#: paced: a burst of hundreds of sends is exactly what earns a FloodWait.
+GIVEAWAY_BROADCAST_DELAY = float(os.environ.get("GIVEAWAY_BROADCAST_DELAY", "0.05"))
+#: How often one FloodWait answer is slept out and retried before that user is
+#: written off as "paused" in the owner's delivery report.
+GIVEAWAY_BROADCAST_FLOOD_RETRIES = int(
+    os.environ.get("GIVEAWAY_BROADCAST_FLOOD_RETRIES", "3"))
+
+# --------------------------------------------------------------------------- #
+#  Round 14 — the channel chooser and the echo guard
+# --------------------------------------------------------------------------- #
+#: ``request_id`` of the reply-keyboard button that opens Telegram's own chat
+#: chooser.  The choice arrives back in ``message.chat_shared`` and must carry
+#: this exact id, so a stale or forged pick is ignored.
+CHANNEL_PICKER_BUTTON_ID = int(os.environ.get("CHANNEL_PICKER_BUTTON_ID", "7411"))
+#: How long the bot watches for the echo of a native copy it made with the
+#: user's own session.  The copy lands in the bot's chat within milliseconds;
+#: the window only has to be long enough for a slow connection.
+ECHO_SWALLOW_WINDOW_SECONDS = float(
+    os.environ.get("ECHO_SWALLOW_WINDOW_SECONDS", "120"))
 
 # --------------------------------------------------------------------------- #
 #  Native C++ engine (native/restriction_engine.cpp)

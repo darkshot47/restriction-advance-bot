@@ -16,6 +16,7 @@ regression shows up as a named failure rather than a mystery in production.
 
 from __future__ import annotations
 
+import datetime as dt
 import re
 
 import pytest
@@ -45,6 +46,10 @@ DEVANAGARI = tuple(chr(code) for code in range(0x0900, 0x0980))
 def flat(markup):
     return [b for row in markup.inline_keyboard for b in row]
 
+
+#: Round 14 — the reply-keyboard chooser is checked by shape, not by the inline
+#: budget, so it is asserted on its own (see the picker tests below).
+PICKER_KEYBOARD = ("picker", ui.setchat_picker_keyboard)
 
 NEW_KEYBOARDS = [
     ("open_bot", ui.open_bot_keyboard),
@@ -112,6 +117,20 @@ NEW_SCREENS = [
     ("sample_not_a_link", lambda: ui.setchat_sample_failed_text("not_a_link")),
     ("sample_unreadable", lambda: ui.setchat_sample_failed_text()),
     ("setchat_prompt", ui.setchat_prompt_text),
+    # Round 14 — the channel chooser, its guidance and the giveaway fan-out.
+    ("picker", ui.setchat_picker_text),
+    ("share_link_in_channel", ui.setchat_share_link_in_channel_text),
+    ("setchat_deep_link_private", ui.setchat_deep_link_private_text),
+    ("giveaway_broadcast", lambda: ui.giveaway_broadcast_text(
+        {"prize_tier": "all", "prize_days": 30, "benefit": "Full VIP",
+         "ends_at": dt.datetime(2026, 5, 1, 12, 0), "token": "abc12345"})),
+    ("giveaway_broadcast_started", lambda: ui.giveaway_broadcast_started_text(120)),
+    ("giveaway_broadcast_report", lambda: ui.giveaway_broadcast_report_text(
+        {"total": 120, "sent": 118, "failed": 1, "blocked": 1, "paused": 0,
+         "pauses": 2, "wait_seconds": 33.0})),
+    ("pin_already_pinned", lambda: ui.pin_failed_text("already_pinned")),
+    ("pin_no_access", lambda: ui.pin_failed_text("no_access")),
+    ("pin_floodwait", lambda: ui.pin_failed_text("floodwait")),
     # Rounds 2 and 10 — the corrected engine claims.
     ("speed_cap", ui.speed_cap_label),
     ("speed_cap_disabled", lambda: ui.speed_cap_label(0)),
@@ -223,3 +242,32 @@ def test_the_two_channel_dashboard_stays_inside_the_mobile_budget():
     #: 2 channels x 3 actions = 6 buttons -> 3 rows, plus the footer row.
     assert len(rows) == 4
     assert sum(len(row) for row in rows) == 8
+
+
+def test_the_picker_keyboard_is_a_reply_keyboard_with_one_chooser():
+    """Round 14 — the chooser lives on a **reply** keyboard, one button only."""
+    markup = PICKER_KEYBOARD[1]()
+    assert markup.__class__.__name__ == "ReplyKeyboardMarkup"
+    buttons = [b for row in markup.keyboard for b in row]
+    assert len(buttons) == 1
+    for each in buttons:
+        assert len(ui.plain_caps(each.text)) <= 28, each.text
+        assert each.request_chat is not None, "the button must open the chooser"
+
+
+def test_the_picker_flow_never_posts_a_link_into_a_channel():
+    """Round 14 — no setchat screen may carry a share URL any more."""
+    for build in (ui.setchat_prompt_keyboard, ui.setchat_share_prompt_keyboard):
+        for each in flat(build()):
+            assert each.url is None, each
+    assert "share" not in ui.setchat_picker_text().lower()
+    assert "share" not in ui.setchat_share_link_in_channel_text().lower()
+
+
+def test_every_pin_failure_names_one_concrete_next_step():
+    """Round 14 — "pin failed" is gone; each reason says what to change."""
+    for reason in ("already_pinned", "no_rights", "no_access", "floodwait",
+                   "not_found", "no_target"):
+        text = ui.pin_failed_text(reason)
+        assert "👉" in text or "Send /pinned" in text, reason
+        assert "Pinning failed" not in text, reason

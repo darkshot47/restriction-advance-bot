@@ -25,6 +25,14 @@ import os
 import re
 
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+try:  # the reply keyboard Telegram's own chat chooser is built from
+    from pyrogram.types import (
+        KeyboardButton, KeyboardButtonRequestChat, ReplyKeyboardMarkup,
+        ChatAdministratorRights,
+    )
+except Exception:  # pragma: no cover - legacy pyrogram without request_chat
+    KeyboardButton = KeyboardButtonRequestChat = None
+    ReplyKeyboardMarkup = ChatAdministratorRights = None
 
 try:  # kurigram / newer pyrogram builds
     from pyrogram.enums import ButtonStyle
@@ -1223,44 +1231,128 @@ def setchat_requester_failed_text(reason: str = "not_admin", title: str | None =
 #:  Round 7 — registering a private channel by sharing it into the bot
 #: ------------------------------------------------------------------------ #:
 
-def setchat_share_button(share_url: str | None):
-    """The one-tap share-sheet button (``t.me/share/url``), or ``None``.
+def setchat_picker_keyboard() -> "ReplyKeyboardMarkup":
+    """Telegram's **own** channel chooser, opened by one reply-keyboard tap.
 
-    Tapping it opens Telegram's own share sheet; the user picks the channel and
-    the deep link is posted there.  The bot is an admin in that channel, so it
-    sees the message, learns which channel this is and never needs a saved
-    message, an invite link or a forwarded post.
+    The button carries ``request_chat``; Telegram then shows the account's
+    channel list and hands the chosen chat straight back to the bot in
+    ``message.chat_shared``.  Nothing is pasted and nothing is posted inside
+    the channel — which is exactly why this replaced the old share-sheet deep
+    link, whose whole mechanism was "post a link into the channel".
+
+    The rights are declared up front so the chooser only lists channels where
+    the bot may already be promoted to a posting admin, and the pick is limited
+    to one chat.
     """
-    if not share_url:
-        return None
-    return share_url_button("📤 Send to my channel", share_url,
-                            "Channel setup for the extraction bot", "success")
+    if KeyboardButton is None or KeyboardButtonRequestChat is None:
+        return None                      # pragma: no cover - legacy pyrogram
+    from config import CHANNEL_PICKER_BUTTON_ID
+    chooser = KeyboardButton(
+        text="📡 Pick my channel",
+        request_chat=KeyboardButtonRequestChat(
+            button_id=CHANNEL_PICKER_BUTTON_ID,
+            chat_is_channel=True,
+            chat_has_username=None,          # private channels are the point
+            bot_is_member=True,              # only chats the bot is already in
+            request_title=True,
+            request_username=True,
+            request_photo=True,
+            max_quantity=1,
+            user_administrator_rights=ChatAdministratorRights(
+                is_anonymous=False, can_post_messages=True),
+            bot_administrator_rights=ChatAdministratorRights(
+                is_anonymous=False, can_post_messages=True),
+        ),
+    )
+    return ReplyKeyboardMarkup(
+        [[chooser]],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+        placeholder="Tap to choose your channel",
+    )
+
+
+def remove_keyboard():
+    """Take the reply keyboard back off the screen after a pick."""
+    from pyrogram.types import ReplyKeyboardRemove
+    return ReplyKeyboardRemove()
 
 
 def setchat_share_prompt_keyboard(share_url: str | None = None) -> InlineKeyboardMarkup:
-    """Share-sheet button + cancel.  Cancel exists on every single step."""
+    """Cancel only — the picker is a reply keyboard, so it cannot share a message.
+
+    ``share_url`` is accepted and deliberately ignored: Round 14 stopped
+    posting a deep link *into* the channel, because that is what made the
+    channel dirty and is no longer how a channel is handed over.
+    """
     return keyboard([
-        [setchat_share_button(share_url)],
         [button("❌ Cancel", callback_data="cancel_action", style="danger")],
     ])
 
 
 def setchat_share_prompt_text() -> str:
-    """Two one-tap ways in: the share sheet button, or a message link."""
+    """The **fallback** copy: type a link, @username or numeric id yourself."""
     from config import MAX_USER_CHANNELS
     return (
         "📡 **SHARE THE CHANNEL**\n\n"
-        "Two ways to register a private channel — pick whichever works for you:\n\n"
-        "1️⃣ **Tap 📤 Send to my channel** below. Telegram's share sheet opens, you "
-        "pick the channel and send. I read that message there and know exactly "
-        "which channel this is.\n"
-        "2️⃣ **Paste a message link** from the channel here (the *Copy Link* "
-        "action on any post).\n\n"
+        "Two ways to register a channel — pick whichever works for you:\n\n"
+        "1️⃣ **Tap 📡 Pick my channel** on the keyboard below. Telegram's own "
+        "channel chooser opens, you tap the channel once and I receive it "
+        "directly — nothing is pasted and nothing is posted inside it.\n"
+        "2️⃣ **Type it instead**: a message link (*Copy Link* on any post), an "
+        "`@username`, or the numeric channel id.\n\n"
         "Add me as an admin with **Post Messages** first — I can only read the "
         "channel when I am in it. Nothing is switched on until both checks pass:\n"
         "**you** administer the channel and **I** may post in it.\n\n"
         f"Each account may keep up to {int(MAX_USER_CHANNELS)} channels connected. "
         "Use /cancel to stop."
+    )
+
+
+def setchat_picker_text() -> str:
+    """How to select a channel — written out, step by step, on the picker screen.
+
+    Round 14 requirement: the owner must never have to guess how the chooser
+    works, so every step (promote the bot, then tap, then pick) is spelled out
+    here and the list is explained before it is opened.
+    """
+    return (
+        "📡 **PICK YOUR CHANNEL**\n\n"
+        "**How to select it — three steps:**\n\n"
+        "1️⃣ Open the channel → **Administrators** → **Add Admin** → add this "
+        "bot → switch **Post Messages** ON (and **Pin Messages** if you want "
+        "/pin to work there).\n"
+        "2️⃣ Come back here and tap **📡 Pick my channel** on the keyboard "
+        "below. Telegram's own channel list opens.\n"
+        "3️⃣ Scroll to your channel and **tap it once**. The choice arrives "
+        "here by itself.\n\n"
+        "Only channels where I am already an admin are listed — if yours is "
+        "missing, step 1 was not finished. Nothing is posted inside your "
+        "channel and no link is ever pasted.\n\n"
+        "Prefer typing? Send me a message link, an `@username` or the numeric "
+        "channel id instead. Use /cancel to stop."
+    )
+
+
+def setchat_share_link_in_channel_text() -> str:
+    """Round 14 — a setchat deep link was posted *inside* a channel.
+
+    That link used to be the registration proof, and posting it is exactly what
+    the new flow stops doing: a channel should never receive a bot link.  The
+    owner is therefore sent here, to their private chat, and given the picker.
+    """
+    return (
+        "📡 **Use the channel picker instead**\n\n"
+        "A setup link was posted inside one of your channels. I did not read "
+        "the channel off it and I did not answer in the channel — nothing was "
+        "registered from it.\n\n"
+        "Channels are now handed over with Telegram's own chooser, so nothing "
+        "is ever posted inside them:\n\n"
+        "1️⃣ Tap **📡 Pick my channel** on the keyboard below.\n"
+        "2️⃣ Pick the channel in Telegram's list.\n"
+        "3️⃣ I verify it and connect it.\n\n"
+        "You can also send /setchat and type a link, an `@username` or the "
+        "numeric channel id."
     )
 
 
@@ -2804,12 +2896,14 @@ def payment_proof_saved_text() -> str:
 def pin_usage_text() -> str:
     return (
         "📌 **PIN A MESSAGE**\n\n"
-        "Three ways to tell me what to pin:\n"
-        "• **Reply** to any message with /pin\n"
-        "• Send `/pin <message link>`\n"
-        "• Post `/pin <message id>` **inside** the channel itself\n\n"
-        "I pin it in this chat, or in your dump channel when you send /pin here "
-        "in private. Use /pinned to remove the live pin again."
+        "Three ways to tell me what to pin, and where it lands:\n\n"
+        "• **Reply** to any message with /pin — it is pinned **right there**, "
+        "in the chat you are typing in.\n"
+        "• Send `/pin <message link>` — I open the chat the link names and pin "
+        "that exact message in it.\n"
+        "• Send `/pin <message id>` — pinned in the chat you are typing in, or "
+        "in your dump channel when you send it here in private.\n\n"
+        "Use /pinned to remove the live pin again."
     )
 
 
@@ -2827,20 +2921,57 @@ def pin_done_text(chat_title: str, msg_id) -> str:
             "Pinned messages stay at the top of the chat for everyone. "
             "Send /pinned to remove it.")
 
+#: Plain English for every way a pin can be refused.  Round 14 made these
+#: distinct on purpose: "pin failed" told the owner nothing, while each of
+#: these names the one thing that has to change.
+PIN_FAILED_TEXTS = {
+    "already_pinned": (
+        "📌 **Already pinned**\n\n"
+        "That exact message is the live pin in that chat right now, so there is "
+        "nothing to do. Send /pinned to remove it first if you want it gone."
+    ),
+    "no_rights": (
+        "⚠️ **I cannot pin here**\n\n"
+        "Telegram's **Pin Messages** right is missing in that chat.\n\n"
+        "👉 Add the bot as an admin with **Pin Messages** enabled and try "
+        "again. Nothing was pinned."
+    ),
+    "no_access": (
+        "🔒 **I cannot reach that chat**\n\n"
+        "Telegram would not let me open it, so I can neither read its messages "
+        "nor pin anything there.\n\n"
+        "👉 Make sure I am still a member of the channel with **Pin Messages** "
+        "on, then try again. Nothing was pinned."
+    ),
+    "floodwait": (
+        "⏳ **Telegram asked me to slow down**\n\n"
+        "I paused for the number of seconds Telegram asked for and stopped "
+        "there — hammering on would only earn a longer restriction.\n\n"
+        "👉 Send /pin again in a moment. Nothing was pinned yet."
+    ),
+    "not_found": (
+        "❌ **I could not find that message**\n\n"
+        "Check that the link belongs to the chat you are pinning in (or to your "
+        "dump channel) and that I can still read it. Nothing was pinned.\n\n"
+        "👉 Try the link again, or open the post and reply to it with /pin."
+    ),
+    "no_target": (
+        "📌 **Nothing to pin**\n\n"
+        "Reply to a message with /pin, send `/pin <message link>`, or connect a "
+        "dump channel with /setdump and try again.\n\n"
+        "👉 Send /pin on its own to see all three ways."
+    ),
+}
+
 
 def pin_failed_text(reason: str = "error") -> str:
-    if reason == "not_found":
-        return ("❌ **I could not find that message**\n\n"
-                "Check that the link belongs to this chat (or to your dump "
-                "channel) and that I can still read it. Nothing was pinned.")
-    if reason == "no_rights":
-        return ("⚠️ **I cannot pin here**\n\n"
-                "Telegram's **Pin Messages** right is missing in that chat.\n\n"
-                "👉 Add the bot as an admin with **Pin Messages** enabled and try "
-                "again. Nothing was pinned.")
-    return ("❌ **Pinning failed**\n\n"
-            "Telegram did not accept the pin this time. Try again in a moment — "
-            "nothing was pinned.")
+    if reason in PIN_FAILED_TEXTS:
+        return PIN_FAILED_TEXTS[reason]
+    return (
+        "❌ **Pinning failed**\n\n"
+        "Telegram did not accept the pin this time. Try again in a moment — "
+        "nothing was pinned."
+    )
 
 
 def pinned_none_text(chat_title: str) -> str:
@@ -3298,6 +3429,61 @@ def giveaway_public_keyboard(link: str | None) -> InlineKeyboardMarkup:
     return keyboard(rows) if rows else keyboard([])
 
 
+#: Round 14 — the giveaway fan-out.  Every user receives this in their DM the
+#: moment the giveaway goes live, and the owner receives a delivery report
+#: once the whole fan-out has finished.
+def giveaway_broadcast_text(gw) -> str:
+    """The DM every user gets the instant a giveaway starts."""
+    return (
+        "🎁 **A giveaway just started!**\n\n"
+        f"🏆 **Prize:** {giveaway_prize_label(gw.get('prize_tier'), gw.get('prize_days'))}\n"
+        f"✨ {gw.get('benefit') or ''}\n"
+        f"⏳ **Draw:** {giveaway_when(gw.get('ends_at'))}\n\n"
+        "Tap **Participate** below to take part — one tap, one entry, and the "
+        "winner is drawn randomly when the timer runs out.\n\n"
+        "Good luck! 🍀"
+    )
+
+
+def giveaway_broadcast_keyboard(link: str | None) -> InlineKeyboardMarkup:
+    """Participate + copy, same as the public message (label budget respected)."""
+    return giveaway_public_keyboard(link)
+
+
+def giveaway_broadcast_started_text(total: int) -> str:
+    return (
+        "📣 **Announcing the giveaway**\n\n"
+        f"The message is pinned and I am now delivering it to **{int(total)}** "
+        "users in their private chats. This runs in the background — I will "
+        "send you a delivery report as soon as the last one is done.\n\n"
+        "Telegram rate limits are respected, so a large list takes a while."
+    )
+
+
+def giveaway_broadcast_report_text(report: dict) -> str:
+    """The owner's delivery report for one fan-out."""
+    lines = [
+        "📣 **Giveaway delivery report**\n",
+        f"👥 Users on the list: **{int(report.get('total', 0))}**",
+        f"✅ Delivered: **{int(report.get('sent', 0))}**",
+    ]
+    failed = int(report.get("failed", 0))
+    blocked = int(report.get("blocked", 0))
+    paused = int(report.get("paused", 0))
+    if failed:
+        lines.append(f"⚠️ Could not deliver: **{failed}**")
+    if blocked:
+        lines.append(f"🚫 Never started the bot: **{blocked}**")
+    if paused:
+        lines.append(f"⏳ Skipped after rate limits: **{paused}**")
+    wait = float(report.get("wait_seconds", 0.0) or 0.0)
+    if wait:
+        lines.append(f"⏱ Time spent waiting on Telegram: **{wait:.0f}s**")
+    lines.append("")
+    lines.append("The giveaway message itself stays pinned in the channel.")
+    return "\n".join(lines)
+
+
 def giveaway_joined_text(name: str, gw, count: int) -> str:
     return (
         "🎉 **You are in the draw!**\n\n"
@@ -3458,15 +3644,18 @@ def native_engine_keyboard() -> InlineKeyboardMarkup:
 # --------------------------------------------------------------------------- #
 
 def setchat_deep_link_private_text() -> str:
+    """Round 14 — a setchat link that came back to the bot in a private chat.
+
+    The link no longer registers anything and no longer belongs in a channel,
+    so the screen simply opens the chooser and names the typed fallback.
+    """
     return (
-        "📡 **SHARE THE CHANNEL — ONE TAP**\n\n"
-        "The button below opens Telegram's own share sheet:\n\n"
-        "1️⃣ Tap **📤 Send to my channel**.\n"
-        "2️⃣ Pick the channel you want to connect.\n"
-        "3️⃣ Send.\n\n"
-        "I am an admin in that channel, so I read the message there and know "
-        "exactly which channel it is — no link to copy, nothing to forward, and "
-        "nothing gets written into the channel by me.\n\n"
+        "📡 **PICK YOUR CHANNEL**\n\n"
+        "That setup link is no longer needed — channels are handed over with "
+        "Telegram's own chooser now, so nothing is ever posted inside them.\n\n"
+        "1️⃣ Tap **📡 Pick my channel** on the keyboard below.\n"
+        "2️⃣ Pick the channel in Telegram's list.\n"
+        "3️⃣ I verify it and connect it.\n\n"
         "You can also send me one **message link** from the channel, or its "
         "@username, right here. Use /cancel to stop."
     )
