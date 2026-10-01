@@ -5,7 +5,8 @@ import calendar
 from pymongo.errors import DuplicateKeyError
 from config import (FREE_DAILY_LIMIT, MAX_USER_CHANNELS, REDEEM_PREMIUM_MONTHS,
                     PREMIUM_SOURCE_MANUAL, PREMIUM_SOURCE_REDEEM,
-                    DEFAULT_ENGINE_MODE, ENGINE_PYTHON, ENGINES, GRANT_TIERS)
+                    DEFAULT_ENGINE_MODE, ENGINE_PYTHON, ENGINES, GRANT_TIERS,
+                    GIVEAWAY_SINGLE_ACTIVE)
 
 MONGO_URL = os.environ.get("MONGO_URL")
 
@@ -1188,3 +1189,185 @@ async def get_payments():
     async for row in db["payments"].find({}).sort("date", -1):
         rows.append(row)
     return rows
+
+
+# --------------------------------------------------------------------------- #
+#  Owner dump channel — one global mirror for everything the bot delivers
+#
+#  It lives on a single ``config`` document (``{"type": "dump_channel"}``) so a
+#  read is one query and there is no second source of truth.  The mirror itself
+#  is implemented in main.py: the bot *copies* every delivered message there
+#  (never forwards it, so nothing shows a "Forwarded from" header) and deletes
+#  the copy again after ``config.DUMP_TTL_SECONDS``.
+# --------------------------------------------------------------------------- #
+
+async def set_dump_channel(chat_id, title=None, username=None, kind=None):
+    """Connect (or move) the owner's dump channel."""
+    await config_col.update_one(
+        {"type": "dump_channel"},
+        {"$set": {
+            "chat_id": int(chat_id),
+            "title": title,
+            "username": username,
+            "kind": kind,
+            "added_at": utcnow(),
+        }},
+        upsert=True,
+    )
+    return True
+
+
+async def get_dump_channel():
+    """The connected dump channel as a dict, or ``None``."""
+    row = await config_col.find_one({"type": "dump_channel"})
+    if not row or row.get("chat_id") is None:
+        return None
+    return {
+        "chat_id": int(row["chat_id"]),
+        "title": row.get("title"),
+        "username": row.get("username"),
+        "kind": row.get("kind"),
+        "added_at": row.get("added_at"),
+    }
+
+
+async def delete_dump_channel():
+    result = await config_col.delete_one({"type": "dump_channel"})
+    return bool(getattr(result, "deleted_count", 0))
+
+
+# --------------------------------------------------------------------------- #
+#  Giveaways
+#
+#  One active giveaway at a time (``config.GIVEAWAY_SINGLE_ACTIVE``):
+#      db["giveaway"]             {"_id": "active", ...}   — the giveaway itself
+#      db["giveaway_participants"] {"giveaway_id", "user_id", ...} — one per user
+#
+#  Participants live in their own collection because the count has to stay
+#  cheap (it is refreshed on the pinned message while the giveaway runs) and a
+#  unique index on (giveaway_id, user_id) makes a double tap impossible.
+# --------------------------------------------------------------------------- #
+
+#: Fields a giveaway document may carry; anything else is dropped on write.
+GIVEAWAY_FIELDS = (
+    "token", "status", "prize_tier", "prize_days", "benefit", "ends_at",
+    "created_at", "created_by", "channel_id", "message_id", "last_post_at",
+    "winner", "winner_at", "ended_at", "participant_count",
+)
+
+
+def _clean_giveaway(doc: dict) -> dict:
+    return {key: doc[key] for key in GIVEAWAY_FIELDS if key in doc}
+
+
+async def create_giveaway(doc: dict):
+    """Start the single active giveaway (refuses when one is already running)."""
+    if GIVEAWAY_SINGLE_ACTIVE:
+        existing = await get_active_giveaway()
+        if existing:
+            return False
+    payload = _clean_giveaway(doc)
+    payload["_id"] = "active"
+    payload.setdefault("status", "running")
+    payload.setdefault("created_at", utcnow())
+    payload.setdefault("participant_count", 0)
+    await db["giveaway"].replace_one({"_id": "active"}, payload, upsert=True)
+    return True
+
+
+async def get_active_giveaway():
+    """The running giveaway, or ``None`` when none is live."""
+    row = await db["giveaway"].find_one({"_id": "active"})
+    if not row or row.get("status") != "running":
+        return None
+    return row
+
+
+async def get_last_giveaway():
+    """The most recent giveaway whatever its status (used by /end and history)."""
+    return await db["giveaway"].find_one({"_id": "active"})
+
+
+async def update_giveaway(updates: dict):
+    if not updates:
+        return False
+    result = await db["giveaway"].update_one({"_id": "active"}, {"$set": dict(updates)})
+    return bool(getattr(result, "matched_count", 0))
+
+
+async def finish_giveaway(winner=None, *, status="finished"):
+    """Close the active giveaway, recording the winner when there is one."""
+    updates = {
+        "status": status,
+        "ended_at": utcnow(),
+    }
+    if winner is not None:
+        updates["winner"] = winner
+        updates["winner_at"] = utcnow()
+    result = await db["giveaway"].update_one({"_id": "active"}, {"$set": updates})
+    return bool(getattr(result, "matched_count", 0))
+
+
+async def ensure_giveaway_indexes():
+    """Best-effort unique index so one account can never join twice.
+
+    The explicit existence check in :func:`add_giveaway_participant` is what
+    actually guarantees the rule (it also works on a Mongo-compatible mock that
+    has no indexes); the index only makes the concurrent double-tap cheap.
+    """
+    try:
+        await db["giveaway_participants"].create_index(
+            [("giveaway_id", 1), ("user_id", 1)], unique=True, background=True)
+    except Exception as exc:  # pragma: no cover - depends on the server
+        print(f"[GIVEAWAY INDEX] {exc}", flush=True)
+        return False
+    return True
+
+
+async def add_giveaway_participant(giveaway_id, user_id, name=None, username=None):
+    """Join a giveaway.  ``False`` when this user already joined."""
+    if await is_giveaway_participant(giveaway_id, user_id):
+        return False
+    row = {
+        "giveaway_id": str(giveaway_id),
+        "user_id": int(user_id),
+        "name": name,
+        "username": username,
+        "joined_at": utcnow(),
+    }
+    try:
+        await db["giveaway_participants"].insert_one(row)
+    except DuplicateKeyError:
+        return False
+    await db["giveaway"].update_one({"_id": "active"}, {"$inc": {"participant_count": 1}})
+    return True
+
+
+async def count_giveaway_participants(giveaway_id) -> int:
+    return int(await db["giveaway_participants"].count_documents(
+        {"giveaway_id": str(giveaway_id)}))
+
+
+async def is_giveaway_participant(giveaway_id, user_id) -> bool:
+    row = await db["giveaway_participants"].find_one(
+        {"giveaway_id": str(giveaway_id), "user_id": int(user_id)})
+    return row is not None
+
+
+async def list_giveaway_participants(giveaway_id, skip: int = 0, limit: int = 10):
+    cursor = (db["giveaway_participants"]
+              .find({"giveaway_id": str(giveaway_id)})
+              .sort("joined_at", 1).skip(max(0, int(skip))).limit(max(1, int(limit))))
+    return [row async for row in cursor]
+
+
+async def all_giveaway_participants(giveaway_id):
+    """Every participant — the pool the random draw picks the winner from."""
+    cursor = (db["giveaway_participants"]
+              .find({"giveaway_id": str(giveaway_id)}).sort("joined_at", 1))
+    return [row async for row in cursor]
+
+
+async def clear_giveaway_participants(giveaway_id) -> int:
+    result = await db["giveaway_participants"].delete_many({"giveaway_id": str(giveaway_id)})
+    return int(getattr(result, "deleted_count", 0))

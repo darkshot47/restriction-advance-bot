@@ -338,9 +338,15 @@ def start_keyboard(show_admin: bool = False) -> InlineKeyboardMarkup:
             button("📖 Help", callback_data="cmd_help", style="primary"),
             button("💬 Feedback", callback_data="cmd_feedback", style="primary"),
         ],
-        [
-            button("🌐 Language", callback_data="cmd_language", style="primary"),
-        ] + ([button("🛠 Admins", callback_data="cmd_admin", style="primary")] if show_admin else []),
+        # The owner's row: the giveaway console and the admin panel.  The owner
+        # keeps the language switch in ⚙️ Settings, which is where the menu row
+        # would have sent them anyway — and the keyboard stays inside the
+        # 7-row / 2-button mobile budget (see the presentation tests).
+        ([button("🎁 Start Giveaway", callback_data="cmd_giveaway_panel",
+                 style="success"),
+          button("🛠 Admins", callback_data="cmd_admin", style="primary")]
+         if show_admin else
+         [button("🌐 Language", callback_data="cmd_language", style="primary")]),
         # Red (ButtonStyle.DANGER) footer button — the engine architecture page.
         [models_architecture_button()],
     ]
@@ -440,6 +446,24 @@ def clamp_label(text: str, limit: int = 28) -> str:
     """Keep a button label inside the mobile budget (never drops emojis)."""
     text = text or ""
     return text if len(text) <= limit else text[:limit]
+
+
+def share_url_button(label: str, url: str, text: str | None = None,
+                     style: str | None = "success") -> InlineKeyboardButton | None:
+    """A ``t.me/share/url`` button — Telegram's own share sheet, one tap away.
+
+    Tapping it opens the share sheet: the user picks **any** chat or channel and
+    the payload is posted there.  This is how the bot lets a user hand over a
+    private channel (or invite a friend) without ever pasting a raw link into
+    the conversation, and it is the same primitive ``refer_keyboard`` uses.
+    """
+    from urllib.parse import quote
+    if not url:
+        return None
+    share = f"https://t.me/share/url?url={quote(url, safe='')}"
+    if text:
+        share += f"&text={quote(text, safe='')}"
+    return button(clamp_label(label), url=share, style=style)
 
 
 def fsub_keyboard(items, page: int = 0, verify_label: str | None = None) -> InlineKeyboardMarkup:
@@ -1013,9 +1037,10 @@ def setchat_prompt_text() -> str:
         "Send me the channel or group where you added me as an admin — link, "
         "@username, numeric ID or a private invite link.\n\n"
         "Example: `@mychannel` or `-1001234567890`\n\n"
-        "🔒 **Private channel?** Tap **📡 Share the channel** and forward any one "
-        "of its posts to me instead — that is how I learn its identity without "
-        "you ever pasting an invite link.\n\n"
+        "🔒 **Private channel?** Tap **📡 Share the channel**: one button opens "
+        "Telegram's own share sheet, you pick the channel and send — that tells "
+        "me exactly which channel it is. You can also paste one **message "
+        "link** from it (the *Copy Link* action on any post).\n\n"
         f"Each account may keep up to {int(MAX_USER_CHANNELS)} channels connected. "
         "I verify that **you** administer the channel and that **I** may post in "
         "it before anything is switched on. Use /cancel to stop."
@@ -1035,16 +1060,18 @@ def setchat_admin_ok_text(title: str, *, private: bool = False) -> str:
 
     Round 8 dropped the bare message number — a number says nothing about which
     chat it came from, so the bot now asks for one **content link** from the
-    channel being registered.  A private channel has no public link, so there
-    the user shares (forwards) one post into the bot instead.
+    channel being registered.  Round 12 dropped the forward fallback: a private
+    channel's *Copy Link* action produces a link too, so every channel is
+    verified the same way and no forward is ever requested.
     """
     if private:
         return (
             f"✅ **Admin verified in {title}!**\n\n"
-            "Final step: this is a private channel, so it has no public link.\n\n"
-            "👉 Open the channel, pick any one post, tap **Share** (forward) and send it "
-            "to me here. I read the post it came from and confirm it belongs to this "
-            "channel.\n\n"
+            "Final step: send me **one message link from this channel**.\n\n"
+            "👉 Open the channel, long-press any post, tap **Copy Link** and paste "
+            "that link here — I can read it because I am an admin in that channel.\n\n"
+            "👉 Every Telegram channel supports *Copy Link* on a post, private ones "
+            "included — that link is all I need.\n\n"
             "Use /cancel to stop — nothing is saved until this step passes."
         )
     return (
@@ -1144,7 +1171,7 @@ def setchat_sample_failed_text(reason: str = "unreadable") -> str:
             "❌ **Verification failed**\n\n"
             "I need **one content link from that channel**, not a message number.\n\n"
             "👉 Open the channel, tap a post, choose **Copy Message Link** and paste it "
-            "here. For a private channel, share (forward) one post to me instead. "
+            "here — private channels have that action too. "
             "The setup is still running — nothing was saved."
         )
     return (
@@ -1196,18 +1223,42 @@ def setchat_requester_failed_text(reason: str = "not_admin", title: str | None =
 #:  Round 7 — registering a private channel by sharing it into the bot
 #: ------------------------------------------------------------------------ #:
 
+def setchat_share_button(share_url: str | None):
+    """The one-tap share-sheet button (``t.me/share/url``), or ``None``.
+
+    Tapping it opens Telegram's own share sheet; the user picks the channel and
+    the deep link is posted there.  The bot is an admin in that channel, so it
+    sees the message, learns which channel this is and never needs a saved
+    message, an invite link or a forwarded post.
+    """
+    if not share_url:
+        return None
+    return share_url_button("📤 Send to my channel", share_url,
+                            "Channel setup for the extraction bot", "success")
+
+
+def setchat_share_prompt_keyboard(share_url: str | None = None) -> InlineKeyboardMarkup:
+    """Share-sheet button + cancel.  Cancel exists on every single step."""
+    return keyboard([
+        [setchat_share_button(share_url)],
+        [button("❌ Cancel", callback_data="cancel_action", style="danger")],
+    ])
+
+
 def setchat_share_prompt_text() -> str:
-    """Offered instead of asking for a link a private channel does not have."""
+    """Two one-tap ways in: the share sheet button, or a message link."""
     from config import MAX_USER_CHANNELS
     return (
         "📡 **SHARE THE CHANNEL**\n\n"
-        "A private channel has no public link, so register it by sharing it with me:\n\n"
-        "1️⃣ Open the channel in Telegram.\n"
-        "2️⃣ Pick any one post and tap **Share** (forward).\n"
-        "3️⃣ Send it to me in this chat.\n\n"
-        "I read the channel it came from, store it as a pending registration and "
-        "then verify **your** admin rights and **my** posting rights before anything "
-        "is switched on.\n\n"
+        "Two ways to register a private channel — pick whichever works for you:\n\n"
+        "1️⃣ **Tap 📤 Send to my channel** below. Telegram's share sheet opens, you "
+        "pick the channel and send. I read that message there and know exactly "
+        "which channel this is.\n"
+        "2️⃣ **Paste a message link** from the channel here (the *Copy Link* "
+        "action on any post).\n\n"
+        "Add me as an admin with **Post Messages** first — I can only read the "
+        "channel when I am in it. Nothing is switched on until both checks pass:\n"
+        "**you** administer the channel and **I** may post in it.\n\n"
         f"Each account may keep up to {int(MAX_USER_CHANNELS)} channels connected. "
         "Use /cancel to stop."
     )
@@ -1217,10 +1268,11 @@ def setchat_share_failed_text(reason: str = "not_a_channel") -> str:
     """Plain English for every way a share can fail — never a raw link or id."""
     if reason == "not_received":
         return (
-            "❌ **I did not receive a shared channel**\n\n"
-            "That message was not a forward from a channel.\n\n"
-            "👉 Open the channel, long-press a post, choose **Forward**, pick this bot "
-            "and send it. Or use /cancel to stop."
+            "❌ **That was not a message link**\n\n"
+            "I need one **message link** from the channel — open the channel, "
+            "long-press any post, tap **Copy Link** and send that link here.\n\n"
+            "You can also tap **📤 Send to my channel** above and let Telegram's "
+            "share sheet hand me the channel in one tap. Use /cancel to stop."
         )
     if reason == "cancelled":
         return (
@@ -1231,8 +1283,8 @@ def setchat_share_failed_text(reason: str = "not_a_channel") -> str:
         return (
             "❌ **That is not a channel**\n\n"
             "I can only be connected to a **channel** or a **supergroup**.\n\n"
-            "👉 Forward a post from the channel itself, not from a private chat or a "
-            "basic group."
+            "👉 Send a message link from the channel itself, not from a private "
+            "chat or a basic group."
         )
     if reason == "bot_not_in_chat":
         return (
@@ -2493,13 +2545,13 @@ def channel_slots_full_text(entries) -> str:
         rows.append(f"{index}️⃣ **{title}** — `{chat_id}`")
     listed = "\n".join(rows) or "• your connected channels"
     return "\n".join([
-        f"🚫 **CHANNEL LIMIT REACHED**",
+        "🚫 **CHANNEL LIMIT REACHED**",
         "",
         f"An account may keep **{limit}** channels connected, and yours is full:",
         "",
         listed,
         "",
-        f"👉 Disconnect one of them first, then run /setchat again to add the new "
+        "👉 Disconnect one of them first, then run /setchat again to add the new "
         "channel.",
     ])
 
@@ -2582,6 +2634,17 @@ ADMIN_COMMAND_LABELS = {
     "fsubcheck": "Force Sub Health Check",
     "delchat": "Disconnect a Dump Channel",
     "redeem": "Redeem Points",
+    # Owner tools (pinning, the dump channel, giveaways, the native engine).
+    "pin": "Pin Any Message",
+    "pinned": "Remove the Live Pin",
+    "setdump": "Connect Dump Channel",
+    "deldump": "Disconnect Dump Channel",
+    "dump": "Dump Channel Status",
+    "post": "Post in the Dump Channel",
+    "native": "Native C++ Engine Status",
+    "giveaway": "Giveaway Control",
+    "participants": "Giveaway Participants",
+    "endgiveaway": "End Giveaway & Draw",
 }
 
 #: Emoji shown in front of each command in the panel text.
@@ -2595,7 +2658,9 @@ ADMIN_COMMAND_ICONS = {
     "removeqr": "🗑️", "sendmsg": "✉️", "banlist": "🚫", "feedbacks": "💬",
     "addadmin": "🛡", "removeadmin": "🛡", "adminlist": "🛡", "clearlogs": "🧹",
     "adminhelp": "❓", "fsublabel": "🏷", "fsubcheck": "🩺", "delchat": "🗑️",
-    "redeem": "🎁",
+    "redeem": "🎁", "pin": "📌", "pinned": "📍", "setdump": "🗄", "deldump": "🗑️",
+    "dump": "📊", "post": "📰", "native": "⚡", "giveaway": "🎁",
+    "participants": "👥", "endgiveaway": "🏆",
 }
 
 
@@ -2730,3 +2795,769 @@ def payment_proof_saved_text() -> str:
     return (f"⚠️ **Proof saved, delivery unavailable**\n\n"
             f"Please send your screenshot directly to @{PAYMENT_CONTACT}. "
             "Your proof remains available to the owner in /payments.")
+
+
+# --------------------------------------------------------------------------- #
+#  /pin and /pinned — pin any message, drop the live pin
+# --------------------------------------------------------------------------- #
+
+def pin_usage_text() -> str:
+    return (
+        "📌 **PIN A MESSAGE**\n\n"
+        "Three ways to tell me what to pin:\n"
+        "• **Reply** to any message with /pin\n"
+        "• Send `/pin <message link>`\n"
+        "• Post `/pin <message id>` **inside** the channel itself\n\n"
+        "I pin it in this chat, or in your dump channel when you send /pin here "
+        "in private. Use /pinned to remove the live pin again."
+    )
+
+
+def pin_no_target_text() -> str:
+    return (
+        "📌 **Nothing to pin**\n\n"
+        "Reply to a message with /pin, send `/pin <message link>`, or connect a "
+        "dump channel with /setdump and try again."
+    )
+
+
+def pin_done_text(chat_title: str, msg_id) -> str:
+    return (f"📌 **Pinned in {chat_title}**\n\n"
+            f"Message id: `{msg_id}`\n\n"
+            "Pinned messages stay at the top of the chat for everyone. "
+            "Send /pinned to remove it.")
+
+
+def pin_failed_text(reason: str = "error") -> str:
+    if reason == "not_found":
+        return ("❌ **I could not find that message**\n\n"
+                "Check that the link belongs to this chat (or to your dump "
+                "channel) and that I can still read it. Nothing was pinned.")
+    if reason == "no_rights":
+        return ("⚠️ **I cannot pin here**\n\n"
+                "Telegram's **Pin Messages** right is missing in that chat.\n\n"
+                "👉 Add the bot as an admin with **Pin Messages** enabled and try "
+                "again. Nothing was pinned.")
+    return ("❌ **Pinning failed**\n\n"
+            "Telegram did not accept the pin this time. Try again in a moment — "
+            "nothing was pinned.")
+
+
+def pinned_none_text(chat_title: str) -> str:
+    return (f"📍 **No live pin in {chat_title}**\n\n"
+            "There is no pinned message there right now, so there is nothing to "
+            "remove.")
+
+
+def unpin_done_text(chat_title: str) -> str:
+    return (f"📍 **Live pin removed in {chat_title}**\n\n"
+            "The message is still in the chat — only the pin is gone. "
+            "Send /pin to pin something else.")
+
+
+def pin_offer_text() -> str:
+    return ("📌 **Pin this message?**\n\n"
+            "I can pin the message I just posted so it stays on top of the chat "
+            "for everyone.")
+
+
+def pin_offer_keyboard() -> InlineKeyboardMarkup:
+    return keyboard([
+        [button("📌 Pin it", callback_data="pin_offer:yes", style="success"),
+         button("⏭ Not now", callback_data="pin_offer:no", style="primary")],
+    ])
+
+
+# --------------------------------------------------------------------------- #
+#  Owner dump channel — /setdump
+# --------------------------------------------------------------------------- #
+
+def setdump_share_button(share_url: str | None):
+    if not share_url:
+        return None
+    return share_url_button("📤 Send to my dump channel", share_url,
+                            "Bot dump channel", "success")
+
+
+def setdump_prompt_keyboard(share_url: str | None = None) -> InlineKeyboardMarkup:
+    return keyboard([
+        [setdump_share_button(share_url)],
+        [button("❌ Cancel", callback_data="cancel_action", style="danger")],
+    ])
+
+
+def setdump_prompt_text() -> str:
+    from config import DUMP_TTL_SECONDS
+    minutes = max(1, int(DUMP_TTL_SECONDS) // 60)
+    return (
+        "🗄 **DUMP CHANNEL SETUP**\n\n"
+        "The dump channel is your private mirror: every extraction the bot "
+        "delivers is **copied** there too (never forwarded), so you always see "
+        "exactly what went out — with no *Forwarded from* header and no *edited* "
+        f"tag — and the copy deletes itself after **{minutes} minutes**.\n\n"
+        "Two ways to connect it:\n"
+        "1️⃣ Tap **📤 Send to my dump channel**: Telegram's share sheet opens, you "
+        "pick the channel and send. I add the channel it landed in.\n"
+        "2️⃣ Send me its link, `@username` or numeric id here.\n\n"
+        "I must already be an admin in it. Use /deldump to disconnect and "
+        "/cancel to stop."
+    )
+
+
+def setdump_done_text(title: str, chat_id) -> str:
+    from config import DUMP_TTL_SECONDS
+    minutes = max(1, int(DUMP_TTL_SECONDS) // 60)
+    return (
+        f"✅ **Dump channel connected: {title}**\n\n"
+        "Every extraction the bot delivers is now copied here, and each copy "
+        f"deletes itself after {minutes} minutes. FloodWait pauses are handled "
+        "automatically, so a busy hour can never get the bot restricted.\n\n"
+        "Send /dump for the live status or /deldump to disconnect."
+    )
+
+
+def setdump_removed_text(title: str | None = None) -> str:
+    name = f"**{title}**" if title else "the dump channel"
+    return (f"🗑 **Dump channel disconnected**\n\n"
+            f"I no longer mirror extractions into {name}. "
+            "Send /setdump to connect one again.")
+
+
+def dump_status_text(entry, stats: dict | None = None) -> str:
+    from config import DUMP_TTL_SECONDS, DUMP_COOLDOWN_SECONDS
+    stats = stats or {}
+    if not entry:
+        return ("🗄 **DUMP CHANNEL**\n\n"
+                "No dump channel is connected.\n\n"
+                "👉 Send /setdump to connect the channel where I should mirror "
+                "every delivery. This is the channel that keeps *Forwarded* and "
+                "*edited* tags out of the content you distribute.")
+    title = entry.get("title") or f"chat {entry.get('chat_id')}"
+    username = entry.get("username")
+    lines = [
+        "🗄 **DUMP CHANNEL**",
+        "",
+        f"📌 **{title}**",
+        f"🆔 `{entry.get('chat_id')}`",
+    ]
+    if username:
+        lines.append(f"🔗 @{username}")
+    lines += [
+        f"🧬 **Type:** {entry.get('kind') or 'channel'}",
+        "",
+        f"⏳ **Mirror TTL:** {int(DUMP_TTL_SECONDS)} s "
+        f"({max(1, int(DUMP_TTL_SECONDS) // 60)} min) then the copy deletes itself",
+        f"🐢 **Flood cooldown:** {DUMP_COOLDOWN_SECONDS:g} s between mirror operations",
+        f"📦 **Queued for deletion:** {int(stats.get('pending', 0))}",
+        f"🪞 **Mirrored this run:** {int(stats.get('mirrored', 0))}",
+        f"🗑 **Deleted this run:** {int(stats.get('deleted', 0))}",
+        f"⏸ **FloodWait pauses:** {int(stats.get('pauses', 0))} "
+        f"({int(stats.get('wait_seconds', 0))} s total)",
+        "",
+        "Copies never carry a *Forwarded from* header (the bot copies the "
+        "message instead of forwarding it), and every delete runs through the "
+        "FloodWait governor so a busy channel stays safe.",
+    ]
+    return "\n".join(lines)
+
+
+def dump_status_keyboard(connected: bool) -> InlineKeyboardMarkup:
+    rows = []
+    if connected:
+        rows.append([button("🗑 Disconnect", callback_data="dump:off", style="danger")])
+    else:
+        rows.append([button("🗄 Connect dump channel", callback_data="cmd_setdump",
+                            style="success")])
+    rows.append([home_button()])
+    return keyboard(rows)
+
+
+# --------------------------------------------------------------------------- #
+#  Inline-button wizard — colour + link for any outgoing message
+# --------------------------------------------------------------------------- #
+
+def buttons_offer_text(preview: str) -> str:
+    body = (
+        " 🎛 **ADD INLINE BUTTONS?**\n\n"
+        "Your message is ready:\n\n"
+        f"┌ {preview}\n\n"
+        "I can attach inline buttons to it. Tell me the **colour** and the "
+        "**link** and I will build them — or skip and send it plain."
+    )
+    return body.lstrip()
+
+
+def buttons_offer_keyboard() -> InlineKeyboardMarkup:
+    return keyboard([
+        [button("✅ Yes, add buttons", callback_data="btnwiz:yes", style="success")],
+        [button("⏭ Send without", callback_data="btnwiz:skip", style="primary")],
+        [button("❌ Cancel everything", callback_data="btnwiz:cancel", style="danger")],
+    ])
+
+
+def button_color_text() -> str:
+    return ("🎨 **BUTTON COLOUR**\n\n"
+            "Pick the colour Telegram should render the button in:\n\n"
+            "🔵 Blue — neutral links\n"
+            "🟢 Green — the main action you want people to take\n"
+            "🔴 Red — a warning, a stop, or a competing offer\n\n"
+            "You can add up to "
+            f"{__import__('config').MAX_MESSAGE_BUTTONS} buttons per message.")
+
+
+def button_color_keyboard() -> InlineKeyboardMarkup:
+    from config import BUTTON_COLORS
+    rows = [[button(spec["label"], callback_data=f"btnwiz:color:{name}",
+                    style=spec["style"])] for name, spec in BUTTON_COLORS.items()]
+    rows.append([button("❌ Cancel everything", callback_data="btnwiz:cancel",
+                        style="danger")])
+    return keyboard(rows)
+
+
+def button_label_text() -> str:
+    from config import MAX_BUTTON_LABEL
+    return ("✍️ **BUTTON TEXT**\n\n"
+            f"Send the label people will see (max {int(MAX_BUTTON_LABEL)} "
+            "characters, emojis welcome).\n\n"
+            "Example: `🎬 Join Now`")
+
+
+def button_label_keyboard() -> InlineKeyboardMarkup:
+    return keyboard([[button("❌ Cancel everything", callback_data="btnwiz:cancel",
+                             style="danger")]])
+
+
+def button_link_text(label: str) -> str:
+    return ("🔗 **BUTTON LINK**\n\n"
+            f"Send the address the **{label}** button should open.\n\n"
+            "Paste it exactly as you copied it — your channel's invite link, a "
+            "channel username, or any website address. I add the missing "
+            "prefix myself if you leave it out.\n\n"
+            "Tap **No link (just text)** if the button only has to look good.")
+
+
+def button_link_keyboard() -> InlineKeyboardMarkup:
+    return keyboard([
+        [button("⏭ No link (just text)", callback_data="btnwiz:link:none",
+                style="primary")],
+        [button("❌ Cancel everything", callback_data="btnwiz:cancel", style="danger")],
+    ])
+
+
+def buttons_summary(buttons) -> str:
+    """One line per button already designed, used by the wizard's review step."""
+    if not buttons:
+        return "• no buttons yet"
+    from config import BUTTON_COLORS
+    lines = []
+    for entry in buttons:
+        color = BUTTON_COLORS.get(entry.get("color"), {}).get("label", entry.get("color"))
+        link = entry.get("url") or "no link"
+        lines.append(f"{color} — **{entry.get('label')}** → `{link}`")
+    return "\n".join(lines)
+
+
+def button_more_text(buttons) -> str:
+    from config import MAX_MESSAGE_BUTTONS
+    remaining = max(0, int(MAX_MESSAGE_BUTTONS) - len(buttons or []))
+    return ("🧩 **BUTTONS SO FAR**\n\n"
+            f"{buttons_summary(buttons)}\n\n"
+            f"You can add {remaining} more, send the message now, or cancel "
+            "everything.")
+
+
+def button_more_keyboard(buttons) -> InlineKeyboardMarkup:
+    from config import MAX_MESSAGE_BUTTONS
+    rows = []
+    if len(buttons or []) < int(MAX_MESSAGE_BUTTONS):
+        rows.append([button("➕ Add another", callback_data="btnwiz:add", style="primary")])
+    rows.append([button("📤 Send it now", callback_data="btnwiz:send", style="success")])
+    rows.append([button("❌ Cancel everything", callback_data="btnwiz:cancel",
+                        style="danger")])
+    return keyboard(rows)
+
+
+def custom_buttons_keyboard(buttons, *, extra_rows=None) -> InlineKeyboardMarkup:
+    """Render the designed buttons (+ optional extra rows) as a real keyboard."""
+    rows = []
+    for entry in buttons or []:
+        built = button(entry.get("label") or "Open",
+                       url=entry.get("url") or None,
+                       callback_data=None if entry.get("url") else "noop",
+                       style=entry.get("style") or "primary")
+        rows.append([built])
+    rows.extend(extra_rows or [])
+    return keyboard(rows)
+
+
+def broadcast_with_buttons_text(prepared: int) -> str:
+    return (f"📢 **Broadcasting to {int(prepared)} users**\n\n"
+            "Messages are personalised and HTML-escaped on the C++ engine's "
+            "thread pool before they go out.")
+
+
+# --------------------------------------------------------------------------- #
+#  Giveaways
+# --------------------------------------------------------------------------- #
+
+def giveaway_prize_label(tier: str, days) -> str:
+    from config import GRANT_TIERS
+    spec = GRANT_TIERS.get(tier or "") or {}
+    number = spec.get("number", "🎁")
+    label = spec.get("label", tier or "Premium")
+    duration = "Lifetime" if days is None else f"{int(days)} days"
+    return f"{number} {label} — {duration}"
+
+
+def giveaway_when(value) -> str:
+    """Format a giveaway deadline (naive UTC) for humans."""
+    if value is None:
+        return "—"
+    try:
+        return value.strftime("%d %b %Y • %H:%M UTC")
+    except AttributeError:  # pragma: no cover - defensive
+        return str(value)
+
+
+def giveaway_panel_text(active, stats: dict | None = None) -> str:
+    stats = stats or {}
+    if not active:
+        return ("🎁 **GIVEAWAY CONTROL**\n\n"
+                "No giveaway is running right now.\n\n"
+                "One giveaway at a time: start it here, and I post it in your "
+                "channel, pin it, refresh the live participant count, re-post it "
+                "once a day and draw the random winner when the timer runs out.\n\n"
+                "👉 Tap **🎁 New giveaway** to begin.")
+    lines = [
+        "🎁 **GIVEAWAY CONTROL**",
+        "",
+        f"🎯 **Prize:** {giveaway_prize_label(active.get('prize_tier'), active.get('prize_days'))}",
+        f"✨ **What they get:** {active.get('benefit') or '—'}",
+        f"⏰ **Ends / winner announced:** {giveaway_when(active.get('ends_at'))}",
+        f"👥 **Participants:** {int(stats.get('participants', 0))}",
+        f"📰 **Channel:** {stats.get('channel') or 'not posted in a channel'}",
+        f"📌 **Pinned message:** {stats.get('message') or '—'}",
+        f"🔁 **Daily re-post:** every {int(stats.get('daily_hours', 24))} h",
+        f"🕒 **Last re-post:** {stats.get('last_post') or 'just now'}",
+        "",
+        "The participant count on the pinned message updates live while the "
+        "giveaway runs, and the winner is drawn randomly from everyone who "
+        "joined — never by hand.",
+    ]
+    return "\n".join(lines)
+
+
+def giveaway_panel_keyboard(active) -> InlineKeyboardMarkup:
+    rows = []
+    if active:
+        rows.append([button("👥 Participants", callback_data="gw:list:0", style="primary"),
+                     button("🛑 End now", callback_data="gw:end", style="danger")])
+        rows.append([button("📤 Invite link", callback_data="gw:link", style="success")])
+    else:
+        rows.append([button("🎁 New giveaway", callback_data="gw:new", style="success")])
+    rows.append([home_button()])
+    return keyboard(rows)
+
+
+def giveaway_step_tier_text() -> str:
+    return ("🎁 **NEW GIVEAWAY • STEP 1/5**\n\n"
+            "What is the prize? Pick the premium tier the winner receives.\n\n"
+            "The tier decides exactly which features are unlocked and is granted "
+            "with the full duration you choose in the next step.")
+
+
+def giveaway_step_duration_text(tier_label: str) -> str:
+    return (f"🎁 **NEW GIVEAWAY • STEP 2/5**\n\n"
+            f"Prize tier: **{tier_label}**\n\n"
+            "How long should the winner's premium last?")
+
+
+def giveaway_step_benefit_text() -> str:
+    from config import GIVEAWAY_BENEFIT_SUGGESTIONS, GIVEAWAY_MAX_BENEFIT_CHARS
+    suggestions = "\n".join(f"• {line}" for line in GIVEAWAY_BENEFIT_SUGGESTIONS)
+    return ("🎁 **NEW GIVEAWAY • STEP 3/5**\n\n"
+            "Type the **benefit line** that is shown in the public giveaway "
+            "message — the clear reason to join.\n\n"
+            f"Max {int(GIVEAWAY_MAX_BENEFIT_CHARS)} characters. Suggestions:\n"
+            f"{suggestions}\n\n"
+            "Tap a suggestion below to use it as it is.")
+
+
+def giveaway_step_benefit_keyboard() -> InlineKeyboardMarkup:
+    from config import GIVEAWAY_BENEFIT_SUGGESTIONS
+    rows = []
+    for index, _ in enumerate(GIVEAWAY_BENEFIT_SUGGESTIONS):
+        rows.append([button(f"💡 Suggestion {index + 1}",
+                            callback_data=f"gw:benefit:{index}", style="primary")])
+    rows.append([button("❌ Cancel everything", callback_data="btnwiz:cancel",
+                        style="danger")])
+    return keyboard(rows)
+
+
+def giveaway_step_end_text() -> str:
+    from config import GIVEAWAY_MAX_DAYS
+    return ("🎁 **NEW GIVEAWAY • STEP 4/5**\n\n"
+            "When does it end? That is also the moment the random winner is "
+            "announced.\n\n"
+            "Type a duration (`6h`, `3d`, `2w`) or an exact UTC date and time "
+            f"(`2026-11-01 20:00`). Maximum {int(GIVEAWAY_MAX_DAYS)} days.\n\n"
+            "The countdown is shown in the giveaway message and re-posted daily.")
+
+
+def giveaway_step_end_keyboard() -> InlineKeyboardMarkup:
+    return keyboard([
+        [button("⚡ 1 day", callback_data="gw:end:1d", style="primary"),
+         button("📅 3 days", callback_data="gw:end:3d", style="primary")],
+        [button("🗓 1 week", callback_data="gw:end:7d", style="primary"),
+         button("📆 2 weeks", callback_data="gw:end:14d", style="primary")],
+        [button("❌ Cancel everything", callback_data="btnwiz:cancel", style="danger")],
+    ])
+
+
+def giveaway_step_channel_text(entries) -> str:
+    listed = "\n".join(
+        f"{index}️⃣ {entry.get('title') or entry.get('chat_id')}"
+        for index, entry in enumerate(entries or [], start=1))
+    body = listed or "• no channel connected yet"
+    return ("🎁 **NEW GIVEAWAY • STEP 5/5**\n\n"
+            "Where should I publish it? Pick a connected channel — I post the "
+            "message there, pin it and keep the participant count updated on "
+            "that pinned copy.\n\n"
+            f"{body}\n\n"
+            "No channel? Tap **Post in the bot only** and participants join "
+            "through the link you share yourself.")
+
+
+def giveaway_step_channel_keyboard(entries) -> InlineKeyboardMarkup:
+    rows = []
+    for index, entry in enumerate(entries or [], start=1):
+        rows.append([button(f"{index}️⃣ {clamp_label(entry.get('title') or 'Channel')}",
+                            callback_data=f"gw:channel:{index}", style="primary")])
+    rows.append([button("💬 Post in the bot only", callback_data="gw:channel:none",
+                        style="success")])
+    rows.append([button("❌ Cancel everything", callback_data="btnwiz:cancel",
+                        style="danger")])
+    return keyboard(rows)
+
+
+def giveaway_share_button(link: str):
+    return share_url_button("📤 Share giveaway", link,
+                            "Join the giveaway — one tap to take part!", "success")
+
+
+def giveaway_created_text(gw, participants: int = 0) -> str:
+    channel = "your channel" if gw.get("channel_id") else "the bot only"
+    return (
+        "🎉 **GIVEAWAY IS LIVE**\n\n"
+        f"🎯 **Prize:** {giveaway_prize_label(gw.get('prize_tier'), gw.get('prize_days'))}\n"
+        f"✨ **Benefit:** {gw.get('benefit')}\n"
+        f"⏰ **Ends:** {giveaway_when(gw.get('ends_at'))}\n"
+        f"📰 **Published in:** {channel}\n\n"
+        "The message is pinned where it was posted, the participant count on it "
+        "updates live, and it is re-posted once a day until the timer runs out. "
+        "At the end I draw a random winner from every participant and grant the "
+        "prize automatically.\n\n"
+        "Share the button below so people can join with one tap."
+    )
+
+
+def giveaway_created_keyboard(link: str | None) -> InlineKeyboardMarkup:
+    rows = [[giveaway_share_button(link)]] if link else []
+    rows.append([button("👥 Participants", callback_data="gw:list:0", style="primary"),
+                 button("🛑 End now", callback_data="gw:end", style="danger")])
+    return keyboard(rows)
+
+
+def giveaway_public_text(gw, participants: int, *, ends_label: str | None = None) -> str:
+    prize = giveaway_prize_label(gw.get("prize_tier"), gw.get("prize_days"))
+    lines = [
+        "🎁 **GIVEAWAY**",
+        "",
+        f"🏆 **Prize:** {prize}",
+        f"✨ **What you get:** {gw.get('benefit') or 'Premium access'}",
+        "",
+        f"👥 **Participants:** {int(participants)}",
+        f"⏳ **Ends:** {ends_label or giveaway_when(gw.get('ends_at'))}",
+        "",
+        "How it works:",
+        "1️⃣ Tap **🎉 Participate** below — one tap, nothing to fill in.",
+        "2️⃣ You are in the draw immediately (the count above goes up live).",
+        "3️⃣ At the end time a **random** participant is picked and the winner "
+        "is announced right here and granted the prize automatically.",
+        "",
+        "Everyone can join once. Good luck!",
+    ]
+    return "\n".join(lines)
+
+
+def giveaway_public_keyboard(link: str | None) -> InlineKeyboardMarkup:
+    rows = []
+    if link:
+        rows.append([button("🎉 Participate", url=link, style="success")])
+        rows.append([button("📋 Copy link", copy_text=link, style="primary")])
+    return keyboard(rows) if rows else keyboard([])
+
+
+def giveaway_joined_text(name: str, gw, count: int) -> str:
+    return (
+        "🎉 **You are in the draw!**\n\n"
+        f"👤 {name}\n"
+        f"🏆 **Prize:** {giveaway_prize_label(gw.get('prize_tier'), gw.get('prize_days'))}\n"
+        f"✨ {gw.get('benefit') or ''}\n"
+        f"👥 You are participant **#{int(count)}**\n"
+        f"⏳ Draw: {giveaway_when(gw.get('ends_at'))}\n\n"
+        "I will message you here if you win — and the winner is picked "
+        "randomly, so every single participant has the same chance."
+    )
+
+
+def giveaway_already_joined_text(count: int) -> str:
+    return ("☑️ **You already joined this giveaway**\n\n"
+            f"👥 Participants so far: **{int(count)}**\n\n"
+            "Each account joins once, so your place in the draw is safe.")
+
+
+def giveaway_none_text() -> str:
+    return ("🎁 **No giveaway is running**\n\n"
+            "There is nothing to join right now. Watch this chat — the next "
+            "giveaway is announced here.")
+
+
+def giveaway_closed_text() -> str:
+    return ("🔒 **This giveaway has ended**\n\n"
+            "The winner has been drawn and announced. Stay tuned for the next "
+            "one!")
+
+
+def giveaway_participants_text(rows, page: int, pages: int, total: int) -> str:
+    lines = [
+        "👥 **GIVEAWAY PARTICIPANTS**",
+        "",
+        f"🔢 **Total joined:** {int(total)}",
+        f"📄 Page {int(page) + 1}/{int(pages)}",
+        "",
+    ]
+    if not rows:
+        lines.append("Nobody has joined yet — share the invite link the giveaway "
+                     "panel gives you.")
+    for index, row in enumerate(rows, start=1 + int(page) * 10):
+        handle = f"@{row['username']}" if row.get("username") else "no username"
+        lines.append(f"{index}. {row.get('name') or 'User'} — {handle} · "
+                     f"`{row.get('user_id')}`")
+    lines += ["", "🎲 The winner is drawn at random from this exact list."]
+    return "\n".join(lines)
+
+
+def giveaway_participants_keyboard(page: int, pages: int) -> InlineKeyboardMarkup:
+    rows = []
+    if pages > 1:
+        rows.append([
+            button("⬅️ Previous", callback_data=f"gw:list:{(page - 1) % pages}",
+                   style="primary"),
+            button("Next ➡️", callback_data=f"gw:list:{(page + 1) % pages}",
+                   style="primary"),
+        ])
+    rows.append([button("🛑 End now", callback_data="gw:end", style="danger")])
+    rows.append([button("🎁 Panel", callback_data="cmd_giveaway", style="primary")])
+    return keyboard(rows)
+
+
+def giveaway_finished_text(winner_label: str | None, prize: str, total: int) -> str:
+    if winner_label is None:
+        return ("🎁 **GIVEAWAY CLOSED**\n\n"
+                "The timer ran out but nobody joined, so there is no winner this "
+                "time. The prize stays with the owner.")
+    return ("🏆 **GIVEAWAY WINNER ANNOUNCED**\n\n"
+            f"🎉 **{winner_label}**\n"
+            f"🏆 **Prize:** {prize}\n"
+            f"👥 Drawn from **{int(total)}** participants\n\n"
+            "The winner was picked randomly and the prize is being granted "
+            "automatically. Congratulations!")
+
+
+def giveaway_winner_dm_text(prize: str) -> str:
+    return ("🎉 **YOU WON THE GIVEAWAY!**\n\n"
+            f"🏆 **Prize:** {prize}\n\n"
+            "Your premium has been granted automatically — open /premium or "
+            "/models to see your access. Congratulations, and thank you for "
+            "taking part!")
+
+
+def giveaway_owner_ended_text(winner_label: str | None, total: int, granted: bool) -> str:
+    if winner_label is None:
+        return ("🛑 **Giveaway closed by hand**\n\n"
+                "Nobody had joined, so no winner was drawn.")
+    state = "granted" if granted else "recorded — grant it with /addpremium"
+    return ("🛑 **Giveaway closed by hand**\n\n"
+            f"🏆 Winner: **{winner_label}**\n"
+            f"👥 Participants: {int(total)}\n"
+            f"💎 Prize: {state}.")
+
+
+def giveaway_ending_soon_text(minutes: int) -> str:
+    return ("⏳ **Giveaway ending soon**\n\n"
+            f"Only {int(minutes)} minutes left to join the giveaway. "
+            "Tap the participate button to be in the random draw.")
+
+
+def giveaway_updated_text(participants: int) -> str:
+    return f"👥 **Participants:** {int(participants)}"
+
+
+# --------------------------------------------------------------------------- #
+#  Native C++ engine — /native diagnostics
+# --------------------------------------------------------------------------- #
+
+def native_engine_text(info: dict, bench_ms: float | None = None) -> str:
+    """Status of the compiled engine behind the bot's hot paths."""
+    info = info or {}
+    if info.get("backend") != "native":
+        return (
+            "🐍 **NATIVE ENGINE**\n\n"
+            "The compiled C++ engine is **not loaded**, so the bot is running its "
+            "pure-Python fallback. Everything still works — links are parsed, "
+            "commands classified and FloodWait pauses honoured by the reference "
+            "implementation.\n\n"
+            f"📄 **Why:** {info.get('log') or 'not built'}\n\n"
+            "👉 Install a C++17 compiler (`g++`) and restart, or set a prebuilt "
+            "library path with `NATIVE_ENGINE_LIB`. Forcing the fallback is done "
+            "with `NATIVE_ENGINE=off`."
+        )
+    bench = f"{bench_ms:.2f} ms / 200k ops" if bench_ms is not None else "—"
+    return (
+        "⚡ **NATIVE C++ ENGINE**\n\n"
+        f"🧬 **Version:** {info.get('version')}\n"
+        f"🔧 **Built with:** {info.get('compiler')}\n"
+        f"🧵 **Worker threads:** {int(info.get('threads', 1))}\n"
+        f"✅ **Self-test:** {'passed' if int(info.get('selftest', 0)) == 0 else 'FAILED'}\n"
+        f"📚 **Commands registered:** {int(info.get('commands', 0))}\n"
+        f"⚙️ **Jobs run on the pool:** {int(info.get('tasks', 0))}\n"
+        f"🐢 **Governor keys:** {int(info.get('governor_keys', 0))} "
+        f"({int(info.get('governor_wait_ms', 0))} ms of pauses enforced)\n"
+        f"🚀 **Benchmark:** {bench}\n\n"
+        "**What it runs**\n"
+        "🔗 every message link (`re_parse_link`) — same grammar, in C++\n"
+        "🧠 message classification (`re_scan`): command / links / range\n"
+        "⚙️ the Python Standard speed cap (`re_bucket_charge`)\n"
+        "🐢 the FloodWait governor (`re_gov_*`) for channels and the mirror\n"
+        "🧵 parallel HTML escaping on a real `std::thread` pool\n\n"
+        f"📄 **Library:** `{info.get('library') or 'in process'}`"
+    )
+
+
+def native_engine_keyboard() -> InlineKeyboardMarkup:
+    return keyboard([
+        [button("🔄 Re-run self-test", callback_data="native:selftest", style="success"),
+         button("🧪 Benchmark", callback_data="native:bench", style="primary")],
+        [home_button()],
+    ])
+
+
+# --------------------------------------------------------------------------- #
+#  Deep links, dump setup and the button wizard — the remaining copy
+# --------------------------------------------------------------------------- #
+
+def setchat_deep_link_private_text() -> str:
+    return (
+        "📡 **SHARE THE CHANNEL — ONE TAP**\n\n"
+        "The button below opens Telegram's own share sheet:\n\n"
+        "1️⃣ Tap **📤 Send to my channel**.\n"
+        "2️⃣ Pick the channel you want to connect.\n"
+        "3️⃣ Send.\n\n"
+        "I am an admin in that channel, so I read the message there and know "
+        "exactly which channel it is — no link to copy, nothing to forward, and "
+        "nothing gets written into the channel by me.\n\n"
+        "You can also send me one **message link** from the channel, or its "
+        "@username, right here. Use /cancel to stop."
+    )
+
+
+def setdump_deep_link_private_text() -> str:
+    return (
+        "🗄 **SHARE THE DUMP CHANNEL — ONE TAP**\n\n"
+        "Tap **📤 Send to my dump channel**, pick the channel in Telegram's "
+        "share sheet and send. I add the channel the message landed in.\n\n"
+        "You can also send its link, `@username` or numeric id right here. "
+        "Use /cancel to stop."
+    )
+
+
+def setdump_owner_only_text() -> str:
+    return ("👑 **Owner only**\n\n"
+            "The dump channel mirrors every delivery, so only the owner may "
+            "connect or disconnect it.")
+
+
+def setdump_join_request_text() -> str:
+    return ("⏳ **Join request sent**\n\n"
+            "That chat only accepts members by approval, so I asked to join. "
+            "Once the owner approves me, send /setdump again — nothing is "
+            "connected yet.")
+
+
+def dump_admin_failed_text(reason: str = "not_admin") -> str:
+    base = ("⚠️ **I cannot work with that channel yet**\n\n"
+            "{detail}\n\n"
+            "👉 Make me an administrator with **Post Messages** and **Delete "
+            "Messages** (the mirror deletes its own copies) and send /setdump "
+            "again. Nothing is connected yet.")
+    details = {
+        "not_admin": "I am not an administrator in that chat.",
+        "no_post_rights": "I am an admin there but **Post Messages** is disabled.",
+        "error": "Telegram did not answer the permission check — this is usually "
+                 "temporary, try again in a moment.",
+    }
+    return base.format(detail=details.get(reason, "I could not verify my rights in that chat."))
+
+
+def message_sent_text() -> str:
+    return "📤 **Message sent**\n\nEverything you designed went out exactly as previewed."
+
+
+def message_cancelled_text() -> str:
+    return ("❌ **Cancelled**\n\nNothing was sent — no message, no broadcast, "
+            "no channel post, no pin.")
+
+
+def buttons_preview_text(buttons) -> str:
+    if not buttons:
+        return ""
+    return "🎛 **Buttons attached**\n\n" + buttons_summary(buttons)
+
+
+def button_label_too_long_text(limit: int) -> str:
+    return (f"✍️ **Too long**\n\nA button label may hold at most **{int(limit)}** "
+            "characters so it never gets cut off on a phone. Send a shorter one.")
+
+
+def button_link_invalid_text() -> str:
+    return ("❌ **That is not an address I can use**\n\n"
+            "Paste a normal web address, an invite link or a channel username — "
+            "or tap **No link (just text)**. Nothing has been sent yet, so this "
+            "step is still open.")
+
+
+def giveaway_share_text(link: str) -> str:
+    return ("📤 **SHARE THE GIVEAWAY**\n\n"
+            "The button below opens Telegram's share sheet — pick any chat or "
+            "channel and the invite goes out with one tap:\n\n"
+            "• **📤 Share giveaway** — send it anywhere.\n"
+            "• **📋 Copy link** — paste it wherever you like (a channel post, "
+            "your bio, another bot).\n\n"
+            "Every tap on that link joins the giveaway and the participant "
+            "count on the pinned message goes up live.")
+
+
+def giveaway_days_prompt_text() -> str:
+    return ("🔢 **How many days?**\n\n"
+            "Send the number of days the winner's premium should last "
+            "(for example `45`). The same duration is shown in the giveaway "
+            "message.")
+
+
+def giveaway_end_invalid_text() -> str:
+    from config import GIVEAWAY_MAX_DAYS
+    return ("❌ **I could not read that date**\n\n"
+            "Send a duration like `6h`, `3d` or `2w`, or a full UTC date and "
+            f"time like `2026-11-01 20:00` (max {int(GIVEAWAY_MAX_DAYS)} days "
+            "from now). Nothing was scheduled yet.")

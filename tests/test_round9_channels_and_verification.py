@@ -476,7 +476,7 @@ async def test_both_checks_must_pass(db, fake_bot, press):
 
 
 # --------------------------------------------------------------------------- #
-#  7. Registering a private channel by sharing it
+#  7. Registering a channel with a message link — never a forward
 # --------------------------------------------------------------------------- #
 
 async def test_the_prompt_offers_the_share_path(db, fake_bot):
@@ -487,13 +487,38 @@ async def test_the_prompt_offers_the_share_path(db, fake_bot):
     assert main.pending_action[USER] == "setchat"
 
 
-async def test_sharing_a_private_channel_registers_it(db, fake_bot, press):
+def test_no_screen_ever_asks_the_user_to_forward_a_post():
+    """Round 12: verification is a **message link**, never a forward."""
+    source = open("main.py", encoding="utf-8").read()
+    assert "forwarded_chat_of" not in source
+    for text in (ui.setchat_share_prompt_text(),
+                 ui.setchat_share_failed_text("not_received"),
+                 ui.setchat_share_failed_text("not_a_channel"),
+                 ui.setchat_admin_ok_text("A Channel", private=True),
+                 ui.setchat_sample_failed_text("not_a_link")):
+        assert "forward" not in text.lower(), text
+
+
+def message_link(chat_id, msg_id=7):
+    """The link Telegram's *Copy Link* action produces for a private channel.
+
+    A supergroup id is ``-100<raw>`` and the ``t.me/c/`` link carries ``<raw>``,
+    so the helper turns ``-1001234567890`` back into ``1234567890``.
+    """
+    raw = str(abs(int(chat_id)))
+    if raw.startswith("100"):
+        raw = raw[3:]
+    return f"https://t.me/c/{raw}/{msg_id}"
+
+
+async def test_a_message_link_registers_a_private_channel(db, fake_bot, press):
     await db.add_user(USER, "Tester")
     private_id = -1001234567890
     bot_is_admin(private_id)
     grant(ADMIN, chat_id=private_id)
     fake_bot.chats[private_id] = SimpleNamespace(
         id=private_id, title="Secret Channel", username=None, type="channel")
+    fake_bot.messages[7] = content_message(7, private_id)
 
     message = FakeMessage(text="/setchat", user=FakeUser(USER))
     await main.setchat_handler(None, message)
@@ -501,57 +526,38 @@ async def test_sharing_a_private_channel_registers_it(db, fake_bot, press):
     assert main.pending_action[USER] == "setchat_share"
     assert sc("Share the channel") in message.shown_text
 
-    #: The user forwards one post from the private channel.
-    share = shared_post(private_id, "Secret Channel")
-    await main.text_handler(None, share)
+    link = FakeMessage(text=message_link(private_id), user=FakeUser(USER))
+    await main.text_handler(None, link)
 
-    pending = main.setchat_pending[USER]
-    assert pending["chat_id"] == private_id
-    assert pending["step"] == "await_sample"
-    assert sc("Admin verified") in share.shown_text
-    #: A private channel has no link, so step 3 asks for another share.
-    assert sc("share") in share.shown_text.lower()
-    #: Nothing is stored until the content step passes.
-    assert await db.get_user_channels(USER) == []
-    #: No invite link and no raw chat id ever reach the conversation.
-    for entry in share.replies + share.edits:
-        assert "t.me/" not in entry["text"]
-        assert str(private_id) not in entry["text"]
-
-    second = shared_post(private_id, "Secret Channel")
-    await main.text_handler(None, second)
-    assert sc("Channel dump enabled") in second.shown_text
-    assert await db.get_user_chat(USER) == {
-        "chat_id": private_id, "title": "Secret Channel", "username": None}
+    assert sc("Channel dump enabled") in link.shown_text
+    stored = await db.get_user_channels(USER)
+    assert [entry["chat_id"] for entry in stored] == [private_id]
     assert USER not in main.setchat_pending
+    assert USER not in main.pending_action
+    #: The step itself never prints the link it received or the raw chat id —
+    #: the confirmation screen is the only place the id may appear.
+    ack = link.replies[0]["text"]
+    assert "t.me/" not in ack
+    assert str(private_id) not in ack
 
 
-@pytest.mark.parametrize("reason,text", [
-    ("not_received", "just some text"),
-    ("not_a_channel", "a post from a private chat"),
-])
-async def test_a_share_that_is_not_a_channel_post_is_explained(db, fake_bot, press,
-                                                               reason, text):
+async def test_a_message_that_is_not_a_link_keeps_the_step_open(db, fake_bot, press):
     await db.add_user(USER, "Tester")
     message = FakeMessage(text="/setchat", user=FakeUser(USER))
     await main.setchat_handler(None, message)
     await press(message, "setchat:share")
 
-    share = FakeMessage(text=text, user=FakeUser(USER))
-    if reason == "not_a_channel":
-        #: Forwarded out of a private chat, not a channel.
-        share.forward_from_chat = SimpleNamespace(
-            id=555, title="Someone", username=None, type="private")
+    share = FakeMessage(text="just some text", user=FakeUser(USER))
     await main.text_handler(None, share)
 
-    assert sc("did not receive a shared channel") in share.shown_text \
-        if reason == "not_received" else sc("That is not a channel") in share.shown_text
+    assert sc("That was not a message link") in share.shown_text
+    assert sc("Copy Link") in share.shown_text
     assert main.pending_action[USER] == "setchat_share", "the step stays open"
     assert USER not in main.setchat_pending
     assert await db.get_user_channels(USER) == []
 
 
-async def test_sharing_a_channel_the_bot_is_not_in_is_explained(db, fake_bot, press):
+async def test_a_link_the_bot_is_not_in_is_explained(db, fake_bot, press):
     from pyrogram.errors import ChannelPrivate
     await db.add_user(USER, "Tester")
     message = FakeMessage(text="/setchat", user=FakeUser(USER))
@@ -559,12 +565,12 @@ async def test_sharing_a_channel_the_bot_is_not_in_is_explained(db, fake_bot, pr
     await press(message, "setchat:share")
     fake_bot.get_chat = AsyncMock(side_effect=ChannelPrivate())
 
-    share = shared_post(-100444, "Closed Channel")
+    share = FakeMessage(text=message_link(-100444), user=FakeUser(USER))
     await main.text_handler(None, share)
 
     assert sc("I am not in that channel") in share.shown_text
     assert sc("Add Admin") in share.shown_text
-    assert main.pending_action[USER] == "setchat_share", "share again once added"
+    assert main.pending_action[USER] == "setchat_share", "send the link again once added"
     assert USER not in main.setchat_pending
     assert await db.get_user_channels(USER) == []
 
@@ -576,22 +582,24 @@ async def test_a_channel_the_bot_cannot_see_is_explained(db, fake_bot, press):
     await press(message, "setchat:share")
     fake_bot.get_chat = AsyncMock(side_effect=RuntimeError("no route to telegram"))
 
-    share = shared_post(-100444, "Odd Channel")
+    share = FakeMessage(text=message_link(-100444), user=FakeUser(USER))
     await main.text_handler(None, share)
 
     assert sc("I cannot see that channel") in share.shown_text
     assert await db.get_user_channels(USER) == []
 
 
-async def test_sharing_a_channel_you_do_not_administer_is_refused(db, fake_bot, press):
+async def test_a_channel_you_do_not_administer_is_refused(db, fake_bot, press):
     await db.add_user(USER, "Tester")
     bot_is_admin(-100444)
     grant(MEMBER, chat_id=-100444, can_post_messages=False)
+    fake_bot.chats[-100444] = SimpleNamespace(
+        id=-100444, title="Someone Elses Channel", username=None, type="channel")
     message = FakeMessage(text="/setchat", user=FakeUser(USER))
     await main.setchat_handler(None, message)
     await press(message, "setchat:share")
 
-    share = shared_post(-100444, "Someone Elses Channel")
+    share = FakeMessage(text=message_link(-100444), user=FakeUser(USER))
     await main.text_handler(None, share)
 
     assert sc("Setup cancelled") in share.shown_text
@@ -600,22 +608,63 @@ async def test_sharing_a_channel_you_do_not_administer_is_refused(db, fake_bot, 
     assert await db.get_user_channels(USER) == []
 
 
-async def test_sharing_when_the_bot_has_no_posting_rights_keeps_the_wizard_alive(
-        db, fake_bot, press):
+async def test_no_posting_rights_keeps_the_wizard_alive(db, fake_bot, press):
     await db.add_user(USER, "Tester")
     grant(ADMIN, chat_id=-100444)
     bot_is_admin(-100444, can_post_messages=False)
+    fake_bot.chats[-100444] = SimpleNamespace(
+        id=-100444, title="Muted Channel", username=None, type="channel")
     message = FakeMessage(text="/setchat", user=FakeUser(USER))
     await main.setchat_handler(None, message)
     await press(message, "setchat:share")
 
-    share = shared_post(-100444, "Muted Channel")
+    share = FakeMessage(text=message_link(-100444), user=FakeUser(USER))
     await main.text_handler(None, share)
 
     assert sc("Admin check failed") in share.shown_text
     assert main.setchat_pending[USER]["step"] == "await_check"
     assert "setchat:check" in share.callback_data()
     assert await db.get_user_channels(USER) == []
+
+
+async def test_a_link_the_bot_cannot_read_never_registers_the_channel(db, fake_bot, press):
+    await db.add_user(USER, "Tester")
+    grant(ADMIN, chat_id=-100444)
+    bot_is_admin(-100444)
+    fake_bot.chats[-100444] = SimpleNamespace(
+        id=-100444, title="Empty Channel", username=None, type="channel")
+    message = FakeMessage(text="/setchat", user=FakeUser(USER))
+    await main.setchat_handler(None, message)
+    await press(message, "setchat:share")
+
+    #: The chat resolves, but that post cannot be read back.
+    share = FakeMessage(text=message_link(-100444, 999), user=FakeUser(USER))
+    await main.text_handler(None, share)
+
+    assert sc("cannot see that channel") in share.shown_text
+    assert main.pending_action[USER] == "setchat_share"
+    assert await db.get_user_channels(USER) == []
+
+
+async def test_the_deep_link_registers_the_channel_from_inside_it(db, fake_bot, monkeypatch):
+    """The share-sheet button lands in the channel itself: the bot reads it there."""
+    await db.add_user(USER, "Tester")
+    private_id = -1001234567890
+    bot_is_admin(private_id)
+    grant(ADMIN, chat_id=private_id)
+    fake_bot.chats[private_id] = SimpleNamespace(
+        id=private_id, title="Secret Channel", username=None, type="channel")
+
+    link = main.share_deep_link(USER, "setchat")
+    post = FakeMessage(text=f"Check this channel: {link}", user=FakeUser(USER))
+    post.chat = FakeChat(private_id, chat_type="channel", title="Secret Channel")
+
+    await main.channel_dump_handler(None, post)
+
+    stored = await db.get_user_channels(USER)
+    assert [entry["chat_id"] for entry in stored] == [private_id]
+    #: The channel stays clean — the answer goes to the user's private chat.
+    assert post.replies == []
 
 
 async def test_cancel_leaves_the_share_step(db, fake_bot, press):
@@ -640,10 +689,14 @@ def test_the_bare_number_prompt_is_gone_from_the_ui():
     source = open("ui.py", encoding="utf-8").read()
     assert "just the message number" not in source
     assert "message number (for example" not in source
-    #: The wizard asks for a content link, and offers a share for private chats.
+    #: The wizard asks for a content link — private channels included, and never
+    #: for a forwarded post.
     assert "one content link from this channel" in ui.setchat_admin_ok_text("Chan")
     assert "bare message number is no longer accepted" in ui.setchat_admin_ok_text("Chan")
-    assert "share" in ui.setchat_admin_ok_text("Chan", private=True).lower()
+    private_copy = ui.setchat_admin_ok_text("Chan", private=True)
+    assert "one message link from this channel" in private_copy
+    assert "copy link" in private_copy.lower()
+    assert "forward" not in private_copy.lower()
 
 
 async def test_a_valid_content_link_completes_the_wizard(db, fake_bot, press):
@@ -742,7 +795,8 @@ async def test_a_channel_the_bot_lost_access_to_is_reported_as_such(db, fake_bot
     assert await db.get_user_channels(USER) == []
 
 
-async def test_a_shared_post_verifies_a_private_channel(db, fake_bot, press):
+async def test_a_message_link_verifies_a_private_channel(db, fake_bot, press):
+    """Step 3 for a private channel: paste its *Copy Link*, never a forward."""
     await db.add_user(USER, "Tester")
     private_id = -1001234567890
     bot_is_admin(private_id)
@@ -753,16 +807,17 @@ async def test_a_shared_post_verifies_a_private_channel(db, fake_bot, press):
     message = FakeMessage(text=f"/setchat {private_id}", user=FakeUser(USER))
     await main.setchat_handler(None, message)
     await press(message, "setchat:check")
-    assert sc("share") in message.shown_text.lower()
+    assert sc("message link") in message.shown_text.lower()
 
-    share = shared_post(private_id, "Secret")
-    await main.text_handler(None, share)
-    assert sc("Channel dump enabled") in share.shown_text
+    fake_bot.messages[7] = content_message(7, private_id)
+    link = FakeMessage(text=message_link(private_id), user=FakeUser(USER))
+    await main.text_handler(None, link)
+    assert sc("Channel dump enabled") in link.shown_text
     assert await db.get_user_chat(USER) == {
         "chat_id": private_id, "title": "Secret", "username": None}
 
 
-async def test_a_shared_post_from_the_wrong_channel_is_refused(db, fake_bot, press):
+async def test_a_message_link_from_another_channel_is_refused(db, fake_bot, press):
     await db.add_user(USER, "Tester")
     private_id = -1001234567890
     bot_is_admin(private_id)
@@ -774,8 +829,9 @@ async def test_a_shared_post_from_the_wrong_channel_is_refused(db, fake_bot, pre
     await main.setchat_handler(None, message)
     await press(message, "setchat:check")
 
-    share = shared_post(-100555, "Somewhere Else")
-    await main.text_handler(None, share)
-    assert sc("different chat") in share.shown_text
+    fake_bot.messages[7] = content_message(7, -100555)
+    link = FakeMessage(text=message_link(-100555), user=FakeUser(USER))
+    await main.text_handler(None, link)
+    assert sc("different chat") in link.shown_text
     assert USER in main.setchat_pending
     assert await db.get_user_channels(USER) == []

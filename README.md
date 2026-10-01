@@ -81,6 +81,22 @@ Every command in the panel also appears in the `/admins` list, and every panel b
 | ⚙️ **Python Standard** | single stream, one item at a time in the order sent, buffered download → upload | **~3 MB/s** (`ENGINE_PYTHON_SPEED_LIMIT_MBPS`, token-bucket paced; `0` disables the cap) | free/sample users and anyone without the `models` feature |
 | 🚀 **C++ Turbo** `v2.4` | bounded worker pool (`ENGINE_TURBO_WORKERS`, default **4**) over multi-link, range and channel batches, zero-copy stream piping (files up to `ENGINE_ZERO_COPY_MAX_MB`, default **512 MB**, are handed to the uploader straight from memory), priority routing above `ENGINE_PEAK_THRESHOLD` concurrent extractions | **uncapped** — no throughput limit at all | users whose plan grants `models`, and everybody during a traffic peak or a global C++ lock |
 
+### The native C++ engine (`native/`)
+
+Next to the Turbo pipeline there is a **real, compiled C++ engine** — not a label: `native/restriction_engine.{hpp,cpp}` build into `librestriction_engine.so` (`make -C native`, or `cmake -S native -B native/build`, or let the bot build it on first import) and `native_engine.py` loads it with `ctypes`. It answers on the hot path:
+
+| Entry point | What the C++ does | Where the bot uses it |
+| --- | --- | --- |
+| `re_parse_link` | the whole Telegram message-URL grammar (usernames, `/s/` previews, topics, `t.me/c/…`, invites) | `main.parse_link` — **every** link the bot sees |
+| `re_scan` | one pass over an incoming message: command + command index, link count, private/invite/multi-link/range flags | instant command dispatch without a Python regex |
+| `re_gov_*` | the FloodWait governor (per-key cooldown + penalty, one mutex-guarded table) | dump channels, the owner dump mirror, the giveaway poster |
+| `re_escape_batch` / `re_pool_*` | HTML escaping on a real `std::thread` pool | broadcast personalisation (thousands of copies), mirror captions |
+| `re_bucket_charge` | token-bucket maths for the ⚙️ Python speed cap | `telemetry.SpeedThrottle` |
+
+`/native` (owner) shows the live report — version, compiler, thread count, tasks run, governor waits and a self-test — and the startup log prints the same line. When no compiler is present the bridge falls back to a byte-for-byte equivalent Python implementation, so the bot never breaks; `tests/test_cpp_engine.py` asserts the two backends return **identical** results, which is what makes the swap safe.
+
+> **On the old 2-second reply.** Nothing in front of a reply sleeps: the command path is native parse → the handler's own reads → the Telegram call. Every private message and button press now prints `[LATENCY] … update_lag=…ms` — Telegram stamps each update with its own UTC time, so that line separates a **late update** (network/host/queue) from a **slow handler** (the bot's own work, which is microseconds). The only deliberate wait inside a request is the `ENGINE_START_GAP_SECONDS` spacing between items of a batch.
+
 > **TgCrypto is not a Turbo feature.** The native C cipher is installed for the whole bot, so *both* engines use it on every MTProto chunk and it differentiates nothing. Earlier copy claimed otherwise; the engine pages (`/models`, **🧠 Models Architecture**) now list only what the code really does.
 
 Both differences are real rather than cosmetic, and the test suite measures them: a Turbo batch runs up to four items' slow phases (download + re-upload) at the same time while a Python batch stays strictly sequential in the order sent, a Turbo download asks Kurigram for an in-memory transfer (`download_media(..., in_memory=True)`) whose `BytesIO` is passed straight to `send_video` — no temp file, no re-read — and a Python download is provably paced to ~3 MB/s against a fake clock while a Turbo one sleeps not at all. A single-item request never spawns the pool (there is nothing to overlap), and a file above the zero-copy budget — or an unknown size — keeps the streamed-to-disk path so a multi-GB premium upload can never exhaust RAM.
@@ -175,15 +191,15 @@ Legacy single-channel documents need no migration script: `database.channels_fro
 | public link | `t.me/mychannel`, `t.me/mychannel/15` |
 | private link by id | `t.me/c/1234567890/15` |
 | private invite link | `t.me/+AbCdEf`, `t.me/joinchat/AbCdEf` |
-| **shared post** (private channels) | forward any one post from the channel into the bot |
+| **message link** (private channels) | *Copy Link* on any post → `t.me/c/1234567890/15` |
 
 1. Send the chat in any of those forms — the wizard also accepts the command posted **inside** the channel or group itself. A **private** channel has no link to paste, so the prompt offers a **📡 Share the channel** button instead (see below).
 2. Tap **🔍 Check Admin Status**. Two independent checks must both pass:
    - **You administer the channel** — `bot.get_chat_member(chat_id, your_id)` must report owner/creator/administrator. A plain member, a non-member, or an inconclusive Telegram answer **cancels the wizard** and stores nothing, in plain English and without a stack trace or a leaked link. This deliberately **fails safe**, unlike force-sub which fails open so a Telegram hiccup never locks a user out.
    - **The bot may post there** — the bot must be an administrator with the **Post Messages** permission. Rights are read from `ChatMember.privileges.can_post_messages` (Kurigram `ChatMember` has no `can_post_messages` of its own), and every check logs a `[SETCHAT]` line with the raw status and rights. A failure here keeps the wizard alive so the rights can be fixed and the button pressed again. An expired or invalid invite link, or a chat the bot cannot see, is reported with a friendly reason instead of a crash.
-3. Prove the bot can read the channel with **one real content link from it** — open any post, *Copy Message Link*, paste it. The bot resolves the link, reads the message and confirms it belongs to the channel being registered. **The old "send the message number, e.g. `15`" step is gone**: a bare number says nothing about *which* chat it came from and is now refused with its own explanation. For a **private** channel, where no public link exists, sharing (forwarding) one of its posts is accepted as the equivalent proof. Every failure — unreadable, deleted, wrong chat, bot lost access — names the next step and leaves the wizard open for a retry; nothing is stored until this passes, and the link the user sent is never echoed back.
+3. Prove the bot can read the channel with **one real content link from it** — open any post, *Copy Message Link*, paste it. The bot resolves the link, reads the message and confirms it belongs to the channel being registered. **The old "send the message number, e.g. `15`" step is gone**: a bare number says nothing about *which* chat it came from and is now refused with its own explanation. **Private channels are verified the same way**: every Telegram client offers *Copy Link* on a post, and the `t.me/c/…` link it produces names the chat *and* the post, so no forward is ever requested or accepted. Every failure — unreadable, deleted, wrong chat, bot lost access — names the next step and leaves the wizard open for a retry; nothing is stored until this passes, and the link the user sent is never echoed back.
 
-**Registering a private channel by sharing it.** Tap **📡 Share the channel** and forward any one post from the channel into the bot. The bot reads the chat id and title off the forward, stores it as a **pending** registration, confirms it can open the chat, then runs both verifications above. No invite link and no raw chat id are ever printed into a message — links live only inside `url=` buttons, and ids appear as inline `code` only where the dashboard already shows them. Each failure has its own plain-English copy: share not received, not a channel/supergroup, bot not in the chat, bot cannot see it, you are not an admin.
+**Registering a private channel with one tap.** A private channel has no public link to paste, so the prompt offers **📤 Send to my channel**: that button opens Telegram's own share sheet with `t.me/<bot>?start=ch<token>` — pick the channel, send, done. Because the bot is an admin there it *sees* that message, learns the chat from it and runs both verifications; if the link lands in the bot chat instead, the bot explains the step and re-offers the button. Pasting a message link works identically. Tokens are per-user and expire after `CHANNEL_SHARE_TOKEN_TTL` (default 1 hour), no invite link or raw chat id is ever printed into a message (links live only inside `url=` buttons, ids appear as inline `code` only where the dashboard already shows them) and each failure has its own plain-English copy: not a message link, not a channel/supergroup, bot not in the chat, bot cannot read the post, you are not an admin.
 
 For an approval-only chat (invite requests instead of instant joins) the bot sends a join request, asks the owner of that chat to approve it, stores nothing and keeps the wizard alive so **🔍 Check Admin Status** can be pressed again after the approval.
 
@@ -223,6 +239,83 @@ A registered dump channel is **not** a second bot dashboard. One explicit allow-
 Each channel handler is registered with `filters.private`, and `channel_dump_handler` routes anything that starts with `/` through the allow-list, so a personal command typed in a channel produces literally nothing. The test suite is parametrised over all 67 registered commands: each one answers in a private chat and produces zero replies, edits and sends inside a registered channel.
 
 **Limits hit inside a channel** (daily free quota, too many links in one post, range too large, file too large) reply with a short "limit reached — continue in the bot" notice carrying an inline **🤖 Open bot** `url=` button (`ui.open_bot_keyboard()`). No raw link appears in the body copy and no personal command is advertised from inside the channel — in a private chat the same limits keep their detailed, actionable wording.
+
+## Owner dump channel (`/setdump`, `/deldump`, `/dump`)
+
+Every extraction the bot delivers can be **mirrored into one channel the owner
+controls** — that is how the owner sees exactly what went out, with **no
+*Forwarded from* header and no *edited* tag**, because the mirror uses
+`copy_message`, never `forward`:
+
+* `/setdump` — connect the dump channel. The prompt carries a **📤 Send to my
+  dump channel** share-sheet button (`t.me/<bot>?start=dp<token>`) exactly like
+  `/setchat`; a link, an `@username` or a numeric id works too. The bot must be
+  an admin with **Post Messages** there.
+* `/dump` — live status: the channel, the mirror TTL, the FloodWait cooldown,
+  how many copies are queued for deletion and the counters (mirrored, deleted,
+  pauses, total wait).
+* `/deldump` — disconnect and delete every copy still queued.
+
+Each mirrored copy is deleted after **`DUMP_TTL_SECONDS` (default 600 s = 10
+minutes)**, and every mirror/delete call passes the native FloodWait governor:
+a busy hour pauses the queue (`[DUMP FLOODWAIT]`) instead of getting the bot
+restricted, and the queue is capped at `DUMP_QUEUE_LIMIT` so it cannot grow
+without bound. The mirror never copies the dump channel into itself.
+
+## Pin controls (`/pin`, `/pinned`)
+
+* `/pin` — pins the message you **reply to**, the message behind a **link** you
+  paste (`/pin t.me/yourchannel/88`), or an **id** when the command is posted
+  inside the channel itself. In private it acts on your dump channel when one is
+  connected, otherwise on the current chat. Missing **Pin Messages** rights are
+  reported in plain English, never a traceback.
+* `/pinned` — removes the **live pin** from that same chat (the message stays,
+  only the pin is gone).
+* Pinning is followed by the inline-button offer, so a pinned notice can carry a
+  button in one more step.
+
+## Inline-button wizard
+
+Every owner message that goes **directly to a user**, and every **channel
+post**, now ends with the same question: *🎛 Add inline buttons?* — colour
+(🔵 blue / 🟢 green / 🔴 red) → label → link → *Add another* or *Send it now*,
+with **❌ Cancel everything** on every single step. Nothing is sent until
+*Send*, and `/sendmsg` and `/broadcast` (typed text, or a replied text message)
+both go through it. A label longer than `MAX_BUTTON_LABEL` or an address that is
+not a URL/invite/`@username` keeps the step open with its own explanation. For
+`{name}` broadcasts the per-recipient copies are formatted on the native C++
+thread pool (`native_engine.prepare_broadcast`), so a display name containing
+`<` or `&` can never break the HTML parse mode. After a channel post the bot
+asks whether to **pin** it; Telegram cannot add buttons to a message that is
+already sent, so attaching buttons there re-sends it with the buttons and pins
+the copy.
+
+## Giveaways (`/giveaway`, `/participants`, `/endgiveaway`)
+
+Owner only, one giveaway at a time (`config.GIVEAWAY_SINGLE_ACTIVE`), started
+from **/start → 🎁 Start Giveaway** or `/giveaway` → **🎁 New giveaway**:
+
+| Step | What the owner chooses |
+| --- | --- |
+| 1/5 | the **prize tier** (the same tiers as `/addpremium`) |
+| 2/5 | the **duration** (or a custom number of days) |
+| 3/5 | the **benefit line** shown in the public message (type it, or tap a suggestion) |
+| 4/5 | when it **ends** — `6h`, `3d`, `2w` or an exact UTC date/time |
+| 5/5 | the **channel** to publish in (any connected dump channel), or bot-only |
+
+The public message is posted in that channel, **pinned**, states the prize and
+the benefit line clearly and carries the participate link in a `url=` button
+(`t.me/<bot>?start=gw<token>` — never printed as raw copy). One tap on it joins
+the draw: one entry per account (a unique `(giveaway_id, user_id)` index makes a
+double tap harmless), the joiner gets a DM confirmation, the owner gets a
+participant DM and the **count on the pinned message refreshes immediately**.
+While the giveaway runs the same message is **re-posted once a day** and the
+count keeps refreshing; `/participants` pages through everyone who joined and
+`/endgiveaway` (or **🛑 End now**) draws a **random winner** with
+`random.SystemRandom`, grants the prize automatically, DMs the winner and
+announces them in the channel. When the timer runs out the scheduler draws the
+winner itself. Every post, pin, edit and draw passes the shared FloodWait
+governor.
 
 ## Force subscription (multi-channel, private chats, join requests)
 
@@ -303,12 +396,15 @@ Tests cover command/button compatibility, checkout sequencing, proof metadata an
 
 The newest suite covers the admin-rights fix and the multi force-sub epic: the posting-rights check is asserted against **real `ChatMember` / `ChatAdministratorRights` objects** (including a `hasattr` guard, because a plain fake previously hid that the attribute does not exist on `ChatMember`), the `/setchat` wizard is exercised end to end with a private invite link, an approval-only `InviteRequestSent`, an expired hash, a supergroup, in-channel mode and a shared post as the sample, `join_request_state` is checked for all five outcomes, the **✅ I Joined** button is checked for member, pending-with-auto-approve and not-joined, the join-request handler is checked for storage, the auto-approve DM and the owner-only Approve / Decline buttons, the multi force-sub list is checked for labels, ordering, pagination at twelve entries and deletion, `check_access` is checked for multiple entries with a fail-open on `ChatAdminRequired`, no fsub/setchat screen may contain a link while its keyboard keeps every link inside `url` buttons, and the new commands are checked in the panel, `/admins`, the inline handler map and the command-exclusion list. They do **not** contact Telegram or a live MongoDB instance; verify QR rendering, proof delivery and membership checks with the deployed bot before accepting payments.
 
-Five further suites cover rounds 7-11 on the same in-memory fakes:
+Seven further suites cover rounds 7-12 and the native engine on the same in-memory fakes:
 
 - `tests/test_round7_saved_messages_fix.py` — **the Saved Messages bug**: `resolve_delivery_target` is asserted to return the exact `(client, chat_id)` pair for all four combinations (private chat with a public link, private chat with a private link through the user's own session, channel with a public link, channel with a private link). Private-channel content downloaded through a user session must never be routed to that user's own id; it falls back to a bot upload with identical attribution, while a dump-channel delivery keeps the fast server-side copy.
 - `tests/test_round8_batch_and_speed_cap.py` — **batch parallelism and the Python speed cap**: the shared `engines.run_engine_batch` runner (pool size, ordering, start gap, `"cancelled"` stopping the batch, an exact tally under concurrency, FloodWait isolation) plus measured overlap on all three real paths (private multi-link, private range, channel dump); `SpeedThrottle` proved against a fake clock at exactly ~3 MB/s for ⚙️ Python Standard and zero delay for 🚀 C++ Turbo, with the HUD reporting the throttled rate and pause/resume/cancellation intact; and the corrected engine claims.
 - `tests/test_round9_channels_and_verification.py` — **two channels per user and real verification**: add-first/add-second/refuse-third, legacy migration on read, the legacy mirror staying in step, disconnect-one-of-two, routing by the posting chat id with separate counters, both channels rendered with per-channel actions, the `/delchat` picker; the requester-admin probe for creator, administrator, plain member, non-member and inconclusive error (each cancelling the wizard and storing nothing); the share-based private-channel registration with every failure mode; and content-link verification for a valid link, a wrong-chat link, a bare number, an unreadable/deleted post, lost bot access and the private share equivalent.
 - `tests/test_round10_channel_rules_and_preflight.py` — **channel command rules and the range pre-flight**: parametrised over all 67 registered commands (each answers in private, each produces zero replies/edits/sends inside a registered channel), every channel limit notice carrying the open-bot `url=` button with no raw link, channel callbacks ignored unless the bot posted the message, and the pre-flight over a deliberately gapped fake message store (counts reported first, only existing ids attempted, quota reserved for the real count, an all-missing range consuming nothing, batching instead of one request per id, and a FloodWait paused and retried).
 - `tests/test_round11_presentation_constraints.py` — **the standing presentation constraints** re-checked over every keyboard and screen added in these rounds: the 7-row / 2-button / 28-character mobile budget, ASCII-only `callback_data` that is mutually exclusive with `url`, English-only copy with no Devanagari, and no raw link anywhere in body copy.
+
+- `tests/test_round12_owner_tools_and_giveaways.py` — **the owner tools**: copy-before-download (and the Saved Messages guard), the share-URL deep link (minting, expiry, forgery, registration from inside the channel), the dump channel (/setdump, TTL deletion, queue, FloodWait pause, /deldump), `/pin` and `/pinned` in every form, the inline-button wizard end to end (cancel/skip/over-long label/bad link, broadcast formatting through the C++ pool, channel post + pin offer), and the giveaway engine (step wizard, single active giveaway, deep-link join once, live count, daily re-post, random winner granted, deadline draw) — plus the presentation budget re-checked over every new keyboard and screen.
+- `tests/test_cpp_engine.py` — **the real C++ engine**: the `.cpp`/`.hpp` sources and build recipe, the loaded library's version/ABI/self-test, the worker pool actually running tasks, and byte-for-byte parity between the native and Python backends for `parse_link`, `scan`, `escape_html`, `escape_batch` and the token bucket, plus the wiring assertions (`main.parse_link`, the command registry and `telemetry.SpeedThrottle`).
 
 The round-six suite (`tests/test_round6_dual_engine.py`, 253 tests) covers the dual-engine overhaul on the same in-memory fakes: the complete `resolve_engine` routing matrix as one parametrised truth table (three controller modes × `models` permission × stored preference × peak), the strict "exceeds the threshold" peak rule, `TrafficMonitor` concurrency accounting including slot restoration when an extraction raises, controller-mode persistence with a fall-back when the store is unreachable, autoscaler escalation and reversion through the real `fetch_and_send` path, and the C++ Turbo worker pool **measured** rather than assumed — a Turbo batch must reach `ENGINE_TURBO_WORKERS` overlapping links while a Python batch must never exceed one. The telemetry HUD is asserted against the specification's exact strings (`📥 Downloading: 68% [████████░░░░]`, `📊 Server Load: CPU 19.2% | RAM 41.8% | Ping 11ms`, `🚀 Speed: 44.2 MB/s • ETA: 00:03`) both as pure functions and as rendered inside a real download, with a deterministic host stand-in so no test reads `/proc` or opens a socket; probe failures, an unknown file size and a raising sampler must all degrade to `--` without breaking the transfer. Also covered: the red `ButtonStyle.DANGER` Models Architecture button and its page, the `/start` badge parity, the switcher (including refusal once the permission is revoked, and the two lock modes), `/setengine` in all three modes plus owner-only enforcement and a failed database write, the four-tier granular grant end to end (tier → flags → duration → stored document → user notice, custom days, `grant_back`, stale and forged callbacks), `/removepremium`, the tiered pricing maths straight from `config`, the Contact Owner `url=` button on every pricing surface, the `/mychannels` dashboard with all four posting-rights outcomes and a forged chat id, the engine block of `/stats`, the twelve admin command pairs, and the real `database.py` functions for every new field against a Mongo mock. Every new keyboard is checked against the standing constraints — at most 7 rows and 2 buttons per row, labels within 28 characters, ASCII-only `callback_data`, links only inside `url=` buttons — and every new screen is checked for English-only copy (no Devanagari) with no raw link in the prose.

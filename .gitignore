@@ -8,3 +8,5 @@ downloads/
 *.session
 *.session-journal
 .env
+# Built native engine (rebuilt on demand by native_engine.py)
+native/build/

@@ -28,6 +28,8 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 
+import native_engine
+
 from config import (
     TELEMETRY_PING_HOST, TELEMETRY_PING_PORT, TELEMETRY_PING_TTL,
     TELEMETRY_SAMPLE_TTL, TELEMETRY_SPEED_WINDOW,
@@ -442,7 +444,7 @@ class SpeedThrottle:
     """
 
     def __init__(self, mbps=0.0, *, burst_seconds: float = 1.0,
-                 clock=time.monotonic, sleeper=None):
+                 clock=time.monotonic, sleeper=None, native: bool = True):
         self.mbps = max(0.0, float(mbps or 0.0))
         #: Bytes per second the bucket refills at (``0.0`` = no cap at all).
         self.rate = self.mbps * MB
@@ -456,6 +458,12 @@ class SpeedThrottle:
         self.waited = 0.0
         self.bytes_seen = 0
         self._last_position = 0
+        #: The token maths runs inside the native C++ engine when it is
+        #: available (identical arithmetic — the Python implementation below is
+        #: the documented reference and the fallback).  ``native=False`` forces
+        #: the reference path, which is what the parity test compares against.
+        self._bucket = native_engine.Bucket(self.tokens, self.updated_at,
+                                            native=native) if native else None
 
     # -- state -------------------------------------------------------------- #
     @property
@@ -478,6 +486,11 @@ class SpeedThrottle:
         return self.tokens
 
     # -- pacing ------------------------------------------------------------- #
+    @property
+    def backend(self) -> str:
+        """``native`` when the C++ engine does the token maths, else ``python``."""
+        return self._bucket.backend if self._bucket is not None else "python"
+
     def delay_for(self, nbytes: int, now: float | None = None) -> float:
         """Seconds *nbytes* must wait for (``0.0`` when the bucket covers it).
 
@@ -486,6 +499,18 @@ class SpeedThrottle:
         """
         if not self.enabled or nbytes <= 0:
             return 0.0
+        if self._bucket is not None:
+            #: The Python state is the source of truth (``resume()`` and
+            #: ``refill()`` write it), so it is pushed into the engine first;
+            #: the engine then charges and hands the new state back.
+            self._bucket.sync(self.tokens, self.updated_at)
+            refill_now = self.clock() if now is None else float(now)
+            update_now = self.clock() if now is None else float(now)
+            wait = self._bucket.charge(nbytes, self.rate, self.capacity,
+                                       refill_now, update_now)
+            self.tokens = self._bucket.tokens
+            self.updated_at = self._bucket.updated_at
+            return wait
         available = self.refill(now)
         if nbytes <= available:
             self.tokens = available - nbytes

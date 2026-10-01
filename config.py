@@ -227,6 +227,68 @@ GRANT_CUSTOM_DAYS_KEY = "custom"
 GRANT_MAX_DAYS = 36500
 
 # --------------------------------------------------------------------------- #
+#  Owner dump channel (the mirror) — copy, never forward
+# --------------------------------------------------------------------------- #
+#: Every delivered extraction is mirrored into the owner's dump channel and
+#: deleted again after this many seconds (10 minutes by default).  The mirror
+#: uses ``copy_message`` — never ``forward`` — so nothing carries a
+#: "Forwarded from" header, and the copy is removed again once it has served
+#: its purpose.
+DUMP_TTL_SECONDS = int(os.environ.get("DUMP_TTL_SECONDS", "600"))
+#: How many mirrored messages may wait for their TTL delete at the same time.
+#: Beyond this the oldest entry is deleted immediately instead of queueing.
+DUMP_QUEUE_LIMIT = int(os.environ.get("DUMP_QUEUE_LIMIT", "500"))
+#: Seconds between two dump-channel operations (mirror / delete) — halves the
+#: chance of a FloodWait and is one of the governor's keys.
+DUMP_COOLDOWN_SECONDS = float(os.environ.get("DUMP_COOLDOWN_SECONDS", "1.0"))
+
+# --------------------------------------------------------------------------- #
+#  /pin, /pinned and the inline-button wizard
+# --------------------------------------------------------------------------- #
+#: Most buttons one outgoing message may carry (each gets its own row, so the
+#: keyboard stays inside the 7-row / 2-button mobile budget).
+MAX_MESSAGE_BUTTONS = int(os.environ.get("MAX_MESSAGE_BUTTONS", "3"))
+#: Longest button label the wizard accepts.
+MAX_BUTTON_LABEL = int(os.environ.get("MAX_BUTTON_LABEL", "28"))
+#: Colour names the wizard offers, mapped to the ui.button styles.
+BUTTON_COLORS = {
+    "blue": {"label": "🔵 Blue", "style": "primary"},
+    "green": {"label": "🟢 Green", "style": "success"},
+    "red": {"label": "🔴 Red", "style": "danger"},
+}
+
+# --------------------------------------------------------------------------- #
+#  Giveaways
+# --------------------------------------------------------------------------- #
+#: One giveaway at a time is allowed — this is the only guard the panel needs.
+GIVEAWAY_SINGLE_ACTIVE = True
+#: Seconds between two live-count refreshes of the pinned giveaway message.
+GIVEAWAY_LIVE_REFRESH_SECONDS = int(os.environ.get("GIVEAWAY_LIVE_REFRESH_SECONDS", "60"))
+#: The public giveaway message is re-posted (and re-pinned) once every N hours
+#: while the giveaway runs.
+GIVEAWAY_DAILY_INTERVAL_SECONDS = int(
+    os.environ.get("GIVEAWAY_DAILY_INTERVAL_SECONDS", str(24 * 3600)))
+#: Rows per page of the owner's participant list.
+GIVEAWAY_PARTICIPANTS_PER_PAGE = int(os.environ.get("GIVEAWAY_PARTICIPANTS_PER_PAGE", "10"))
+#: Longest benefit line the owner may type.
+GIVEAWAY_MAX_BENEFIT_CHARS = int(os.environ.get("GIVEAWAY_MAX_BENEFIT_CHARS", "200"))
+#: Longest a giveaway may run (the end date doubles as the announcement date).
+GIVEAWAY_MAX_DAYS = int(os.environ.get("GIVEAWAY_MAX_DAYS", "365"))
+#: Suggested benefit lines offered as one-tap buttons in the wizard.
+GIVEAWAY_BENEFIT_SUGGESTIONS = (
+    "Unlimited public + private extractions, 2 GB files, C++ Turbo speed",
+    "C++ Turbo engine: 4 worker slots, zero-copy streaming, no speed cap",
+    "Private channel access + the C++ Turbo switcher, full VIP",
+)
+
+# --------------------------------------------------------------------------- #
+#  Native C++ engine (native/restriction_engine.cpp)
+# --------------------------------------------------------------------------- #
+#: Seconds the channel-share deep link a user can send into a channel stays
+#: valid before it has to be regenerated.
+CHANNEL_SHARE_TOKEN_TTL = int(os.environ.get("CHANNEL_SHARE_TOKEN_TTL", "3600"))
+
+# --------------------------------------------------------------------------- #
 #  Live telemetry HUD
 # --------------------------------------------------------------------------- #
 #: Progress-bar cells — ``68%`` renders as ``[████████░░░░]`` at this width.
