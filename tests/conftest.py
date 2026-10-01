@@ -925,6 +925,10 @@ def clean_state(monkeypatch):
     monkeypatch.setattr(main, "DUMP_MIRROR", main.DumpMirror())
     monkeypatch.setattr(main, "GIVEAWAY_TASK", None)
     monkeypatch.setattr(main, "GIVEAWAY_INDEXES_READY", False)
+    #: Round 14 state: the echo guard for a native copy made with the user's
+    #: own session, and the giveaway DM fan-out, must both be born fresh.
+    monkeypatch.setattr(main, "ECHO_GUARD", {})
+    monkeypatch.setattr(main, "GIVEAWAY_BROADCAST_TASK", None)
     # A fresh engine controller per test: the mode, the autoscaler counters and
     # the analytics must never leak from one test into the next.  The provider is
     # re-wired so it still reads whatever the FakeDB fixture installs.

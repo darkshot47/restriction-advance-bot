@@ -524,7 +524,9 @@ async def test_a_message_link_registers_a_private_channel(db, fake_bot, press):
     await main.setchat_handler(None, message)
     await press(message, "setchat:share")
     assert main.pending_action[USER] == "setchat_share"
-    assert sc("Share the channel") in message.shown_text
+    #: Round 14 — the share button is gone; the chooser screen took its place.
+    assert sc("Pick your channel") in message.shown_text
+    assert sc("Pick my channel") in message.shown_text
 
     link = FakeMessage(text=message_link(private_id), user=FakeUser(USER))
     await main.text_handler(None, link)
@@ -646,8 +648,14 @@ async def test_a_link_the_bot_cannot_read_never_registers_the_channel(db, fake_b
     assert await db.get_user_channels(USER) == []
 
 
-async def test_the_deep_link_registers_the_channel_from_inside_it(db, fake_bot, monkeypatch):
-    """The share-sheet button lands in the channel itself: the bot reads it there."""
+async def test_a_share_link_inside_a_channel_registers_nothing(db, fake_bot, monkeypatch):
+    """Round 14 — a setchat link posted *inside* a channel is no longer a proof.
+
+    That link used to be read off the message it landed in, which is precisely
+    the "post something into the channel" behaviour the picker replaced.  It is
+    now only a hint: nothing is registered, the channel is not answered in, and
+    the owner is sent the chooser in their private chat instead.
+    """
     await db.add_user(USER, "Tester")
     private_id = -1001234567890
     bot_is_admin(private_id)
@@ -661,10 +669,11 @@ async def test_the_deep_link_registers_the_channel_from_inside_it(db, fake_bot, 
 
     await main.channel_dump_handler(None, post)
 
-    stored = await db.get_user_channels(USER)
-    assert [entry["chat_id"] for entry in stored] == [private_id]
+    assert await db.get_user_channels(USER) == [], "nothing is registered from it"
     #: The channel stays clean — the answer goes to the user's private chat.
-    assert post.replies == []
+    assert post.replies == [] and post.edits == []
+    assert any(sent["chat_id"] == USER for sent in fake_bot.sent), "the owner was told"
+    assert main.pending_action[USER] == "setchat_share", "the chooser is armed"
 
 
 async def test_cancel_leaves_the_share_step(db, fake_bot, press):

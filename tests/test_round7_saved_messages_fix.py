@@ -26,6 +26,8 @@ from conftest import FakeChat, FakeMessage, FakeUser, sc
 USER_ID = 1001
 CHANNEL_ID = -100777
 SOURCE_CHAT = -100888
+#: The bot's own user id (what ``bot_self_id()`` reports for the fake client).
+BOT_ID = 999
 
 
 class RecordingClient:
@@ -59,6 +61,11 @@ class RecordingClient:
     @property
     def destinations(self) -> list[int]:
         return [chat_id for _verb, chat_id in self.sent]
+
+    @property
+    def uploads(self) -> list[str]:
+        """Every verb that streams a file through this client (never a copy)."""
+        return [verb for verb, _chat_id in self.sent if verb != "copy_message"]
 
 
 def media_message(msg_id=15, chat_id=SOURCE_CHAT, size=1024):
@@ -114,13 +121,36 @@ def test_registered_login_session_is_a_user_session(db):
     assert main.is_user_session(client, 4242) is False
 
 
-def test_delivery_target_refuses_the_saved_messages_route():
-    """Private chat + the user's own session → the bot delivers instead."""
+def test_delivery_target_never_posts_to_the_users_own_id():
+    """Private chat + the user's own session would be *Saved Messages*.
+
+    Round 14 kept the rule and changed the answer.  The session still may
+    never post to its own id; instead of refusing the copy (which used to force
+    a download through this server) the destination becomes the **bot's** chat,
+    so the copy is made there by the user's own account and the server never
+    sees a single byte of the restricted content.
+    """
     user_client = RecordingClient("user", user_client=True)
     target = main.resolve_delivery_target(private_message(), USER_ID, user_client)
+    assert target.reason == "bot_dm_native_copy"
+    assert target.chat_id == BOT_ID, "the bot's own chat, never the user's id"
+    assert target.chat_id != USER_ID
+    assert target.native_copy is True, "it is still a server-side copy"
+    assert target.copy_client is user_client
+    assert target.upload_client is main.bot
+
+
+def test_delivery_target_falls_back_to_the_bot_without_a_bot_id():
+    """Still connecting (no bot id yet): refuse the copy, never Saved Messages."""
+    user_client = RecordingClient("user", user_client=True)
+    original = main.bot_self_id
+    main.bot_self_id = lambda: None
+    try:
+        target = main.resolve_delivery_target(private_message(), USER_ID, user_client)
+    finally:
+        main.bot_self_id = original
     assert target.native_copy is False
     assert target.copy_client is None
-    assert target.upload_client is main.bot
     assert target.chat_id == USER_ID
     assert target.reason == "saved_messages_guard"
 
@@ -177,9 +207,15 @@ async def test_private_chat_public_link_is_copied_by_the_bot(db, fake_bot, monke
 #  (b) private chat + private-channel link via the user's session — THE BUG
 # --------------------------------------------------------------------------- #
 
-async def test_private_chat_private_link_never_targets_saved_messages(
+async def test_private_chat_private_link_is_copied_not_downloaded(
         db, fake_bot, monkeypatch):
-    """The user's own session must not be asked to post to the user's own id."""
+    """Round 14 — restricted content is copied by the session, never downloaded.
+
+    The user's own session posts the copy straight into the bot's chat, so the
+    file never streams through this server at all.  That is the whole point of
+    the round: the old guard "solved" Saved Messages by downloading, which is
+    the one thing restricted content must never do.
+    """
     await db.add_user(USER_ID, "Tester")
     await db.add_premium(USER_ID, 30, tier="all")
 
@@ -188,10 +224,8 @@ async def test_private_chat_private_link_never_targets_saved_messages(
     user_client.get_messages = AsyncMock(return_value=msg)
     main.user_clients[USER_ID] = user_client
 
-    async def fake_download(message, progress=None, **kwargs):
-        if progress:
-            await progress(msg.video.file_size, msg.video.file_size)
-        return "/tmp/file.mp4"
+    async def fake_download(message, progress=None, **kwargs):   # pragma: no cover
+        raise AssertionError("restricted content must never be downloaded")
 
     user_client.download_media = fake_download
     install_source(fake_bot, monkeypatch, msg)
@@ -201,17 +235,18 @@ async def test_private_chat_private_link_never_targets_saved_messages(
     status = FakeMessage(text="...", message_id=9)
     assert await main.fetch_and_send(message, status, user_client, SOURCE_CHAT, 15) is True
 
-    # the server-side copy through the user session was refused entirely
-    assert user_client.copy_message.call_count == 0
-    assert user_client.destinations == [], "the user session delivered nothing"
-    # the bot uploaded into the bot chat instead
-    assert fake_bot.send_video.call_count == 1
-    assert fake_bot.send_video.call_args.args[0] == USER_ID
+    # the session made exactly one copy, into the bot's own chat
+    assert user_client.copy_message.call_count == 1
+    assert user_client.copy_message.call_args.kwargs["chat_id"] == BOT_ID
+    assert USER_ID not in user_client.destinations, "never Saved Messages"
+    # nothing was downloaded and nothing was re-uploaded through the server
+    assert user_client.uploads == [], "no upload verbs ran"
+    assert fake_bot.send_video.call_count == 0
 
 
-async def test_saved_messages_guard_delivers_the_same_media_and_caption(
+async def test_the_native_copy_keeps_the_premium_caption_clean(
         db, fake_bot, monkeypatch):
-    """Caption behaviour is identical on the bot delivery path."""
+    """Caption behaviour is identical on the native-copy path."""
     await db.add_user(USER_ID, "Tester")
     await db.add_premium(USER_ID, 30, tier="private")
     user_client = RecordingClient("user", user_client=True)
@@ -219,10 +254,8 @@ async def test_saved_messages_guard_delivers_the_same_media_and_caption(
     user_client.get_messages = AsyncMock(return_value=msg)
     main.user_clients[USER_ID] = user_client
 
-    async def fake_download(message, progress=None, **kwargs):
-        if progress:
-            await progress(msg.video.file_size, msg.video.file_size)
-        return "/tmp/file.mp4"
+    async def fake_download(message, progress=None, **kwargs):   # pragma: no cover
+        raise AssertionError("restricted content must never be downloaded")
 
     user_client.download_media = fake_download
     install_source(fake_bot, monkeypatch, msg)
@@ -230,11 +263,14 @@ async def test_saved_messages_guard_delivers_the_same_media_and_caption(
 
     message = private_message()
     status = FakeMessage(text="...", message_id=9)
-    await main.fetch_and_send(message, status, user_client, SOURCE_CHAT, 16)
+    assert await main.fetch_and_send(message, status, user_client, SOURCE_CHAT, 16) is True
 
-    caption = fake_bot.send_video.call_args.kwargs["caption"]
-    assert caption == "Restricted caption"
-    assert main.attribution_text() not in caption, "premium keeps the clean caption"
+    #: The copy is made and its caption is left exactly as it was: premium
+    #: keeps the clean caption, and nothing was re-uploaded to add one.
+    assert user_client.copy_message.call_count == 1
+    assert user_client.copy_message.call_args.kwargs["chat_id"] == BOT_ID
+    assert fake_bot.send_video.call_count == 0
+    assert main.attribution_text() not in (msg.caption or ""), "clean caption"
 
 
 async def test_free_credit_line_survives_the_bot_upload_path(db, fake_bot, monkeypatch):
@@ -266,16 +302,20 @@ async def test_free_credit_line_survives_the_bot_upload_path(db, fake_bot, monke
     assert "Restricted caption" in caption
 
 
-async def test_private_link_via_try_native_copy_is_refused_directly(db, fake_bot):
-    """``try_native_copy`` alone already refuses the Saved Messages route."""
+async def test_private_link_via_try_native_copy_copies_into_the_bot_chat(db, fake_bot):
+    """``try_native_copy`` alone copies into the bot's chat and arms the guard."""
     await db.add_user(USER_ID, "Tester")
     await db.add_premium(USER_ID, 30, tier="all")
     user_client = RecordingClient("user", user_client=True)
     user_client.get_messages = AsyncMock(return_value=media_message(15))
 
     message = private_message()
-    assert await main.try_native_copy(message, user_client, SOURCE_CHAT, 15) is False
-    assert user_client.copy_message.call_count == 0
+    assert await main.try_native_copy(message, user_client, SOURCE_CHAT, 15) is True
+    assert user_client.copy_message.call_count == 1
+    assert user_client.copy_message.call_args.kwargs["chat_id"] == BOT_ID
+    assert USER_ID not in user_client.destinations
+    #: the echo of that copy is now expected, exactly once
+    assert USER_ID in main.ECHO_GUARD
 
 
 # --------------------------------------------------------------------------- #
@@ -330,9 +370,10 @@ async def test_dump_channel_private_link_copies_into_the_channel(
 #  The end-to-end private-chat route a VIP actually takes
 # --------------------------------------------------------------------------- #
 
-async def test_text_handler_private_link_routes_through_the_bot(
+async def test_text_handler_private_link_copies_without_downloading(
         db, fake_bot, monkeypatch):
-    """``t.me/c/...`` in the bot chat downloads with the session, uploads via bot."""
+    """``t.me/c/...`` in the bot chat: the session copies, the server downloads
+    nothing — and the echo of that copy is swallowed once it arrives."""
     await db.add_user(USER_ID, "Tester")
     await db.add_premium(USER_ID, 30, tier="all")
 
@@ -340,10 +381,8 @@ async def test_text_handler_private_link_routes_through_the_bot(
     msg = media_message(31)
     user_client.get_messages = AsyncMock(return_value=msg)
 
-    async def fake_download(message, progress=None, **kwargs):
-        if progress:
-            await progress(msg.video.file_size, msg.video.file_size)
-        return "/tmp/file.mp4"
+    async def fake_download(message, progress=None, **kwargs):   # pragma: no cover
+        raise AssertionError("restricted content must never be downloaded")
 
     user_client.download_media = fake_download
     monkeypatch.setattr(main, "get_user_client", AsyncMock(return_value=user_client))
@@ -353,9 +392,19 @@ async def test_text_handler_private_link_routes_through_the_bot(
     message = FakeMessage(text="https://t.me/c/123456789/31", user=FakeUser(USER_ID))
     await main.text_handler(None, message)
 
-    assert user_client.copy_message.call_count == 0
-    assert fake_bot.send_video.call_count == 1
-    assert fake_bot.send_video.call_args.args[0] == USER_ID
+    assert user_client.copy_message.call_count == 1
+    assert user_client.copy_message.call_args.kwargs["chat_id"] == BOT_ID
+    assert USER_ID not in user_client.destinations
+    assert fake_bot.send_video.call_count == 0, "nothing was re-uploaded"
+    assert user_client.uploads == [], "the session uploaded nothing"
+
+    #: The copy lands in the bot chat and comes back as an ordinary message.
+    #: The bot must swallow that echo once and never extract it a second time.
+    assert USER_ID in main.ECHO_GUARD, "the echo is expected"
+    echo = FakeMessage(text="https://t.me/c/123456789/31", user=FakeUser(USER_ID))
+    await main.text_handler(None, echo)
+    assert echo.replies == [] and echo.edits == [], "the echo was swallowed"
+    assert USER_ID not in main.ECHO_GUARD, "the guard is single-use"
 
 
 # --------------------------------------------------------------------------- #
@@ -366,4 +415,6 @@ def test_guard_reasons_are_plain_ascii():
     user_client = RecordingClient("user", user_client=True)
     target = main.resolve_delivery_target(private_message(), USER_ID, user_client)
     assert target.reason.isascii()
-    assert "saved_messages" in target.reason
+    assert target.reason in {"bot_dm_native_copy", "saved_messages_guard"}
+    #: whichever branch ran, the destination is never the user's own id.
+    assert target.chat_id != USER_ID or target.reason == "saved_messages_guard"

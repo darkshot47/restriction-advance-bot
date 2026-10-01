@@ -17,7 +17,8 @@ What this suite pins down:
 4. **/pin and /pinned.**  Reply-to-pin, link-to-pin, id-to-pin, and removing the
    live pin — with plain-English failures and no crash on a fake client.
 5. **The inline-button wizard.**  Colour → label → link → send, with a cancel
-   button on every step, for a DM, a broadcast and a channel post.
+   button on every step — for a **direct user send** only.  A broadcast and a
+   channel post go out exactly as they were typed (round 13, item 9).
 6. **Giveaways.**  Steps (tier → duration → benefit → end → channel), the
    participate deep link (once per account, live count), the daily re-post, the
    live refresh of the pinned message, and a **random** winner whose prize is
@@ -142,26 +143,55 @@ async def test_when_the_copy_is_refused_the_file_is_streamed(db, bot):
 
 
 async def test_a_user_session_never_delivers_to_its_own_id(db, bot):
-    """Private chat + the user's own session would be *Saved Messages*."""
+    """Private chat + the user's own session would be *Saved Messages*.
+
+    Round 14 changed the answer without weakening the rule.  The session still
+    may never post to its own id; instead of giving up on the copy (which used
+    to force a download through this server) the destination becomes the
+    **bot's** chat, so the copy is made there by the user's own account and no
+    byte ever streams through the server.
+    """
     from conftest import FakeUser as _FakeUser  # noqa: F401  (documentation)
     message = FakeMessage(text="x", user=FakeUser(USER))
     main.user_clients[USER] = SimpleNamespace(name="user-session")
     target = main.resolve_delivery_target(message, USER, main.user_clients[USER])
+    assert target.reason == "bot_dm_native_copy"
+    assert target.chat_id == BOT_ID and target.chat_id != USER
+    #: The copy is still a copy — that is the whole point of the round.
+    assert target.native_copy is True
+    assert target.copy_client is main.user_clients[USER]
+
+
+async def test_a_user_session_still_refuses_saved_messages_without_a_bot_id(db, bot):
+    """No bot id known yet (still connecting): fall back to the bot, never copy."""
+    from conftest import FakeUser as _FakeUser  # noqa: F401  (documentation)
+    message = FakeMessage(text="x", user=FakeUser(USER))
+    main.user_clients[USER] = SimpleNamespace(name="user-session")
+    original = main.bot_self_id
+    main.bot_self_id = lambda: None
+    try:
+        target = main.resolve_delivery_target(message, USER, main.user_clients[USER])
+    finally:
+        main.bot_self_id = original
     assert target.native_copy is False and target.reason == "saved_messages_guard"
+    assert target.chat_id == USER
 
 
 # --------------------------------------------------------------------------- #
 #  2. The share-URL deep link
 # --------------------------------------------------------------------------- #
 
-def test_the_share_button_carries_a_real_share_url(monkeypatch):
-    monkeypatch.setattr(main, "SHARE_TOKENS", {})
-    link = main.share_deep_link(USER, "setchat")
-    markup = ui.setchat_share_prompt_keyboard(link)
+def test_no_share_button_is_ever_offered_for_a_channel():
+    """Round 14 — the share sheet is gone from the channel flow.
+
+    Its whole mechanism was "post this link into the channel", which is the one
+    thing the picker replaced.  A share URL may still appear elsewhere (the
+    referral screen, the giveaway link), but never on a setchat screen.
+    """
+    markup = ui.setchat_share_prompt_keyboard("https://t.me/share/url?url=x")
     buttons = [b for row in markup.inline_keyboard for b in row]
-    share = [b for b in buttons if b.url]
-    assert share and share[0].url.startswith("https://t.me/share/url?url=")
-    assert "start%3Dch" in share[0].url
+    assert not [b for b in buttons if b.url], "no share URL on a setchat screen"
+    assert [b.callback_data for b in buttons if b.callback_data] == ["cancel_action"]
 
 
 def test_a_token_is_bound_to_its_kind_and_its_ttl(monkeypatch):
@@ -178,7 +208,8 @@ def test_a_token_is_bound_to_its_kind_and_its_ttl(monkeypatch):
     assert main.find_share_token(link) is None
 
 
-async def test_the_deep_link_posted_in_a_channel_registers_it(db, bot, monkeypatch):
+async def test_a_deep_link_posted_in_a_channel_registers_nothing(db, bot, monkeypatch):
+    """Round 14 — the link is a hint, not a registration proof any more."""
     monkeypatch.setattr(main, "SHARE_TOKENS", {})
     await db.add_user(USER, "Tester")
     bot.members[(SECRET, USER)] = make_member(ADMIN, can_post_messages=True)
@@ -187,22 +218,22 @@ async def test_the_deep_link_posted_in_a_channel_registers_it(db, bot, monkeypat
     post = channel_post(link, chat_id=SECRET, user_id=USER)
     await main.channel_dump_handler(None, post)
 
-    stored = await db.get_user_channels(USER)
-    assert [entry["chat_id"] for entry in stored] == [SECRET]
+    assert await db.get_user_channels(USER) == [], "nothing is registered from it"
     #: The channel stays clean: the answer went to the user's private chat.
     assert post.replies == [] and post.edits == []
     assert any(sent["chat_id"] == USER for sent in bot.sent)
 
 
-async def test_a_deep_link_sent_to_the_bot_explains_the_next_step(db, bot, monkeypatch):
+async def test_a_deep_link_sent_to_the_bot_opens_the_picker(db, bot, monkeypatch):
+    """Round 14 — the link no longer matters; the chooser screen does."""
     monkeypatch.setattr(main, "SHARE_TOKENS", {})
     await db.add_user(USER, "Tester")
     link = main.share_deep_link(USER, "setchat")
     sent = FakeMessage(text=link, user=FakeUser(USER))
     await main.text_handler(None, sent)
-    assert sc("Share the channel") in texts(sent)
-    assert any(b.url and "share/url" in b.url
-               for row in sent.shown_markup.inline_keyboard for b in row)
+    assert sc("Pick your channel") in texts(sent)
+    assert sc("Pick my channel") in texts(sent)
+    assert main.pending_action[USER] == "setchat_share"
 
 
 # --------------------------------------------------------------------------- #
@@ -460,30 +491,31 @@ async def test_a_broadcast_formats_every_copy_on_the_native_pool(db, bot, press)
     await db.add_user(2003, "Carol")
     message = owner_message("/broadcast Hello {name}!")
     await main.broadcast_handler(None, message)
-    assert sc("ADD INLINE BUTTONS") in texts(message)
 
-    await press(message, "btnwiz:skip")
+    #: Round 13 item 9 — a broadcast is not a direct user send, so the builder
+    #: is never offered: no ADD INLINE BUTTONS screen, nothing to skip.
+    assert sc("ADD INLINE BUTTONS") not in texts(message)
+    assert "btnwiz:" not in "".join(message.callback_data())
+    assert OWNER not in main.BUTTON_WIZARD
+
     bodies = {entry["chat_id"]: entry.get("text", "") for entry in bot.sent}
     assert bodies[2002] == "Hello Bob &lt;script&gt;!", "names are HTML-escaped"
     assert bodies[USER] == "Hello Tester!"
     assert main.native_engine.pool_tasks() >= 0
 
 
-async def test_a_channel_post_offers_buttons_and_then_the_pin(db, bot, press):
+async def test_a_channel_post_goes_out_plain_and_then_offers_the_pin(db, bot, press):
+    """Round 13 item 9 — a channel post carries no button builder, only the pin."""
     await db.set_dump_channel(CHANNEL, "Dump", "dump", "channel")
     message = owner_message("/post Big news today")
     await main.post_to_channel_handler(None, message)
 
-    await press(message, "btnwiz:yes")
-    await press(message, "btnwiz:color:blue")
-    await main.text_handler(None, FakeMessage(text="Read more", user=FakeUser(OWNER)))
-    await main.text_handler(None, FakeMessage(text="https://example.com/post",
-                                              user=FakeUser(OWNER)))
-    await press(message, "btnwiz:send")
-
+    #: published exactly as typed, with no keyboard and no wizard left open
     posted = [entry for entry in bot.sent if entry["chat_id"] == CHANNEL]
     assert posted and posted[-1]["text"] == "Big news today"
-    assert posted[-1]["reply_markup"].inline_keyboard[0][0].url == "https://example.com/post"
+    assert posted[-1].get("reply_markup") is None
+    assert sc("ADD INLINE BUTTONS") not in texts(message)
+    assert sc("Message sent") in texts(message)
 
     #: The post is followed by a one-tap pin offer in the owner's DM.
     offers = [entry for entry in bot.sent if entry["chat_id"] == OWNER
