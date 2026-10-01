@@ -120,13 +120,14 @@ async def test_setchat_with_a_private_invite_link(db, fake_bot, press):
     assert sc("Admin verified") in message.shown_text
     assert main.setchat_pending[1001]["step"] == "await_sample"
 
-    #: Round 8 — a bare message number is no longer accepted, because "15" says
-    #: nothing about *which* chat it came from.  A private channel has no public
-    #: link either, so the equivalent proof is sharing (forwarding) one of its
-    #: posts into the bot.
-    sample = FakeMessage(text="a post from the channel", user=FakeUser(1001))
-    sample.forward_from_chat = SimpleNamespace(
-        id=FAKE_PRIVATE_CHAT_ID, title="Private Channel", username=None, type="channel")
+    #: Round 12 — a bare message number is no longer accepted, because "15" says
+    #: nothing about *which* chat it came from.  A private channel is verified
+    #: with the **message link** Telegram's *Copy Link* action produces — never
+    #: with a forwarded post.
+    raw = str(abs(FAKE_PRIVATE_CHAT_ID))[3:]
+    fake_bot.messages[15] = SimpleNamespace(empty=False, id=15,
+                                           chat=SimpleNamespace(id=FAKE_PRIVATE_CHAT_ID))
+    sample = FakeMessage(text=f"https://t.me/c/{raw}/15", user=FakeUser(1001))
     await main.text_handler(None, sample)
     assert sc("Channel dump enabled") in sample.shown_text
     assert await db.get_user_chat(1001) == {

@@ -3,17 +3,18 @@ import re
 import html
 import math
 import time
+import random
+import secrets
 import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from flask import Flask
 from threading import Thread
-from datetime import datetime
+from datetime import datetime, timedelta
 from pyrogram import Client, filters, raw, utils
 from pyrogram.types import CallbackQuery
 from pyrogram.enums import ParseMode
-from urllib.parse import urlparse
 from pyrogram.errors import (
     SessionPasswordNeeded, PhoneCodeInvalid, PhoneNumberInvalid,
     PasswordHashInvalid, FloodWait, ChannelPrivate, MessageNotModified,  # noqa: F401
@@ -24,6 +25,7 @@ from pyrogram.errors import (
 import ui
 import engines
 import telemetry
+import native_engine
 from config import (BOT_USERNAME, FREE_DAILY_LIMIT, FREE_PRIVATE_LINKS, WATERMARK, REFER_POINTS,
                     REDEEM_POINTS, REDEEM_PREMIUM_DAYS, REDEEM_PREMIUM_MONTHS, PAYMENT_CONTACT,
                     PREMIUM_PLANS, PREMIUM_BENEFITS, REDEEM_LIMITATION, RUPEE,
@@ -36,6 +38,12 @@ from config import (BOT_USERNAME, FREE_DAILY_LIMIT, FREE_PRIVATE_LINKS, WATERMAR
                     ENGINE_PYTHON, ENGINE_CPP, ENGINE_PEAK_THRESHOLD, ENGINE_TURBO_WORKERS,
                     ENGINE_ZERO_COPY_MAX_BYTES, ENGINE_START_GAP_SECONDS,
                     ENGINE_PYTHON_SPEED_LIMIT_MBPS, ENGINE_PYTHON_SPEED_BURST_SECONDS,
+                    DUMP_TTL_SECONDS, DUMP_QUEUE_LIMIT, DUMP_COOLDOWN_SECONDS,
+                    MAX_MESSAGE_BUTTONS, MAX_BUTTON_LABEL, BUTTON_COLORS,
+                    GIVEAWAY_SINGLE_ACTIVE, GIVEAWAY_LIVE_REFRESH_SECONDS,
+                    GIVEAWAY_DAILY_INTERVAL_SECONDS, GIVEAWAY_PARTICIPANTS_PER_PAGE,
+                    GIVEAWAY_MAX_BENEFIT_CHARS, GIVEAWAY_MAX_DAYS,
+                    GIVEAWAY_BENEFIT_SUGGESTIONS, CHANNEL_SHARE_TOKEN_TTL,
                     ENGINE_MODE_AUTO, ENGINE_MODE_LOCK_CPP, ENGINE_MODE_LOCK_PYTHON,
                     DEFAULT_ENGINE_MODE, GRANT_TIERS, GRANT_TIER_KEYS, GRANT_DURATIONS,
                     GRANT_CUSTOM_DAYS_KEY, GRANT_MAX_DAYS, LEGACY_TIER_ALIASES,
@@ -69,7 +77,13 @@ from database import (
     set_engine_mode, get_engine_mode, set_user_engine, get_user_engine,
     get_engine_preference, has_models_access, has_private_access,
     set_models_access, set_private_access, record_engine_use, get_engine_stats,
-    get_premium_tier, increment_channel_files, get_channel_files
+    get_premium_tier, increment_channel_files, get_channel_files,
+    set_dump_channel, get_dump_channel, delete_dump_channel,
+    create_giveaway, get_active_giveaway, get_last_giveaway, update_giveaway,
+    finish_giveaway, add_giveaway_participant, count_giveaway_participants,
+    is_giveaway_participant, list_giveaway_participants,
+    all_giveaway_participants, clear_giveaway_participants,
+    ensure_giveaway_indexes,
 )  # noqa: F401
 
 API_ID = int(os.environ.get("API_ID"))
@@ -208,24 +222,14 @@ def schedule_cleanup(message, delay=None):
 
 
 def parse_link(link):
-    """Accept Telegram message URLs only, including /s/ previews and topics."""
-    parsed = urlparse(link if "://" in link else "https://" + link)
-    if parsed.hostname not in {"t.me", "telegram.me", "www.t.me"}:
-        return None, None, None
-    parts = parsed.path.strip("/").split("/")
-    if parts and parts[0] == "s":
-        parts = parts[1:]
-    try:
-        msg_id = int(parts[-1])
-        if msg_id <= 0:
-            raise ValueError()
-        if parts[0] == "c" and len(parts) in {3, 4} and parts[1].isdigit():
-            return int("-100" + parts[1]), msg_id, True
-        if len(parts) in {2, 3} and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{3,31}", parts[0]):
-            return parts[0], msg_id, False
-    except (ValueError, IndexError):
-        pass
-    return None, None, None
+    """Accept Telegram message URLs only, including /s/ previews and topics.
+
+    The grammar lives in the **native C++ engine** (``native/restriction_engine``)
+    which answers every message that reaches the bot; :func:`native_engine.parse_link`
+    falls back to an equivalent Python implementation when no compiler is
+    available, so the result never depends on the backend.
+    """
+    return native_engine.parse_link(link)
 
 
 async def private_access(user_id):
@@ -936,6 +940,10 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
 
         if copied:
             delivered = True
+            #: Owner mirror: the copy went to the destination, so the dump
+            #: channel gets its own copy (never a forward) with a TTL delete.
+            mirror_target = resolve_delivery_target(message, user_id, fetch_client)
+            await mirror_delivery(mirror_target.chat_id, msg_id, label="copy")
             await status.delete()
             await add_download(user_id, f"msg_{msg_id}", "copied")
             return True
@@ -955,9 +963,13 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
             if msg.text:
                 premium = await is_premium(user_id) or user_id == OWNER_ID
                 credited = msg.text if premium else f"{msg.text}\n{attribution_text()}"
+                last_text_id = None
                 for chunk in ui.split_text(credited, 4096):
-                    await message.reply(chunk, parse_mode=ParseMode.DISABLED)
+                    sent_chunk = await message.reply(chunk, parse_mode=ParseMode.DISABLED)
+                    last_text_id = getattr(sent_chunk, "id", None) or last_text_id
                     delivered = True
+                if last_text_id is not None:
+                    await mirror_delivery(message.chat.id, last_text_id, label="text")
                 await add_download(user_id, f"msg_{msg_id}", "text")
                 await status.delete()
                 return True
@@ -1152,6 +1164,7 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
             else:
                 caption = None
 
+        last_sent_id = None
         thumb_id = await get_thumbnail(user_id)
         if thumb_id and (msg.video or msg.document):
             try:
@@ -1160,25 +1173,28 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
                 pass
 
         if msg.photo:
-            await uploader.send_photo(chat_id, file_path, caption=caption, parse_mode=ParseMode.DISABLED)
+            uploaded = await uploader.send_photo(chat_id, file_path, caption=caption, parse_mode=ParseMode.DISABLED)
         elif msg.video:
-            await uploader.send_video(chat_id, file_path, caption=caption, thumb=thumb_path, parse_mode=ParseMode.DISABLED)
+            uploaded = await uploader.send_video(chat_id, file_path, caption=caption, thumb=thumb_path, parse_mode=ParseMode.DISABLED)
         elif msg.document:
-            await uploader.send_document(chat_id, file_path, caption=caption, thumb=thumb_path, parse_mode=ParseMode.DISABLED)
+            uploaded = await uploader.send_document(chat_id, file_path, caption=caption, thumb=thumb_path, parse_mode=ParseMode.DISABLED)
         elif msg.audio:
-            await uploader.send_audio(chat_id, file_path, caption=caption, parse_mode=ParseMode.DISABLED)
+            uploaded = await uploader.send_audio(chat_id, file_path, caption=caption, parse_mode=ParseMode.DISABLED)
         elif msg.voice:
-            await uploader.send_voice(chat_id, file_path, caption=caption, parse_mode=ParseMode.DISABLED)
+            uploaded = await uploader.send_voice(chat_id, file_path, caption=caption, parse_mode=ParseMode.DISABLED)
         elif msg.video_note:
-            await uploader.send_video_note(chat_id, file_path)
+            uploaded = await uploader.send_video_note(chat_id, file_path)
         elif msg.sticker:
-            await uploader.send_sticker(chat_id, file_path)
+            uploaded = await uploader.send_sticker(chat_id, file_path)
         elif msg.animation:
-            await uploader.send_animation(chat_id, file_path, caption=caption, parse_mode=ParseMode.DISABLED)
+            uploaded = await uploader.send_animation(chat_id, file_path, caption=caption, parse_mode=ParseMode.DISABLED)
         else:
-            await uploader.send_document(chat_id, file_path, caption=caption, parse_mode=ParseMode.DISABLED)
+            uploaded = await uploader.send_document(chat_id, file_path, caption=caption, parse_mode=ParseMode.DISABLED)
+        last_sent_id = getattr(uploaded, "id", None)
 
         delivered = True
+        if last_sent_id is not None:
+            await mirror_delivery(chat_id, last_sent_id, label=media_type_guess(msg))
         if overflow_caption or msg.video_note or msg.sticker:
             for chunk in ui.split_text(overflow_caption or caption or "", 4096):
                 await message.reply(chunk, parse_mode=ParseMode.DISABLED)
@@ -1243,6 +1259,15 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
                     os.remove(path)
                 except Exception:  # pragma: no cover - cleanup is best effort
                     pass
+
+
+def media_type_guess(msg) -> str:
+    """Short media name used in the dump-mirror log line."""
+    for kind in ("photo", "video", "document", "audio", "voice", "video_note",
+                 "sticker", "animation"):
+        if getattr(msg, kind, None):
+            return kind
+    return "text" if getattr(msg, "text", None) else "media"
 
 
 def admin_only(func):
@@ -1707,6 +1732,30 @@ async def cb_help(client, query):
     await show_help(query)
 
 
+@callback_action("cmd_giveaway_panel")
+async def cb_cmd_giveaway_panel(client, query):
+    await query.answer()
+    await giveaway_panel(query)
+
+
+@callback_action("cmd_pin")
+async def cb_cmd_pin(client, query):
+    await query.answer(ui_text("📌 Reply to a message with /pin."))
+    await render(query, ui.pin_usage_text(), ui.admin_back_keyboard())
+
+
+@callback_action("cmd_setdump")
+async def cb_cmd_setdump(client, query):
+    await query.answer()
+    await setdump_handler(client, query.message)
+
+
+@callback_action("cmd_native")
+async def cb_cmd_native(client, query):
+    await query.answer()
+    await native_handler(client, query.message)
+
+
 @callback_action("cmd_admin")
 async def cb_admin(client, query):
     uid = query.from_user.id
@@ -2019,7 +2068,12 @@ async def handle_fsub_callback(client, query, data: str):
     await query.answer(ui_text(ui.stale_button_text()), show_alert=True)
 
 
-COMMAND_NAMES = ["start", "help", "login", "logout", "status", "cancel", "setcaption", "delcaption", "setthumb", "delthumb", "setprefix", "setsuffix", "mystats", "myinfo", "history", "settings", "language", "refer", "bookmark", "bookmarks", "favorite", "favorites", "share", "feedback", "premium", "stats", "users", "loggedusers", "activeusers", "newusers", "topusers", "broadcast", "ban", "unban", "banlist", "finduser", "userinfo", "addpremium", "removepremium", "premiumlist", "addadmin", "removeadmin", "adminlist", "setfsub", "fsublist", "delfsub", "fsublabel", "fsubcheck", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export", "adminhelp", "admin", "admins", "addqr", "delqr", "removeqr", "payments", "redeem", "setchat", "delchat", "models", "engine", "mychannels", "setengine"]
+#: Commands that arrived with the owner tools, pin control and giveaways.
+NEW_COMMAND_NAMES = [
+    "pin", "pinned", "setdump", "deldump", "dump", "post", "native",
+    "giveaway", "participants", "endgiveaway",
+]
+COMMAND_NAMES = NEW_COMMAND_NAMES + ["start", "help", "login", "logout", "status", "cancel", "setcaption", "delcaption", "setthumb", "delthumb", "setprefix", "setsuffix", "mystats", "myinfo", "history", "settings", "language", "refer", "bookmark", "bookmarks", "favorite", "favorites", "share", "feedback", "premium", "stats", "users", "loggedusers", "activeusers", "newusers", "topusers", "broadcast", "ban", "unban", "banlist", "finduser", "userinfo", "addpremium", "removepremium", "premiumlist", "addadmin", "removeadmin", "adminlist", "setfsub", "fsublist", "delfsub", "fsublabel", "fsubcheck", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export", "adminhelp", "admin", "admins", "addqr", "delqr", "removeqr", "payments", "redeem", "setchat", "delchat", "models", "engine", "mychannels", "setengine"]
 ABORT_GROUP = -1
 
 
@@ -2030,6 +2084,9 @@ async def clear_pending_inputs(uid):
     aborted = bool(premium_tier_pending.pop(uid, None)) or aborted
     aborted = bool(setchat_pending.pop(uid, None)) or aborted
     aborted = bool(fsub_pending.pop(uid, None)) or aborted
+    aborted = bool(GIVEAWAY_WIZARD.pop(uid, None)) or aborted
+    aborted = bool(BUTTON_WIZARD.pop(uid, None)) or aborted
+    aborted = bool(BUTTON_DRAFT.pop(uid, None)) or aborted
     pending = login_pending.pop(uid, None)
     if pending:
         temp = pending.get("client")
@@ -2043,9 +2100,36 @@ async def clear_pending_inputs(uid):
 
 
 @bot.on_message(filters.regex(r"^/[A-Za-z][A-Za-z0-9_]*(?:@[A-Za-z0-9_]+)?(?:\s|$)") & filters.private, group=ABORT_GROUP)
+def update_lag_ms(message) -> int | None:
+    """Milliseconds between Telegram stamping this update and our handler.
+
+    Telegram sets ``message.date`` when the update is created, so this is the
+    only honest way to tell "the bot is slow" apart from "the update (or the
+    network) arrived late".  ``None`` when the field is unavailable.
+    """
+    stamp = getattr(message, "date", None)
+    if not isinstance(stamp, datetime):
+        return None
+    try:
+        return int((datetime.utcnow() - stamp).total_seconds() * 1000)
+    except Exception:  # pragma: no cover - defensive
+        return None
+
+
+def log_latency(message, where: str) -> None:
+    """One ``[LATENCY]`` line per update so a slow reply can be traced."""
+    lag = update_lag_ms(message)
+    if lag is None:
+        return
+    command = command_name_of(message) or "text"
+    print(f"[LATENCY] {where} cmd={command} update_lag={lag}ms", flush=True)
+
+
 async def abort_pending_on_command(client, message):
     # Runs before every command handler: the cheapest place to re-check a rename.
     await refresh_profile(getattr(message, "from_user", None))
+    #: Any command is enough of a heartbeat to bring the giveaway pump up.
+    touch_scheduler()
     if message.text.split()[0].split("@")[0].lower() == "/cancel":
         return  # /cancel provides its own single confirmation.
     if await clear_pending_inputs(message.from_user.id):
@@ -2058,7 +2142,19 @@ async def start_handler(client, message):
     is_new = await add_user(user.id, user.first_name, user.username)
     # /start always re-syncs the profile so renames propagate immediately.
     await refresh_profile(user)
+    touch_scheduler()
     args = message.text.split()
+    payload = args[1].strip() if len(args) > 1 else ""
+    if payload.startswith("gw") and len(payload) > 2:
+        #: A giveaway participate link — one tap, one entry.
+        if await giveaway_join(message, payload[2:]):
+            return
+    elif payload.startswith("ch") and len(payload) > 2:
+        if await setchat_deep_link_in_private(message, payload[2:]):
+            return
+    elif payload.startswith("dp") and len(payload) > 2:
+        if await setdump_deep_link_in_private(message, payload[2:]):
+            return
     if len(args) > 1 and is_new:
         try:
             ref_id = int(args[1])
@@ -2420,9 +2516,35 @@ async def top_users_handler(client, message):
 @bot.on_message(filters.command("broadcast") & filters.private)
 @admin_only
 async def broadcast_handler(client, message):
-    if not message.reply_to_message:
-        await say(message, "📢 Reply to a message with /broadcast")
+    args = (message.text or "").split(maxsplit=1)
+    typed = args[1].strip() if len(args) > 1 else ""
+    if not message.reply_to_message and not typed:
+        await say(message, "📢 Reply to a message with /broadcast, or send "
+                           "`/broadcast Your message` (use `{name}` to greet each user).")
         return
+    if typed and not message.reply_to_message:
+        #: Typed text: the button wizard offers colours and links first (the
+        #: prepared broadcast goes out through the C++ formatting pool).
+        await start_button_wizard(message, {
+            "kind": WIZARD_KIND_BROADCAST,
+            "chat_id": None,
+            "text": typed,
+            "preview": f"📢 Broadcast → {len(await get_all_users())} users",
+        })
+        return
+    if message.reply_to_message is not None and not typed:
+        replied = message.reply_to_message
+        #: A replied *text* message can carry buttons, so it takes the wizard;
+        #: a replied media message is copied as it is (copy keeps the caption).
+        replied_text = getattr(replied, "text", None) or getattr(replied, "caption", None)
+        if replied_text and not getattr(replied, "media", None):
+            await start_button_wizard(message, {
+                "kind": WIZARD_KIND_BROADCAST,
+                "chat_id": None,
+                "text": replied_text,
+                "preview": f"📢 Broadcast → {len(await get_all_users())} users",
+            })
+            return
     users = await get_all_users()
     total = len(users)
     status = await say(message, f"📢 Broadcasting to {total}...")
@@ -3072,7 +3194,6 @@ async def fsublabel_handler(client, message):
     if not await update_fsub_item(number, button_text=cleaned):
         await say(message, f"❌ No entry number {number}.")
         return
-    items = await get_fsub_list()
     await say(message, f"✅ Entry {number} button: **{cleaned}**", reply_markup=ui.back_keyboard())
     await show_fsub_list(message)
 
@@ -3152,11 +3273,18 @@ async def sendmsg_handler(client, message):
         return
     try:
         target = int(args[1])
-        msg = args[2]
-        await say_message(bot, target, f"📨 **Admin message:**\n\n{msg}")
-        await say(message, "✅ Sent!")
-    except Exception as e:
-        await say(message, f"❌ Error: {e}")
+    except ValueError:
+        await say(message, "❌ The first argument must be a numeric user id.")
+        return
+    body = args[2]
+    #: Every outgoing message is offered the same wizard: colour → label →
+    #: link → send, with a cancel button on every single step.
+    await start_button_wizard(message, {
+        "kind": WIZARD_KIND_DM,
+        "chat_id": target,
+        "text": f"📨 Admin message:\n\n{body}",
+        "preview": f"📨 Admin message → {target}",
+    })
 
 
 @bot.on_message(filters.command("clearlogs") & filters.private)
@@ -3436,27 +3564,60 @@ async def cb_setchat_share(client, query):
     await query.answer()
     setchat_pending.pop(uid, None)
     pending_action[uid] = "setchat_share"
-    await render(query, ui.setchat_share_prompt_text(), ui.feedback_keyboard())
+    #: The deep link is minted per user and per click: the share sheet sends it
+    #: into the channel, the bot (an admin there) reads it and the channel
+    #: registers itself — no link pasted, nothing forwarded.
+    await render(query, ui.setchat_share_prompt_text(),
+                 ui.setchat_share_prompt_keyboard(share_deep_link(uid, "setchat")))
 
 
 async def register_shared_channel(message, uid) -> bool:
-    """Handle one message while the share-based registration is waiting.
+    """Register a channel from a **message link** — never from a forward.
+
+    Round 12 replaced the old "forward one post" step with this: the user
+    long-presses any post in the channel, taps *Copy Link* and sends that link
+    into the bot.  The link already names the channel **and** points at a real
+    post, so the same message answers both verifications:
+
+    * the person sending it must administer the channel, and
+    * the bot must be an admin there with **Post Messages** and must be able to
+      read that exact post.
 
     Returns ``True`` when the message was consumed by this step (so the caller
     stops), whatever the outcome — a failure keeps the wizard alive for another
     try and always explains itself in plain English.
     """
-    shared = forwarded_chat_of(message)
-    if shared is None:
+    text = (getattr(message, "text", None) or "").strip()
+    chat_target, msg_id, _is_private = parse_link(text)
+    if chat_target is None or msg_id is None:
         await say(message, ui.setchat_share_failed_text("not_received"),
                   reply_markup=ui.feedback_keyboard())
         return True
-    if shared["type"] not in {"channel", "supergroup", "group"}:
+
+    try:
+        resolved = await resolve_chat_target(text)
+    except InviteRequestSent:
+        await say(message, ui.setchat_join_request_text("this channel"),
+                  reply_markup=ui.feedback_keyboard())
+        return True
+    except InviteLinkError as exc:
+        reason = "bot_not_in_chat" if exc.reason == "no_access" else "cannot_see"
+        await say(message, ui.setchat_share_failed_text(reason),
+                  reply_markup=ui.feedback_keyboard())
+        return True
+    except Exception as exc:
+        print(f"[SETCHAT LINK] cannot resolve {text!r}: {exc}", flush=True)
+        await say(message, ui.setchat_share_failed_text("cannot_see"),
+                  reply_markup=ui.feedback_keyboard())
+        return True
+
+    chat_id = int(resolved["chat_id"])
+    title = resolved.get("title") or str(chat_id)
+    if resolved.get("type") not in {"channel", "supergroup", "group"}:
         await say(message, ui.setchat_share_failed_text("not_a_channel"),
                   reply_markup=ui.feedback_keyboard())
         return True
 
-    chat_id = shared["chat_id"]
     entries = await get_user_channels(uid)
     known = {int(entry["chat_id"]) for entry in entries}
     if chat_id not in known and len(entries) >= max(1, int(MAX_USER_CHANNELS)):
@@ -3465,49 +3626,55 @@ async def register_shared_channel(message, uid) -> bool:
                   reply_markup=ui.mychannels_keyboard(entries))
         return True
 
-    await say(message, ui.setchat_share_resolved_text(shared["title"]))
+    await say(message, ui.setchat_share_resolved_text(title))
 
-    #: The bot must be able to open the chat at all before anything is checked.
-    try:
-        await floodwait_guard(bot.get_chat, chat_id)
-    except (ChannelPrivate, ChatAdminRequired, UserNotParticipant, PeerIdInvalid):
-        #: The step stays open: once the bot is added, sharing again just works.
-        await say(message, ui.setchat_share_failed_text("bot_not_in_chat"),
-                  reply_markup=ui.feedback_keyboard())
-        return True
-    except Exception as exc:
-        print(f"[SETCHAT SHARE] cannot open {chat_id}: {exc}", flush=True)
-        await say(message, ui.setchat_share_failed_text("cannot_see"),
-                  reply_markup=ui.feedback_keyboard())
-        return True
-
-    #: Pending registration only — the channel is not live until step 3 passes.
-    setchat_pending[uid] = {
-        "chat_id": chat_id, "title": shared["title"], "username": shared["username"],
-        "step": "await_sample", "invite_link": None, "type": shared["type"],
-        "shared": True,
-    }
-    pending_action.pop(uid, None)
-
-    #: Verification 1 (round 5): the person sharing it must administer it.
+    #: Verification 1 (round 5): the person connecting it must administer it.
     person_ok, person_reason = await describe_requester_admin(chat_id, uid)
     if not person_ok:
         setchat_pending.pop(uid, None)
-        await say(message, ui.setchat_requester_failed_text(person_reason, shared["title"]))
+        await say(message, ui.setchat_requester_failed_text(person_reason, title))
         return True
+
     #: Verification 2: the bot must be an admin with Post Messages.
     ok, reason = await describe_channel_admin(chat_id)
     if not ok:
         #: The wizard stays alive so the owner can fix the rights and press
         #: **🔍 Check Admin Status** again.
-        setchat_pending[uid]["step"] = "await_check"
+        setchat_pending[uid] = {
+            "chat_id": chat_id, "title": title, "username": resolved.get("username"),
+            "step": "await_check", "invite_link": None,
+            "type": resolved.get("type") or "channel",
+        }
         await say(message, ui.setchat_admin_failed_text(reason),
                   reply_markup=ui.setchat_check_keyboard())
         return True
 
-    await say(message, ui.setchat_admin_ok_text(shared["title"],
-                                                private=not shared["username"]),
-              reply_markup=ui.feedback_keyboard())
+    #: Verification 3: that exact post must be readable — the link is the proof.
+    sample = None
+    try:
+        sample = await floodwait_guard(bot.get_messages, chat_target, msg_id)
+    except Exception as exc:
+        print(f"[SETCHAT LINK] sample read failed chat={chat_id}: {exc}", flush=True)
+    if not sample or getattr(sample, "empty", False):
+        await say(message, ui.setchat_share_failed_text("cannot_see"),
+                  reply_markup=ui.feedback_keyboard())
+        return True
+
+    stored, why = await add_user_channel(uid, chat_id, title, resolved.get("username"),
+                                         resolved.get("type") or "channel")
+    if not stored:
+        if why == "full":
+            entries = await get_user_channels(uid)
+            await say(message, ui.channel_slots_full_text(entries),
+                      reply_markup=ui.mychannels_keyboard(entries))
+        else:
+            await say(message, ui.setchat_share_failed_text("cannot_see"),
+                      reply_markup=ui.feedback_keyboard())
+        return True
+    setchat_pending.pop(uid, None)
+    pending_action.pop(uid, None)
+    await say(message, ui.setchat_done_text(title, chat_id), reply_markup=ui.back_keyboard())
+    print(f"[SETCHAT] message link registered chat={chat_id} for user={uid}", flush=True)
     return True
 
 
@@ -3762,6 +3929,11 @@ async def channel_dump_handler(client, message):
         # Every personal command is a silent no-op here — zero replies, edits
         # or sends — so the channel never turns into a second bot dashboard.
         await dispatch_channel_command(client, message)
+        return
+    touch_scheduler()
+    #: The share-sheet deep link: inside a channel this *is* the registration
+    #: proof, so it is handled before any link extraction is considered.
+    if await handle_share_deep_link(message):
         return
     if "t.me/" not in text:
         return
@@ -4215,27 +4387,6 @@ async def verify_requester_admin(chat_id, user_id) -> bool:
     return ok
 
 
-def forwarded_chat_of(message):
-    """The channel a shared (forwarded) post came from, or ``None``.
-
-    Round 7 registers a private channel from a share: forwarding one of its
-    posts into the bot is the only way to learn a private channel's identity
-    without ever printing an invite link or a raw chat id into the chat.
-    """
-    chat = getattr(message, "forward_from_chat", None)
-    if chat is None:
-        return None
-    chat_id = getattr(chat, "id", None)
-    if chat_id is None:
-        return None
-    return {
-        "chat_id": int(chat_id),
-        "title": chat_title(chat, chat_id),
-        "username": getattr(chat, "username", None),
-        "type": chat_type_value(chat) or "channel",
-    }
-
-
 async def complete_setchat(message, uid, pending) -> bool:
     """Store the verified channel and close the wizard.
 
@@ -4275,14 +4426,6 @@ async def verify_setchat_sample(message, uid, text) -> bool:
     if not pending:
         return False
     chat_id = pending["chat_id"]
-
-    #: Private channels: a forwarded post carries the channel it came from.
-    shared = forwarded_chat_of(message)
-    if shared is not None:
-        if int(shared["chat_id"]) == int(chat_id):
-            return await complete_setchat(message, uid, pending)
-        await say(message, ui.setchat_sample_failed_text("wrong_chat"))
-        return False
 
     text = (text or "").strip()
     chat_target, msg_id, _is_private = parse_link(text)
@@ -4936,6 +5079,1455 @@ async def handle_caption_choice(client, query):
 
 
 # --------------------------------------------------------------------------- #
+#  Owner deep links — one tap and the channel (or the dump) registers itself
+#
+#  The share-sheet button sends ``https://t.me/<bot>?start=<kind><token>`` into
+#  a channel the user picks.  The bot is an admin there, so it *sees* that
+#  message and learns the chat id straight from it — no invite link, no raw id,
+#  no forwarded post, nothing to copy by hand.
+# --------------------------------------------------------------------------- #
+
+#: token -> {"kind", "user_id", "created", "ttl"}
+SHARE_TOKENS: dict = {}
+#: deep-link prefix -> what the token registers.
+SHARE_KINDS = {"ch": "setchat", "dp": "setdump"}
+SHARE_PREFIXES = {"setchat": "ch", "setdump": "dp"}
+#: ``t.me/<bot>?start=ch…`` / ``…=dp…`` inside any message text.
+SHARE_LINK_RE = re.compile(
+    rf"t\.me/{re.escape(BOT_USERNAME)}\?start=(ch|dp)([0-9a-fA-F]{{8,}})", re.IGNORECASE)
+
+
+def issue_share_token(uid, kind, *, ttl=None):
+    """Mint a one-purpose token (private channels have no other identity path)."""
+    token = secrets.token_hex(6)
+    now = time.time()
+    SHARE_TOKENS[token] = {"kind": kind, "user_id": int(uid), "created": now,
+                           "ttl": float(CHANNEL_SHARE_TOKEN_TTL if ttl is None else ttl)}
+    # Opportunistic sweep so a long-running process cannot grow forever.
+    for key, value in list(SHARE_TOKENS.items()):
+        if now - value.get("created", 0) > value.get("ttl", 0):
+            SHARE_TOKENS.pop(key, None)
+    return token
+
+
+def share_deep_link(uid, kind) -> str:
+    """The link the share-sheet button carries."""
+    return (f"https://t.me/{BOT_USERNAME}?start="
+            f"{SHARE_PREFIXES[kind]}{issue_share_token(uid, kind)}")
+
+
+def find_share_token(text):
+    """The live token a message carries, or ``None`` (expired/forged → ignored)."""
+    match = SHARE_LINK_RE.search(text or "")
+    if not match:
+        return None
+    prefix, token = match.group(1).lower(), match.group(2)
+    entry = SHARE_TOKENS.get(token)
+    if not entry or entry.get("kind") != SHARE_KINDS.get(prefix):
+        return None
+    if time.time() - entry.get("created", 0) > entry.get("ttl", 0):
+        SHARE_TOKENS.pop(token, None)
+        return None
+    return entry
+
+
+async def dm_user(uid, text, keyboard=None, **kwargs):
+    """Send a screen to a user's private chat (used when the click happened in a channel)."""
+    try:
+        return await say_message(bot, int(uid), text, reply_markup=keyboard, **kwargs)
+    except Exception as exc:
+        print(f"[DM FAILED] user={uid}: {type(exc).__name__}: {exc}", flush=True)
+        return None
+
+
+async def register_channel_from_ping(message, uid, chat) -> bool:
+    """A shared deep link landed in a channel: register it for *uid*.
+
+    Everything is verified exactly like the manual wizard — the person must
+    administer the chat and the bot must be an admin with Post Messages — but
+    the chat identity comes from the message itself, so no link is ever pasted
+    and nothing is printed into the channel.
+    """
+    chat_id = int(getattr(chat, "id", 0) or 0)
+    kind = chat_type_value(chat)
+    title = chat_title(chat, chat_id)
+    username = getattr(chat, "username", None)
+    if not chat_id or kind not in {"channel", "supergroup", "group"}:
+        await dm_user(uid, ui.setchat_share_failed_text("not_a_channel"))
+        return True
+
+    entries = await get_user_channels(uid)
+    known = {int(entry["chat_id"]) for entry in entries}
+    if chat_id not in known and len(entries) >= max(1, int(MAX_USER_CHANNELS)):
+        await dm_user(uid, ui.channel_slots_full_text(entries),
+                      ui.mychannels_keyboard(entries))
+        return True
+
+    person_ok, person_reason = await describe_requester_admin(chat_id, uid)
+    if not person_ok:
+        await dm_user(uid, ui.setchat_requester_failed_text(person_reason, title))
+        return True
+    ok, reason = await describe_channel_admin(chat_id)
+    if not ok:
+        #: Both checks must pass; the button below re-runs them after a fix.
+        setchat_pending[uid] = {
+            "chat_id": chat_id, "title": title, "username": username,
+            "step": "await_check", "invite_link": None, "type": kind or "channel",
+        }
+        await dm_user(uid, ui.setchat_admin_failed_text(reason),
+                      ui.setchat_check_keyboard())
+        return True
+
+    stored, why = await add_user_channel(uid, chat_id, title, username, kind)
+    if not stored:
+        if why == "full":
+            await dm_user(uid, ui.channel_slots_full_text(await get_user_channels(uid)),
+                          ui.mychannels_keyboard(await get_user_channels(uid)))
+        else:
+            await dm_user(uid, ui.setchat_sample_failed_text("unreadable"))
+        return True
+    setchat_pending.pop(uid, None)
+    pending_action.pop(uid, None)
+    await dm_user(uid, ui.setchat_done_text(title, chat_id), ui.back_keyboard())
+    print(f"[SETCHAT] shared link registered chat={chat_id} for user={uid}", flush=True)
+    return True
+
+
+async def register_dump_from_ping(message, uid, chat) -> bool:
+    """A shared deep link landed in the owner's dump channel: connect it."""
+    if int(uid) != OWNER_ID:
+        await dm_user(uid, ui.setdump_owner_only_text() if hasattr(ui, "setdump_owner_only_text")
+                      else "👑 Owner only.")
+        return True
+    chat_id = int(getattr(chat, "id", 0) or 0)
+    kind = chat_type_value(chat)
+    title = chat_title(chat, chat_id)
+    if not chat_id or kind not in {"channel", "supergroup", "group"}:
+        await dm_user(uid, ui.setchat_share_failed_text("not_a_channel"))
+        return True
+    ok, reason = await describe_channel_admin(chat_id)
+    if not ok:
+        await dm_user(uid, ui.dump_admin_failed_text(reason))
+        return True
+    await set_dump_channel(chat_id, title, getattr(chat, "username", None), kind)
+    await dm_user(uid, ui.setdump_done_text(title, chat_id), ui.dump_status_keyboard(True))
+    print(f"[DUMP] connected chat={chat_id} by the owner", flush=True)
+    return True
+
+
+async def handle_share_deep_link(message) -> bool:
+    """Handle *any* message that carries a live bot deep link.
+
+    Inside a channel the link *is* the registration proof; in a private chat the
+    user shared it with the bot itself, so they get the instruction screen
+    instead of a silent no-op.
+    """
+    text = (getattr(message, "text", None) or getattr(message, "caption", None) or "")
+    if "start=" not in text or BOT_USERNAME.lower() not in text.lower():
+        return False
+    entry = find_share_token(text)
+    if not entry:
+        return False
+    uid = int(entry["user_id"])
+    chat = getattr(message, "chat", None)
+    if is_channel_context(message):
+        if entry["kind"] == "setchat":
+            return await register_channel_from_ping(message, uid, chat)
+        return await register_dump_from_ping(message, uid, chat)
+
+    # The user shared the link back to the bot: explain what to do with it.
+    if entry["kind"] == "setchat":
+        try:
+            await say(message, ui.setchat_deep_link_private_text(),
+                      reply_markup=ui.setchat_share_prompt_keyboard(
+                          share_deep_link(uid, "setchat")))
+        except Exception:
+            pass
+    else:
+        try:
+            await say(message, ui.setdump_deep_link_private_text(),
+                      reply_markup=ui.setdump_prompt_keyboard(share_deep_link(uid, "setdump")))
+        except Exception:
+            pass
+    return True
+
+
+async def setchat_deep_link_in_private(message, token) -> bool:
+    """``/start ch…`` — the token arrived in a private chat, guide the user."""
+    entry = SHARE_TOKENS.get(token)
+    if not entry or entry.get("kind") != "setchat":
+        return False
+    await say(message, ui.setchat_deep_link_private_text(),
+              reply_markup=ui.setchat_share_prompt_keyboard(
+                  share_deep_link(message.from_user.id, "setchat")))
+    return True
+
+
+async def setdump_deep_link_in_private(message, token) -> bool:
+    entry = SHARE_TOKENS.get(token)
+    if not entry or entry.get("kind") != "setdump":
+        return False
+    await say(message, ui.setdump_deep_link_private_text(),
+              reply_markup=ui.setdump_prompt_keyboard(
+                  share_deep_link(message.from_user.id, "setdump")))
+    return True
+
+
+# --------------------------------------------------------------------------- #
+#  Owner dump channel — the mirror (copy, never forward; TTL deletes it)
+# --------------------------------------------------------------------------- #
+
+class DumpMirror:
+    """Copies every delivered message into the owner's dump channel.
+
+    * the copy is made with ``copy_message`` — **never** ``forward`` — so the
+      mirror (and anything re-shared from it) carries no *Forwarded from*
+      header and no *edited* tag;
+    * each copy is deleted again after ``config.DUMP_TTL_SECONDS``;
+    * every mirror/delete call passes the native FloodWait governor, so a busy
+      hour pauses the queue instead of getting the bot restricted.
+    """
+
+    def __init__(self):
+        self.governor = native_engine.Governor(int(max(0.1, DUMP_COOLDOWN_SECONDS) * 1000))
+        self.tasks: dict = {}
+        self.mirrored = 0
+        self.deleted = 0
+        self.pauses = 0
+        self.wait_seconds = 0.0
+        self._lock = asyncio.Lock()
+
+    # -- helpers ---------------------------------------------------------- #
+    @property
+    def pending(self) -> int:
+        return len(self.tasks)
+
+    def snapshot(self) -> dict:
+        return {"pending": self.pending, "mirrored": self.mirrored,
+                "deleted": self.deleted, "pauses": self.pauses,
+                "wait_seconds": int(self.wait_seconds)}
+
+    async def _pace(self, chat_id) -> None:
+        """Claim a slot from the governor and sleep out the cooldown it returns."""
+        wait_ms = self.governor.pause_ms(f"dump:{chat_id}", time.monotonic())
+        if wait_ms > 0:
+            self.wait_seconds += wait_ms / 1000.0
+            await asyncio.sleep(wait_ms / 1000.0)
+
+    async def _note_flood(self, chat_id, seconds: int, attempt: int) -> None:
+        self.pauses += 1
+        self.governor.penalize(f"dump:{chat_id}", seconds)
+        print(f"[DUMP FLOODWAIT] {seconds}s (attempt {attempt})", flush=True)
+        await floodwait_sleep(seconds)
+
+    # -- mirror ----------------------------------------------------------- #
+    async def mirror(self, chat_id, message_id, *, label="delivery"):
+        """Copy one delivered message into the dump channel; returns the copy."""
+        entry = await get_dump_channel()
+        if not entry:
+            return None
+        try:
+            source = int(chat_id)
+        except (TypeError, ValueError):
+            return None
+        if source == int(entry["chat_id"]):
+            return None                      # never mirror the mirror itself
+
+        copied = None
+        for attempt in range(1, FLOODWAIT_MAX_RETRIES + 2):
+            try:
+                await self._pace(entry["chat_id"])
+                copied = await bot.copy_message(
+                    chat_id=entry["chat_id"], from_chat_id=source, message_id=int(message_id))
+                break
+            except FloodWait as error:
+                await self._note_flood(entry["chat_id"], floodwait_seconds(error), attempt)
+            except Exception as exc:
+                print(f"[DUMP MIRROR FAILED] {label}: {type(exc).__name__}: {exc}", flush=True)
+                return None
+        if copied is None:
+            return None
+
+        self.mirrored += 1
+        self.schedule_delete(entry["chat_id"], getattr(copied, "id", None))
+        print(f"[DUMP] mirrored {label} msg={message_id} -> dump msg={getattr(copied, 'id', None)}",
+              flush=True)
+        return copied
+
+    def schedule_delete(self, chat_id, message_id, *, delay=None) -> None:
+        """Queue the TTL delete for one mirrored copy."""
+        if message_id is None:
+            return
+        key = f"{chat_id}:{message_id}"
+        previous = self.tasks.pop(key, None)
+        if previous is not None and not previous.done():
+            previous.cancel()
+        task = asyncio.get_event_loop().create_task(
+            self._delete_later(chat_id, message_id, delay))
+        self.tasks[key] = task
+        if len(self.tasks) > DUMP_QUEUE_LIMIT:
+            oldest = next(iter(self.tasks))
+            self.tasks.pop(oldest, None)
+            print(f"[DUMP] queue full — deleting {oldest} immediately", flush=True)
+            asyncio.get_event_loop().create_task(self._delete(chat_id, message_id))
+
+    async def _delete_later(self, chat_id, message_id, delay=None) -> None:
+        await asyncio.sleep(DUMP_TTL_SECONDS if delay is None else float(delay))
+        await self._delete(chat_id, message_id)
+
+    async def _delete(self, chat_id, message_id) -> bool:
+        key = f"{chat_id}:{message_id}"
+        try:
+            for attempt in range(1, FLOODWAIT_MAX_RETRIES + 2):
+                try:
+                    await self._pace(chat_id)
+                    await bot.delete_messages(chat_id, int(message_id))
+                    self.deleted += 1
+                    return True
+                except FloodWait as error:
+                    await self._note_flood(chat_id, floodwait_seconds(error), attempt)
+                except Exception as exc:
+                    print(f"[DUMP DELETE FAILED] {key}: {type(exc).__name__}: {exc}", flush=True)
+                    return False
+            return False
+        finally:
+            self.tasks.pop(key, None)
+
+    async def flush(self) -> int:
+        """Delete every mirrored copy right now (used by /deldump)."""
+        count = 0
+        for key, task in list(self.tasks.items()):
+            if not task.done():
+                task.cancel()
+            chat_id, _, message_id = key.partition(":")
+            if await self._delete(int(chat_id), int(message_id)):
+                count += 1
+        return count
+
+
+#: The single mirror used by every delivery path.
+DUMP_MIRROR = DumpMirror()
+#: Set once the mirror has seen the dump channel (avoid re-reading the config).
+DUMP_MIRROR_ENABLED = True
+
+
+async def mirror_delivery(source_chat_id, message_id, *, label="delivery"):
+    """Best-effort mirror hook (never raises into the extraction path)."""
+    if not DUMP_MIRROR_ENABLED:
+        return None
+    try:
+        return await DUMP_MIRROR.mirror(source_chat_id, message_id, label=label)
+    except Exception as exc:  # pragma: no cover - defensive
+        print(f"[DUMP MIRROR ERROR] {exc}", flush=True)
+        return None
+
+
+# --------------------------------------------------------------------------- #
+#  /setdump, /deldump and /dump
+# --------------------------------------------------------------------------- #
+
+@bot.on_message(filters.command("setdump") & filters.private)
+@owner_only
+async def setdump_handler(client, message):
+    uid = message.from_user.id
+    args = (message.text or "").split(maxsplit=1)
+    ref = args[1].strip() if len(args) > 1 else ""
+    if not ref:
+        pending_action[uid] = "setdump"
+        await say(message, ui.setdump_prompt_text(),
+                  reply_markup=ui.setdump_prompt_keyboard(share_deep_link(uid, "setdump")))
+        return
+    await finish_setdump(message, ref)
+
+
+async def finish_setdump(message, ref) -> bool:
+    """Shared by /setdump <link> and the typed prompt."""
+    uid = message.from_user.id
+    try:
+        resolved = await resolve_chat_target(ref)
+    except InviteRequestSent:
+        await say(message, ui.setdump_join_request_text(), reply_markup=ui.feedback_keyboard())
+        return False
+    except InviteLinkError as exc:
+        await say(message, ui.setchat_resolve_failed_text(exc.reason) + "\n\n" +
+                  ui.setdump_prompt_text(), reply_markup=ui.feedback_keyboard())
+        return False
+    if not resolved or not resolved.get("chat_id"):
+        await say(message, ui.setchat_resolve_failed_text("unresolved") + "\n\n" +
+                  ui.setdump_prompt_text(), reply_markup=ui.feedback_keyboard())
+        return False
+    ok, reason = await describe_channel_admin(resolved["chat_id"])
+    if not ok:
+        pending_action[uid] = "setdump"
+        await say(message, ui.dump_admin_failed_text(reason), reply_markup=ui.feedback_keyboard())
+        return False
+    await set_dump_channel(resolved["chat_id"], resolved.get("title"),
+                           resolved.get("username"), resolved.get("type"))
+    pending_action.pop(uid, None)
+    setchat_pending.pop(uid, None)
+    await say(message, ui.setdump_done_text(resolved.get("title") or resolved["chat_id"],
+                                            resolved["chat_id"]),
+              reply_markup=ui.dump_status_keyboard(True))
+    return True
+
+
+@bot.on_message(filters.command(["deldump"]) & filters.private)
+@owner_only
+async def deldump_handler(client, message):
+    entry = await get_dump_channel()
+    if not entry:
+        await say(message, ui.dump_status_text(None), reply_markup=ui.dump_status_keyboard(False))
+        return
+    pending = await DUMP_MIRROR.flush()
+    await delete_dump_channel()
+    await say(message, ui.setdump_removed_text(entry.get("title")) +
+              (f"\n\n🗑 **{pending}** mirrored message(s) were removed from it just now."
+               if pending else ""),
+              reply_markup=ui.back_keyboard())
+
+
+@bot.on_message(filters.command("dump") & filters.private)
+@owner_only
+async def dump_status_handler(client, message):
+    entry = await get_dump_channel()
+    await say(message, ui.dump_status_text(entry, DUMP_MIRROR.snapshot()),
+              reply_markup=ui.dump_status_keyboard(bool(entry)))
+
+
+@callback_action("dump:off")
+async def cb_dump_off(client, query):
+    if query.from_user.id != OWNER_ID:
+        await query.answer(ui_text("👑 Owner only."), show_alert=True)
+        return
+    await query.answer(ui_text("🗑 Disconnecting the dump channel…"))
+    await deldump_handler(client, query.message)
+
+
+# --------------------------------------------------------------------------- #
+#  /pin and /pinned
+# --------------------------------------------------------------------------- #
+
+def pin_target_chat(message):
+    """``(chat_id, title)`` — where /pin acts.
+
+    Inside a channel the command acts on that channel.  In a private chat it
+    acts on the owner's dump channel when one is connected (that is the channel
+    the owner actually broadcasts into), otherwise on the private chat itself.
+    """
+    if is_channel_context(message):
+        chat = message.chat
+        return int(chat.id), chat_title(chat, chat.id)
+    return None, None
+
+
+def pin_message_id(message):
+    """The message id /pin was pointed at (reply, link or bare number)."""
+    reply = getattr(message, "reply_to_message", None)
+    if reply is not None and getattr(reply, "id", None):
+        return int(reply.id)
+    parts = (getattr(message, "text", None) or "").split(maxsplit=1)
+    arg = parts[1].strip() if len(parts) > 1 else ""
+    if not arg:
+        return None
+    target, msg_id, _is_private = parse_link(arg)
+    if target is not None and msg_id:
+        return int(msg_id)
+    if arg.isdigit():
+        return int(arg)
+    return None
+
+
+async def resolve_pin_scope(message):
+    """``(chat_id, title, msg_id)`` for /pin, or a ``(None, reason, None)`` error."""
+    chat_id, title = pin_target_chat(message)
+    if chat_id is None:
+        entry = await get_dump_channel()
+        if entry:
+            chat_id, title = int(entry["chat_id"]), entry.get("title") or "your dump channel"
+        else:
+            chat_id = int(message.chat.id)
+            title = "this chat"
+    msg_id = pin_message_id(message)
+    if msg_id is None:
+        return None, "no_target", None
+    return chat_id, title, msg_id
+
+
+async def pin_in_chat(chat_id, msg_id) -> tuple[bool, str]:
+    """Pin one message, translating Telegram's answers into plain English."""
+    try:
+        await floodwait_guard(bot.pin_chat_message, chat_id, int(msg_id),
+                              disable_notification=False)
+        return True, "ok"
+    except FloodWait as error:
+        await floodwait_sleep(floodwait_seconds(error))
+        return False, "error"
+    except ChatAdminRequired:
+        return False, "no_rights"
+    except Exception as exc:
+        print(f"[PIN FAILED] chat={chat_id} msg={msg_id}: {type(exc).__name__}: {exc}",
+              flush=True)
+        return False, "not_found" if "not found" in str(exc).lower() else "error"
+
+
+@bot.on_message(filters.command("pin") & (filters.private | filters.channel | filters.group))
+@admin_only
+async def pin_handler(client, message):
+    chat_id, title, msg_id = await resolve_pin_scope(message)
+    if chat_id is None:
+        if title == "no_target":
+            await say(message, ui.pin_usage_text() if message.reply_to_message else
+                      ui.pin_no_target_text(), reply_markup=ui.feedback_keyboard())
+            return
+        await say(message, ui.pin_failed_text(title))
+        return
+    ok, reason = await pin_in_chat(chat_id, msg_id)
+    body = ui.pin_done_text(title, msg_id) if ok else ui.pin_failed_text(reason)
+    await say(message, body, reply_markup=ui.back_keyboard() if ok else ui.feedback_keyboard())
+    if ok:
+        #: Pinning a message is usually followed by wanting to talk about it:
+        #: offer the same inline-button wizard the other sends use.
+        BUTTON_WIZARD[message.from_user.id] = {
+            "stage": "offer", "buttons": [],
+            "payload": {"kind": "pin", "chat_id": chat_id, "message_id": int(msg_id),
+                        "text": ""},
+        }
+        await say(message, ui.buttons_offer_text("📌 pinned message") + "\n\n" +
+                  "Want to decorate the pinned message with an inline button?",
+                  reply_markup=ui.buttons_offer_keyboard())
+
+
+@bot.on_message(filters.command("pinned") & (filters.private | filters.channel | filters.group))
+@admin_only
+async def pinned_handler(client, message):
+    chat_id, title = pin_target_chat(message)
+    if chat_id is None:
+        entry = await get_dump_channel()
+        if entry:
+            chat_id, title = int(entry["chat_id"]), entry.get("title") or "your dump channel"
+        else:
+            chat_id = int(message.chat.id)
+            title = "this chat"
+    try:
+        chat = await floodwait_guard(bot.get_chat, chat_id)
+        pinned = getattr(chat, "pinned_message", None)
+    except FloodWait as error:
+        await floodwait_sleep(floodwait_seconds(error))
+        await say(message, ui.pin_failed_text("error"), reply_markup=ui.feedback_keyboard())
+        return
+    except Exception as exc:
+        print(f"[PINNED FAILED] chat={chat_id}: {exc}", flush=True)
+        await say(message, ui.pin_failed_text("error"), reply_markup=ui.feedback_keyboard())
+        return
+    if not pinned or getattr(pinned, "id", None) is None:
+        await say(message, ui.pinned_none_text(title), reply_markup=ui.back_keyboard())
+        return
+    try:
+        await floodwait_guard(bot.unpin_chat_message, chat_id, int(pinned.id))
+    except FloodWait as error:
+        await floodwait_sleep(floodwait_seconds(error))
+        await say(message, ui.pin_failed_text("error"), reply_markup=ui.feedback_keyboard())
+        return
+    except Exception as exc:
+        print(f"[UNPIN FAILED] chat={chat_id}: {exc}", flush=True)
+        await say(message, ui.pin_failed_text("error"), reply_markup=ui.feedback_keyboard())
+        return
+    await say(message, ui.unpin_done_text(title), reply_markup=ui.back_keyboard())
+
+
+@callback_action("pin_offer:yes")
+async def cb_pin_offer_yes(client, query):
+    state = BUTTON_WIZARD.get(query.from_user.id) or {}
+    payload = state.get("payload") or {}
+    chat_id = payload.get("chat_id")
+    if chat_id is None:
+        await query.answer(ui_text("The offer expired — send the message again."),
+                           show_alert=True)
+        return
+    await query.answer(ui_text("📌 Pinning…"))
+    ok, reason = await pin_in_chat(chat_id, payload.get("message_id"))
+    await render(query, ui.pin_done_text(payload.get("title") or "the chat",
+                                         payload.get("message_id")) if ok
+                 else ui.pin_failed_text(reason), ui.back_keyboard())
+
+
+@callback_action("pin_offer:no")
+async def cb_pin_offer_no(client, query):
+    BUTTON_WIZARD.pop(query.from_user.id, None)
+    await query.answer(ui_text("👌 Left unpinned."))
+    await render(query, ui.message_sent_text(), ui.back_keyboard())
+
+
+# --------------------------------------------------------------------------- #
+#  Inline-button wizard — colour + link for any outgoing message
+# --------------------------------------------------------------------------- #
+
+#: user_id -> {"stage", "buttons": [{"label","url","color","style"}], "payload"}
+BUTTON_WIZARD: dict = {}
+#: user_id -> {"label", ...} while the wizard waits for typed input.
+BUTTON_DRAFT: dict = {}
+
+#: Payload kinds the wizard can deliver.
+WIZARD_KIND_DM = "dm"
+WIZARD_KIND_BROADCAST = "broadcast"
+WIZARD_KIND_CHANNEL = "channel"
+WIZARD_KIND_PIN = "pin"
+
+
+def normalize_button_url(value: str) -> str | None:
+    """Accept ``t.me/x``, ``https://…``, ``tg://…`` — reject everything else."""
+    text = (value or "").strip()
+    if not text:
+        return None
+    if text.lower().startswith(("https://", "http://", "tg://")):
+        return text
+    if text.lower().startswith("t.me/"):
+        return "https://" + text
+    if "." in text.split("/")[0] and " " not in text:
+        return "https://" + text
+    return None
+
+
+def wizard_preview(payload: dict) -> str:
+    text = (payload.get("text") or "").strip().replace("\n", " ")
+    if not text:
+        return payload.get("preview") or "your message"
+    return text if len(text) <= 60 else text[:57] + "…"
+
+
+async def start_button_wizard(source, payload: dict):
+    """Ask the owner whether the outgoing message should carry buttons."""
+    uid = source.from_user.id
+    BUTTON_WIZARD[uid] = {"stage": "offer", "buttons": [], "payload": payload}
+    BUTTON_DRAFT.pop(uid, None)
+    await render(source, ui.buttons_offer_text(wizard_preview(payload)),
+                 ui.buttons_offer_keyboard())
+
+
+async def deliver_wizard_payload(wizard, uid):
+    """Send the prepared message with the buttons designed so far."""
+    payload = wizard.get("payload") or {}
+    buttons = wizard.get("buttons") or []
+    keyboard = ui.custom_buttons_keyboard(buttons) if buttons else None
+    kind = payload.get("kind")
+    sent = []
+    if kind == WIZARD_KIND_DM:
+        sent.append(await bot.send_message(payload["chat_id"], payload.get("text") or "",
+                                           reply_markup=keyboard,
+                                           parse_mode=ParseMode.DISABLED))
+    elif kind == WIZARD_KIND_CHANNEL:
+        message = await bot.send_message(payload["chat_id"], payload.get("text") or "",
+                                         reply_markup=keyboard,
+                                         parse_mode=ParseMode.DISABLED)
+        sent.append(message)
+        message_id = getattr(message, "id", None)
+        wizard["payload"]["message_id"] = message_id
+        wizard["payload"]["title"] = payload.get("title")
+        #: Telegram cannot add buttons to a message that is already sent, but it
+        #: can pin it — so every channel post ends with a one-tap pin offer.
+        if message_id:
+            BUTTON_WIZARD[uid] = {
+                "stage": "pin_offer", "buttons": buttons,
+                "payload": {"kind": WIZARD_KIND_PIN,
+                            "chat_id": payload["chat_id"],
+                            "title": payload.get("title"),
+                            "message_id": message_id,
+                            "text": payload.get("text") or ""},
+            }
+            await say_message(bot, uid, ui.pin_offer_text(),
+                              reply_markup=ui.pin_offer_keyboard())
+    elif kind == WIZARD_KIND_BROADCAST:
+        sent = await run_button_broadcast(payload.get("text") or "", buttons)
+    elif kind == WIZARD_KIND_PIN:
+        message_id = payload.get("message_id")
+        if buttons and message_id:
+            #: Telegram cannot add a keyboard to an existing message, so the
+            #: pinned message is re-sent with the buttons and pinned again.
+            try:
+                refreshed = await bot.send_message(
+                    payload["chat_id"], payload.get("text") or "📌", reply_markup=keyboard,
+                    parse_mode=ParseMode.DISABLED)
+                sent.append(refreshed)
+                await floodwait_guard(bot.pin_chat_message, payload["chat_id"],
+                                      getattr(refreshed, "id", 0))
+            except Exception as exc:
+                print(f"[PIN BUTTONS FAILED] {exc}", flush=True)
+    return sent
+
+
+async def run_button_broadcast(text: str, buttons) -> list:
+    """Broadcast a personalised message; the pool formats every copy in C++."""
+    users = await get_all_users()
+    names = [entry.get("name") for entry in users]
+    prepared = native_engine.prepare_broadcast(text, names) if "{name}" in text \
+        else [text for _ in users]
+    keyboard = ui.custom_buttons_keyboard(buttons) if buttons else None
+    sent = []
+    for entry, body in zip(users, prepared):
+        try:
+            sent.append(await bot.send_message(entry["user_id"], body,
+                                               reply_markup=keyboard,
+                                               parse_mode=ParseMode.HTML))
+        except FloodWait as error:
+            await floodwait_sleep(floodwait_seconds(error))
+            continue
+        except Exception:
+            continue
+        await asyncio.sleep(0.05)
+    return sent
+
+
+@callback_action("btnwiz:yes")
+async def cb_btnwiz_yes(client, query):
+    wizard = BUTTON_WIZARD.get(query.from_user.id)
+    if not wizard:
+        await query.answer(ui_text("This wizard expired — start again."), show_alert=True)
+        return
+    wizard["stage"] = "color"
+    await query.answer()
+    await render(query, ui.button_color_text(), ui.button_color_keyboard())
+
+
+@callback_action("btnwiz:skip")
+async def cb_btnwiz_skip(client, query):
+    wizard = BUTTON_WIZARD.pop(query.from_user.id, None)
+    if not wizard:
+        await query.answer(ui_text("This wizard expired — start again."), show_alert=True)
+        return
+    await query.answer(ui_text("📤 Sending without buttons…"))
+    try:
+        await deliver_wizard_payload(wizard, query.from_user.id)
+    except Exception as exc:
+        await render(query, f"❌ **Sending failed**\n\n{exc}", ui.admin_back_keyboard())
+        return
+    await render(query, ui.message_sent_text(), ui.admin_back_keyboard())
+
+
+@callback_action("btnwiz:cancel")
+async def cb_btnwiz_cancel(client, query):
+    BUTTON_WIZARD.pop(query.from_user.id, None)
+    BUTTON_DRAFT.pop(query.from_user.id, None)
+    await query.answer(ui_text("❌ Cancelled — nothing was sent."))
+    await render(query, ui.message_cancelled_text(), ui.admin_back_keyboard())
+
+
+async def handle_button_wizard_callback(client, query, data: str):
+    uid = query.from_user.id
+    wizard = BUTTON_WIZARD.get(uid)
+    if not wizard:
+        await query.answer(ui_text("This wizard expired — start again."), show_alert=True)
+        return
+    action, _, arg = data.partition(":")
+    action, _, arg2 = arg.partition(":")
+    if action == "color":
+        color = arg2 or arg
+        spec = BUTTON_COLORS.get(color)
+        if not spec:
+            await query.answer(ui_text("⚠️ Unknown colour."), show_alert=True)
+            return
+        BUTTON_DRAFT[uid] = {"color": color, "style": spec["style"], "label": ""}
+        wizard["stage"] = "label"
+        await query.answer(ui_text(f"{spec['label']} selected."))
+        await render(query, ui.button_label_text(), ui.button_label_keyboard())
+        return
+    if action == "link":
+        value = arg2 or arg
+        if value == "none":
+            BUTTON_DRAFT.pop(uid, None)
+            wizard["stage"] = "more"
+            await query.answer(ui_text("⏭ Button without a link."))
+            await render(query, ui.button_more_text(wizard["buttons"]),
+                         ui.button_more_keyboard(wizard["buttons"]))
+            return
+        await query.answer(ui_text("⚠️ Send the link as a text message."), show_alert=True)
+        return
+    if action == "add":
+        wizard["stage"] = "color"
+        await query.answer()
+        await render(query, ui.button_color_text(), ui.button_color_keyboard())
+        return
+    if action == "send":
+        BUTTON_WIZARD.pop(uid, None)
+        BUTTON_DRAFT.pop(uid, None)
+        await query.answer(ui_text("📤 Sending…"))
+        try:
+            await deliver_wizard_payload(wizard, uid)
+        except Exception as exc:
+            await render(query, f"❌ **Sending failed**\n\n{exc}", ui.admin_back_keyboard())
+            return
+        await render(query, ui.message_sent_text() +
+                     ("\n\n" + ui.buttons_preview_text(wizard["buttons"])
+                      if wizard.get("buttons") else ""),
+                     ui.admin_back_keyboard())
+        return
+    await query.answer(ui_text("⚠️ Unknown action."), show_alert=True)
+
+
+async def wizard_text_input(message, uid, text) -> bool:
+    """Consume a typed label/link while the button wizard is waiting for it."""
+    wizard = BUTTON_WIZARD.get(uid)
+    if not wizard:
+        return False
+    stage = wizard.get("stage")
+    if stage == "label":
+        label = (text or "").strip()
+        if not label:
+            await say(message, ui.button_label_text(), reply_markup=ui.button_label_keyboard())
+            return True
+        if len(label) > MAX_BUTTON_LABEL:
+            await say(message, ui.button_label_too_long_text(MAX_BUTTON_LABEL),
+                      reply_markup=ui.button_label_keyboard())
+            return True
+        draft = BUTTON_DRAFT.setdefault(uid, {"style": "primary"})
+        draft["label"] = label
+        wizard["stage"] = "link"
+        await say(message, ui.button_link_text(label), reply_markup=ui.button_link_keyboard())
+        return True
+    if stage == "link":
+        draft = BUTTON_DRAFT.get(uid) or {}
+        url = normalize_button_url(text)
+        if url is None:
+            await say(message, ui.button_link_invalid_text(), reply_markup=ui.button_link_keyboard())
+            return True
+        wizard["buttons"].append({
+            "label": draft.get("label") or "Open",
+            "url": url,
+            "color": draft.get("color") or "primary",
+            "style": draft.get("style") or "primary",
+        })
+        BUTTON_DRAFT.pop(uid, None)
+        wizard["stage"] = "more"
+        await say(message, ui.button_more_text(wizard["buttons"]),
+                  reply_markup=ui.button_more_keyboard(wizard["buttons"]))
+        return True
+    return False
+
+
+# --------------------------------------------------------------------------- #
+#  Giveaways — one at a time, always random, always announced
+# --------------------------------------------------------------------------- #
+
+#: owner_id -> wizard state while /giveaway builds a new giveaway.
+GIVEAWAY_WIZARD: dict = {}
+#: Live counters shown by the panel and /dump-style diagnostics.
+GIVEAWAY_STATS = {"posts": 0, "refreshes": 0, "draws": 0, "pauses": 0}
+#: The background pump (daily re-post, live count, final draw).
+GIVEAWAY_TASK = None
+#: Flips once the participant index has been requested.
+GIVEAWAY_INDEXES_READY = False
+GIVEAWAY_GOVERNOR = native_engine.Governor(2000)
+
+
+def giveaway_link(token: str) -> str:
+    return f"https://t.me/{BOT_USERNAME}?start=gw{token}"
+
+
+def parse_giveaway_end(text, *, now=None):
+    """``6h`` / ``3d`` / ``2w`` or ``2026-11-01 20:00`` → a naive UTC deadline."""
+    now = now or datetime.utcnow()
+    raw = (text or "").strip()
+    if not raw:
+        return None
+    compact = raw.lower().replace(" ", "")
+    match = re.fullmatch(r"(\d+)([mhdw])", compact)
+    if match:
+        amount = int(match.group(1))
+        unit = match.group(2)
+        factor = {"m": 60, "h": 3600, "d": 86400, "w": 7 * 86400}[unit]
+        seconds = amount * factor
+        if seconds <= 0:
+            return None
+        value = now + timedelta(seconds=seconds)
+        return value if (value - now) <= timedelta(days=GIVEAWAY_MAX_DAYS) else None
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d", "%d-%m-%Y %H:%M", "%d/%m/%Y %H:%M",
+                "%d %b %Y %H:%M", "%d %b %Y"):
+        try:
+            value = datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+        if value <= now or (value - now) > timedelta(days=GIVEAWAY_MAX_DAYS):
+            return None
+        return value
+    return None
+
+
+def giveaway_ends_label(gw) -> str:
+    return ui.giveaway_when(gw.get("ends_at"))
+
+
+async def giveaway_panel(source, *, stats=None, active=None):
+    gw = active if active is not None else await get_active_giveaway()
+    if gw:
+        count = await count_giveaway_participants(gw.get("_id") or "active")
+        channel = gw.get("channel_id")
+        channel_label = None
+        if channel:
+            entry = None
+            for item in await get_user_channels(OWNER_ID):
+                if int(item["chat_id"]) == int(channel):
+                    entry = item
+                    break
+            channel_label = (entry or {}).get("title") or f"chat {channel}"
+        stats = {
+            "participants": count,
+            "channel": channel_label,
+            "message": gw.get("message_id"),
+            "daily_hours": int(GIVEAWAY_DAILY_INTERVAL_SECONDS // 3600) or 1,
+            "last_post": ui.giveaway_when(gw.get("last_post_at")),
+        }
+    await render(source, ui.giveaway_panel_text(gw, stats), ui.giveaway_panel_keyboard(gw))
+
+
+@bot.on_message(filters.command(["giveaway", "participants", "endgiveaway"]) & filters.private)
+@owner_only
+async def giveaway_handler(client, message):
+    command = command_name_of(message) or "giveaway"
+    if command == "participants":
+        await show_giveaway_participants(message, 0)
+        return
+    if command == "endgiveaway":
+        await end_giveaway_now(message)
+        return
+    args = (message.text or "").split(maxsplit=1)
+    if len(args) > 1 and args[1].strip().lower() in {"end", "stop"}:
+        await end_giveaway_now(message)
+        return
+    await giveaway_panel(message)
+
+
+async def show_giveaway_participants(source, page=0):
+    gw = await get_active_giveaway() or await get_last_giveaway()
+    if not gw:
+        await render(source, ui.giveaway_none_text(), ui.back_keyboard())
+        return
+    giveaway_id = gw.get("_id") or "active"
+    total = await count_giveaway_participants(giveaway_id)
+    per_page = max(1, int(GIVEAWAY_PARTICIPANTS_PER_PAGE))
+    pages = max(1, -(-total // per_page))
+    page = max(0, min(int(page or 0), pages - 1))
+    rows = await list_giveaway_participants(giveaway_id, skip=page * per_page, limit=per_page)
+    await render(source, ui.giveaway_participants_text(rows, page, pages, total),
+                 ui.giveaway_participants_keyboard(page, pages))
+
+
+async def end_giveaway_now(source, *, announce=True):
+    """Draw the random winner and close the giveaway."""
+    gw = await get_active_giveaway()
+    if not gw:
+        await render(source, ui.giveaway_none_text(), ui.giveaway_panel_keyboard(None))
+        return False
+    participants = await all_giveaway_participants(gw.get("_id") or "active")
+    winner = random.SystemRandom().choice(participants) if participants else None
+    prize = ui.giveaway_prize_label(gw.get("prize_tier"), gw.get("prize_days"))
+    granted = False
+    if winner:
+        try:
+            await add_premium(int(winner["user_id"]), gw.get("prize_days"),
+                              tier=gw.get("prize_tier"))
+            granted = True
+        except Exception as exc:
+            print(f"[GIVEAWAY GRANT FAILED] {exc}", flush=True)
+        await dm_user(winner["user_id"], ui.giveaway_winner_dm_text(prize))
+        await announce_winner(gw, winner, prize, len(participants))
+    await finish_giveaway(dict(winner) if winner else None)
+    GIVEAWAY_STATS["draws"] += 1
+    if announce:
+        await render(source, ui.giveaway_owner_ended_text(
+            giveaway_winner_label(winner), len(participants), granted),
+            ui.admin_back_keyboard())
+    return True
+
+
+def giveaway_winner_label(winner) -> str | None:
+    if not winner:
+        return None
+    name = winner.get("name") or "User"
+    username = winner.get("username")
+    return f"{name} (@{username})" if username else f"{name}"
+
+
+async def announce_winner(gw, winner, prize, total):
+    label = giveaway_winner_label(winner)
+    text = ui.giveaway_finished_text(label, prize, total)
+    channel = gw.get("channel_id")
+    if channel:
+        try:
+            await say_message(bot, channel, text)
+            await floodwait_guard(bot.unpin_chat_message, channel)
+        except FloodWait as error:
+            await floodwait_sleep(floodwait_seconds(error))
+        except Exception as exc:
+            print(f"[GIVEAWAY ANNOUNCE FAILED] {exc}", flush=True)
+    await dm_user(OWNER_ID, text)
+
+
+async def post_giveaway_message(gw, count, *, repost=False):
+    """Publish (or re-publish) the public giveaway message and pin it."""
+    text = ui.giveaway_public_text(gw, count, ends_label=giveaway_ends_label(gw))
+    keyboard = ui.giveaway_public_keyboard(giveaway_link(gw.get("token") or ""))
+    channel = gw.get("channel_id")
+    now = datetime.utcnow()
+    GIVEAWAY_GOVERNOR.pause_ms(f"gw:{channel or 'dm'}", time.monotonic())
+    if not channel:
+        await dm_user(OWNER_ID, text, keyboard)
+        await update_giveaway({"last_post_at": now, "rendered_count": int(count)})
+        return None
+    try:
+        message = await bot.send_message(channel, text, reply_markup=keyboard,
+                                         parse_mode=ParseMode.HTML)
+    except FloodWait as error:
+        GIVEAWAY_STATS["pauses"] += 1
+        GIVEAWAY_GOVERNOR.penalize(f"gw:{channel}", floodwait_seconds(error))
+        await floodwait_sleep(floodwait_seconds(error))
+        try:
+            message = await bot.send_message(channel, text, reply_markup=keyboard,
+                                             parse_mode=ParseMode.HTML)
+        except Exception as exc:
+            print(f"[GIVEAWAY POST FAILED] {exc}", flush=True)
+            return None
+    except Exception as exc:
+        print(f"[GIVEAWAY POST FAILED] {exc}", flush=True)
+        return None
+    try:
+        await bot.pin_chat_message(channel, message.id, disable_notification=False)
+    except Exception as exc:
+        print(f"[GIVEAWAY PIN FAILED] {exc}", flush=True)
+    GIVEAWAY_STATS["posts"] += 1
+    await update_giveaway({"message_id": getattr(message, "id", None),
+                           "last_post_at": now, "rendered_count": int(count)})
+    return message
+
+
+async def refresh_giveaway_count(gw, count):
+    """Edit the pinned message so the participant count is live."""
+    channel = gw.get("channel_id")
+    message_id = gw.get("message_id")
+    if not channel or not message_id:
+        return False
+    text = ui.giveaway_public_text(gw, count, ends_label=giveaway_ends_label(gw))
+    keyboard = ui.giveaway_public_keyboard(giveaway_link(gw.get("token") or ""))
+    try:
+        await floodwait_guard(bot.edit_message_text, channel, int(message_id), text,
+                              reply_markup=keyboard, parse_mode=ParseMode.HTML)
+        GIVEAWAY_STATS["refreshes"] += 1
+        await update_giveaway({"rendered_count": int(count)})
+        return True
+    except MessageNotModified:
+        await update_giveaway({"rendered_count": int(count)})
+        return False
+    except Exception as exc:
+        print(f"[GIVEAWAY REFRESH FAILED] {exc}", flush=True)
+        return False
+
+
+async def giveaway_tick(now=None) -> bool:
+    """One scheduler tick: end, re-post daily, refresh the live count."""
+    gw = await get_active_giveaway()
+    if not gw:
+        return False
+    now = now or datetime.utcnow()
+    ends = gw.get("ends_at")
+    if ends is not None and now >= ends:
+        print("[GIVEAWAY] deadline reached — drawing the winner", flush=True)
+        await end_giveaway_now(MessageProxyOwner(), announce=False)
+        return True
+    count = await count_giveaway_participants(gw.get("_id") or "active")
+    last = gw.get("last_post_at") or gw.get("created_at") or now
+    if (now - last).total_seconds() >= GIVEAWAY_DAILY_INTERVAL_SECONDS:
+        await post_giveaway_message(gw, count, repost=True)
+        return True
+    if int(gw.get("rendered_count") or 0) != int(count):
+        await refresh_giveaway_count(gw, count)
+        return True
+    return False
+
+
+class MessageProxyOwner:
+    """A tiny stand-in source so the scheduler can reuse the /giveaway screens."""
+
+    def __init__(self):
+        self.from_user = SimpleNamespace(id=OWNER_ID, first_name="Owner", username=None)
+        self.chat = SimpleNamespace(id=OWNER_ID)
+        self.id = 0
+        self.replies = []
+
+    async def reply(self, text, reply_markup=None, **kwargs):
+        self.replies.append({"text": text})
+        return self
+
+
+async def giveaway_loop():
+    """Background pump: runs while a giveaway is live."""
+    print("[GIVEAWAY] scheduler started", flush=True)
+    while True:
+        try:
+            await giveaway_tick()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # pragma: no cover - the pump must survive
+            print(f"[GIVEAWAY TICK FAILED] {type(exc).__name__}: {exc}", flush=True)
+        await asyncio.sleep(max(15, int(GIVEAWAY_LIVE_REFRESH_SECONDS)))
+
+
+def ensure_giveaway_loop():
+    """Start the scheduler lazily (first update of this process).
+
+    It only starts once the client is actually connected — that keeps the
+    background task out of unit tests and out of the cold-start window, and the
+    first real update always starts it.
+    """
+    global GIVEAWAY_TASK, GIVEAWAY_INDEXES_READY
+    if GIVEAWAY_TASK is not None and not GIVEAWAY_TASK.done():
+        return GIVEAWAY_TASK
+    if getattr(bot, "me", None) is None:
+        return None
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:  # pragma: no cover - no loop yet
+        return None
+    if not GIVEAWAY_INDEXES_READY:
+        #: One-time: the unique (giveaway_id, user_id) index that makes a double
+        #: tap impossible even under a race.
+        GIVEAWAY_INDEXES_READY = True
+        loop.create_task(ensure_giveaway_indexes())
+    GIVEAWAY_TASK = loop.create_task(giveaway_loop())
+    return GIVEAWAY_TASK
+
+
+async def giveaway_join(message, token) -> bool:
+    """``/start gw<token>`` — one tap, one entry, live count updated."""
+    gw = await get_active_giveaway()
+    if not gw or str(gw.get("token")) != str(token):
+        await say(message, ui.giveaway_none_text(), reply_markup=ui.back_keyboard())
+        return False
+    user = message.from_user
+    await ensure_user(user)
+    giveaway_id = gw.get("_id") or "active"
+    joined = await add_giveaway_participant(giveaway_id, user.id,
+                                            get_user_display_name(user),
+                                            getattr(user, "username", None))
+    count = await count_giveaway_participants(giveaway_id)
+    await update_giveaway({"participant_count": int(count)})
+    if not joined:
+        await say(message, ui.giveaway_already_joined_text(count), reply_markup=ui.back_keyboard())
+        return False
+    await say(message, ui.giveaway_joined_text(get_user_display_name(user), gw, count),
+              reply_markup=ui.back_keyboard())
+    #: The pinned message is refreshed right away so the count really is live.
+    await refresh_giveaway_count(gw, count)
+    try:
+        await dm_user(OWNER_ID, f"🎁 **New giveaway participant**\n\n"
+                                f"👤 {get_user_display_name(user)} "
+                                f"(@{getattr(user, 'username', None) or '—'})\n"
+                                f"🆔 `{user.id}`\n👥 Total: **{count}**")
+    except Exception:
+        pass
+    return True
+
+
+@callback_action("gw:new")
+async def cb_gw_new(client, query):
+    if query.from_user.id != OWNER_ID:
+        await query.answer(ui_text("👑 Owner only."), show_alert=True)
+        return
+    active = await get_active_giveaway()
+    if active:
+        await query.answer(ui_text("⚠️ One giveaway at a time — end it first."),
+                           show_alert=True)
+        return
+    GIVEAWAY_WIZARD[OWNER_ID] = {"step": "tier"}
+    await query.answer()
+    await render(query, ui.giveaway_step_tier_text(), ui.grant_tier_keyboard())
+
+
+@callback_action("cmd_giveaway")
+async def cb_gw_panel(client, query):
+    await query.answer()
+    await giveaway_panel(query)
+
+
+@callback_action("gw:link")
+async def cb_gw_link(client, query):
+    if query.from_user.id != OWNER_ID:
+        await query.answer(ui_text("👑 Owner only."), show_alert=True)
+        return
+    gw = await get_active_giveaway()
+    if not gw:
+        await query.answer(ui_text("No giveaway is running."), show_alert=True)
+        return
+    link = giveaway_link(gw.get("token") or "")
+    await query.answer(ui_text("📤 Share sheet opened."))
+    await render(query, ui.giveaway_share_text(link),
+                 ui.keyboard([[ui.share_url_button("📤 Share giveaway", link,
+                                                   "Join the giveaway — one tap to take part!")],
+                              [ui.button("📋 Copy link", copy_text=link, style="primary")],
+                              [ui.admin_back_keyboard().inline_keyboard[0][0]]]))
+
+
+@callback_action("gw:end")
+async def cb_gw_end(client, query):
+    if query.from_user.id != OWNER_ID:
+        await query.answer(ui_text("👑 Owner only."), show_alert=True)
+        return
+    await query.answer(ui_text("🏆 Drawing the winner…"))
+    await end_giveaway_now(query)
+
+
+async def handle_giveaway_callback(client, query, data: str):
+    uid = query.from_user.id
+    if uid != OWNER_ID:
+        await query.answer(ui_text("👑 Owner only."), show_alert=True)
+        return
+    _, _, rest = data.partition(":")
+    if rest.startswith("list"):
+        _, _, page = rest.partition(":")
+        try:
+            page_number = int(page)
+        except ValueError:
+            page_number = 0
+        await query.answer()
+        await show_giveaway_participants(query, page_number)
+        return
+
+    wizard = GIVEAWAY_WIZARD.get(uid)
+    if not wizard:
+        await query.answer(ui_text("This giveaway wizard expired — run /giveaway again."),
+                           show_alert=True)
+        return
+    if rest.startswith("benefit"):
+        _, _, index = rest.partition(":")
+        try:
+            benefit = GIVEAWAY_BENEFIT_SUGGESTIONS[int(index)]
+        except (ValueError, IndexError):
+            await query.answer(ui_text("⚠️ Unknown suggestion."), show_alert=True)
+            return
+        wizard["benefit"] = benefit
+        wizard["step"] = "ends"
+        pending_action.pop(uid, None)
+        await query.answer(ui_text("💡 Suggestion saved."))
+        await render(query, ui.giveaway_step_end_text() + f"\n\n✨ **Benefit:** {benefit}",
+                     ui.giveaway_step_end_keyboard())
+        return
+    if rest.startswith("end"):
+        _, _, value = rest.partition(":")
+        if value == "":
+            return
+        if value in {"1d", "3d", "7d", "14d"}:
+            deadline = parse_giveaway_end(value)
+        else:
+            deadline = parse_giveaway_end(value)
+        if deadline is None:
+            await query.answer(ui_text("⚠️ Could not read that date — try 3d or "
+                                       "2026-11-01 20:00."), show_alert=True)
+            return
+        wizard["ends_at"] = deadline
+        wizard["step"] = "channel"
+        pending_action.pop(uid, None)
+        await query.answer(ui_text("⏰ End time saved."))
+        entries = await get_user_channels(uid)
+        await render(query, ui.giveaway_step_channel_text(entries),
+                     ui.giveaway_step_channel_keyboard(entries))
+        return
+    if rest.startswith("channel"):
+        _, _, value = rest.partition(":")
+        entries = await get_user_channels(uid)
+        channel_id = None
+        channel_title = None
+        if value != "none":
+            try:
+                entry = entries[int(value) - 1]
+            except (ValueError, IndexError):
+                await query.answer(ui_text("⚠️ Unknown channel."), show_alert=True)
+                return
+            channel_id = int(entry["chat_id"])
+            channel_title = entry.get("title")
+        created = await create_giveaway_from_wizard(uid, wizard, channel_id, channel_title)
+        if not created:
+            await query.answer(ui_text("⚠️ A giveaway is already running."), show_alert=True)
+            return
+        await query.answer(ui_text("🎉 Giveaway is live!"))
+        await render(query, ui.giveaway_created_text(created,
+                                                     int(created.get("participant_count") or 0)),
+                     ui.giveaway_created_keyboard(giveaway_link(created.get("token") or "")))
+        return
+    if rest.startswith("tier"):
+        _, _, value = rest.partition(":")
+        tier = normalize_tier(value)
+        if not tier:
+            await query.answer(ui_text("⚠️ Unknown tier."), show_alert=True)
+            return
+        wizard["tier"] = tier
+        wizard["step"] = "duration"
+        await query.answer(ui_text(f"🎖 {GRANT_TIERS[tier]['label']} selected."))
+        await render(query, ui.giveaway_step_duration_text(GRANT_TIERS[tier]["label"]),
+                     ui.grant_duration_keyboard(tier))
+        return
+    if rest.startswith("dur"):
+        _, _, value = rest.partition(":")
+        tier_part, _, duration = value.partition(":")
+        tier = normalize_tier(tier_part) or wizard.get("tier")
+        state, days = parse_grant_duration(duration)
+        if state == "invalid" or not tier:
+            await query.answer(ui_text("⚠️ Invalid duration."), show_alert=True)
+            return
+        if state == "custom":
+            wizard["step"] = "days"
+            pending_action[uid] = "gw_days"
+            await query.answer(ui_text("🔢 Send the number of days."))
+            await say(query.message, ui.giveaway_days_prompt_text(), reply_markup=ui.feedback_keyboard())
+            return
+        wizard["tier"] = tier
+        wizard["days"] = days
+        wizard["step"] = "benefit"
+        pending_action[uid] = "gw_benefit"
+        await query.answer(ui_text("📅 Duration saved."))
+        await render(query, ui.giveaway_step_benefit_text(), ui.giveaway_step_benefit_keyboard())
+        return
+    await query.answer(ui_text("⚠️ Unknown action."), show_alert=True)
+
+
+async def create_giveaway_from_wizard(uid, wizard, channel_id, channel_title):
+    """Persist the giveaway, publish it and pin it."""
+    token = secrets.token_hex(5)
+    doc = {
+        "token": token,
+        "status": "running",
+        "prize_tier": wizard.get("tier") or "public",
+        "prize_days": wizard.get("days", 30),
+        "benefit": wizard.get("benefit") or GIVEAWAY_BENEFIT_SUGGESTIONS[0],
+        "ends_at": wizard.get("ends_at") or (datetime.utcnow() + timedelta(days=1)),
+        "created_at": datetime.utcnow(),
+        "created_by": int(uid),
+        "channel_id": channel_id,
+        "participant_count": 0,
+    }
+    if not await create_giveaway(doc):
+        return None
+    GIVEAWAY_WIZARD.pop(uid, None)
+    pending_action.pop(uid, None)
+    gw = await get_active_giveaway()
+    if gw:
+        await post_giveaway_message(gw, 0)
+        gw = await get_active_giveaway() or gw
+    ensure_giveaway_loop()
+    return gw or doc
+
+
+@callback_action("native:selftest")
+async def cb_native_selftest(client, query):
+    if query.from_user.id != OWNER_ID:
+        await query.answer(ui_text("👑 Owner only."), show_alert=True)
+        return
+    code = native_engine.selftest()
+    await query.answer(ui_text("✅ Self-test passed." if code == 0
+                               else f"❌ Self-test failed at check {code}."),
+                       show_alert=True)
+    await render(query, ui.native_engine_text(native_engine.describe()),
+                 ui.native_engine_keyboard())
+
+
+@callback_action("native:bench")
+async def cb_native_bench(client, query):
+    if query.from_user.id != OWNER_ID:
+        await query.answer(ui_text("👑 Owner only."), show_alert=True)
+        return
+    await query.answer(ui_text("🧪 Benchmarking…"))
+    bench = run_native_benchmark()
+    await render(query, ui.native_engine_text(native_engine.describe(), bench),
+                 ui.native_engine_keyboard())
+
+
+def run_native_benchmark(iterations=200000):
+    """Milliseconds the engine needs for *iterations* escapes (0 when absent)."""
+    if not native_engine.available():
+        return None
+    return native_engine.benchmark(iterations, 1) / 1e6
+
+
+@bot.on_message(filters.command("native") & filters.private)
+@owner_only
+async def native_handler(client, message):
+    await say(message, ui.native_engine_text(native_engine.describe(), run_native_benchmark()),
+              reply_markup=ui.native_engine_keyboard())
+
+
+@bot.on_message(filters.command("post") & filters.private)
+@owner_only
+async def post_to_channel_handler(client, message):
+    """``/post <text>`` — publish a message in the dump channel, buttons optional."""
+    args = (message.text or "").split(maxsplit=1)
+    text = args[1].strip() if len(args) > 1 else ""
+    if not text:
+        await say(message, "Usage: `/post Your announcement text`")
+        return
+    entry = await get_dump_channel()
+    if not entry:
+        await say(message, ui.dump_status_text(None, DUMP_MIRROR.snapshot()),
+                  reply_markup=ui.dump_status_keyboard(False))
+        return
+    await start_button_wizard(message, {
+        "kind": WIZARD_KIND_CHANNEL,
+        "chat_id": int(entry["chat_id"]),
+        "title": entry.get("title"),
+        "text": text,
+        "preview": text,
+    })
+
+
+
+def touch_scheduler():
+    """Start the giveaway pump on the first update of this process.
+
+    The bot has no lifecycle hook that is guaranteed to run on every
+    deployment, so the background task is started lazily from the update
+    handlers: one cheap check per update, and the pump keeps running afterwards.
+    """
+    return ensure_giveaway_loop()
+
+
+async def giveaway_wizard_text(message, uid, text) -> bool:
+    """Consume a typed step of the /giveaway wizard (date, days, benefit line)."""
+    wizard = GIVEAWAY_WIZARD.get(uid)
+    if not wizard:
+        return False
+    step = wizard.get("step")
+    if step == "ends":
+        deadline = parse_giveaway_end(text)
+        if deadline is None:
+            await say(message, ui.giveaway_end_invalid_text(),
+                      reply_markup=ui.giveaway_step_end_keyboard())
+            return True
+        wizard["ends_at"] = deadline
+        wizard["step"] = "channel"
+        entries = await get_user_channels(uid)
+        await say(message, ui.giveaway_step_channel_text(entries),
+                  reply_markup=ui.giveaway_step_channel_keyboard(entries))
+        return True
+    if step == "days":
+        try:
+            days = int(str(text).strip())
+        except ValueError:
+            await say(message, ui.giveaway_days_prompt_text(), reply_markup=ui.feedback_keyboard())
+            return True
+        if days <= 0 or days > GRANT_MAX_DAYS:
+            await say(message, f"❌ Choose between 1 and {GRANT_MAX_DAYS} days.")
+            return True
+        wizard["days"] = days
+        wizard["step"] = "benefit"
+        pending_action[uid] = "gw_benefit"
+        await say(message, ui.giveaway_step_benefit_text(),
+                  reply_markup=ui.giveaway_step_benefit_keyboard())
+        return True
+    if step == "benefit":
+        benefit = str(text).strip()[:GIVEAWAY_MAX_BENEFIT_CHARS]
+        wizard["benefit"] = benefit
+        wizard["step"] = "ends"
+        await say(message, ui.giveaway_step_end_text() + f"\n\n✨ **Benefit:** {benefit}",
+                  reply_markup=ui.giveaway_step_end_keyboard())
+        return True
+    return False
+
+# --------------------------------------------------------------------------- #
 #  Admin panel — one source of truth
 #
 #  ADMIN_PAGES drives the inline panel, the /admins list and the tests that
@@ -4957,6 +6549,9 @@ ADMIN_PAGES = [
     ("⚙️ Administration",
      ["addadmin", "removeadmin", "adminlist", "maintenance",
       "clearlogs", "adminhelp"]),
+    ("🎁 Owner Tools",
+     ["pin", "pinned", "setdump", "deldump", "dump", "post", "native",
+      "giveaway", "participants", "endgiveaway"]),
 ]
 
 #: Every command that appears somewhere in the admin panel.
@@ -4988,6 +6583,10 @@ ADMIN_OWNER_COMMANDS = {
     "addpremium", "addadmin", "removeadmin", "setfsub", "fsublist", "delfsub",
     "fsublabel", "fsubcheck", "maintenance", "setengine",
     "addqr", "delqr", "removeqr", "clearlogs",
+    # Owner tools: pin control, the dump channel, channel posts, the native
+    # engine diagnostics and the giveaway control panel.
+    "pin", "pinned", "setdump", "deldump", "dump", "post", "native",
+    "giveaway", "participants", "endgiveaway",
 }
 
 
@@ -5000,6 +6599,16 @@ ADMIN_OWNER_COMMANDS = {
 #: in for channel vocabulary and for owner/admin work, so the routing is written
 #: down here explicitly instead of relying on filter side effects.
 COMMAND_HANDLERS = {
+    "pin": pin_handler,
+    "pinned": pinned_handler,
+    "setdump": setdump_handler,
+    "deldump": deldump_handler,
+    "dump": dump_status_handler,
+    "post": post_to_channel_handler,
+    "native": native_handler,
+    "giveaway": giveaway_handler,
+    "participants": giveaway_handler,
+    "endgiveaway": giveaway_handler,
     "start": start_handler,
     "help": help_handler,
     "login": login_handler,
@@ -5171,6 +6780,16 @@ def admin_panel_text(page=0):
 
 #: Panels buttons → the very same handler the slash command uses.
 ADMIN_INLINE_HANDLERS = {
+    "pin": pin_handler,
+    "pinned": pinned_handler,
+    "setdump": setdump_handler,
+    "deldump": deldump_handler,
+    "dump": dump_status_handler,
+    "post": post_to_channel_handler,
+    "native": native_handler,
+    "giveaway": giveaway_handler,
+    "participants": giveaway_handler,
+    "endgiveaway": giveaway_handler,
     "stats": stats_handler, "users": users_handler, "loggedusers": loggedusers_handler,
     "newusers": new_users_handler, "activeusers": active_users_handler,
     "topusers": top_users_handler, "broadcast": broadcast_handler, "sendmsg": sendmsg_handler,
@@ -5228,6 +6847,8 @@ async def callback_handler(client, query):
         return
     data = query.data or ""
     uid = query.from_user.id
+    log_latency(query.message, "button")
+    touch_scheduler()
     # Button presses refresh the stored profile too (renames show up everywhere).
     await refresh_profile(query.from_user)
     # Navigation never leaves feedback or an admin prompt silently active.
@@ -5235,6 +6856,7 @@ async def callback_handler(client, query):
     # survive the very button press that opened it).
     if not data.startswith("dl:") and not data.startswith("fsub") \
             and not data.startswith("cap_") \
+            and not data.startswith(("btnwiz:", "gw:", "pin_offer:", "dump:", "native:")) \
             and data not in {"cancel_login", "cancel_action"}:
         pending_action.pop(uid, None)
         admin_pending.pop(uid, None)
@@ -5259,7 +6881,37 @@ async def callback_handler(client, query):
         return
     if data.startswith(("grant_tier:", "grant_dur:", "grant_back:")):
         # Owner-only granular VIP grant wizard (tier → duration).
+        if GIVEAWAY_WIZARD.get(uid) and data.startswith("grant_"):
+            await handle_giveaway_callback(client, query,
+                                           "gw:tier:" + data.split(":", 1)[1]
+                                           if data.startswith("grant_tier:")
+                                           else "gw:dur:" + data.split(":", 1)[1])
+            return
         await handle_grant_callback(client, query, data)
+        return
+    if data.startswith("btnwiz:"):
+        # Inline-button wizard: colour → label → link → send.
+        if data in {"btnwiz:yes", "btnwiz:skip", "btnwiz:cancel"}:
+            handler = CALLBACK_ACTIONS.get(data) or CALLBACK_ACTIONS.get("btnwiz:cancel")
+            await handler(client, query)
+            return
+        await handle_button_wizard_callback(client, query, data)
+        return
+    if data.startswith("gw:"):
+        #: Panel buttons (``gw:new``, ``gw:end``, ``gw:link``) have their own
+        #: actions; only the wizard steps fall through to the step handler.
+        handler = CALLBACK_ACTIONS.get(data)
+        if handler is not None:
+            await handler(client, query)
+            return
+        await handle_giveaway_callback(client, query, data)
+        return
+    if data.startswith(("pin_offer:", "dump:", "native:")):
+        handler = CALLBACK_ACTIONS.get(data)
+        if handler is None:
+            await query.answer(ui_text(ui.stale_button_text()), show_alert=True)
+            return
+        await handler(client, query)
         return
     if data.startswith("engine_mode:"):
         # Owner-only global engine controller (AUTO / LOCK C++ / LOCK PYTHON).
@@ -5379,6 +7031,8 @@ async def callback_handler(client, query):
 
 
 @bot.on_message(filters.text & filters.private & ~filters.command([
+    "pin", "pinned", "setdump", "deldump", "dump", "post", "native",
+    "giveaway", "participants", "endgiveaway",
     "start", "help", "login", "logout", "status", "cancel",
     "setcaption", "delcaption", "setthumb", "delthumb",
     "setprefix", "setsuffix", "mystats", "myinfo", "history",
@@ -5393,6 +7047,7 @@ async def callback_handler(client, query):
     "setchat", "delchat", "models", "engine", "mychannels", "setengine",
 ]))
 async def text_handler(client, message):
+    log_latency(message, "text")
     user_id = message.from_user.id
     text = message.text.strip()
     if text.startswith("/"):
@@ -5493,6 +7148,39 @@ async def text_handler(client, message):
             #: step consumes the message whatever the outcome; the wizard only
             #: ends when it succeeds or the user sends /cancel.
             await register_shared_channel(message, user_id)
+            return
+        elif action == "setdump":
+            #: The owner types the dump channel reference (link/@name/id); the
+            #: share-sheet button is the other way in.
+            del pending_action[user_id]
+            await finish_setdump(message, text)
+            return
+        elif action == "gw_benefit":
+            benefit = text.strip()[:GIVEAWAY_MAX_BENEFIT_CHARS]
+            del pending_action[user_id]
+            wizard = GIVEAWAY_WIZARD.get(user_id) or {}
+            wizard["benefit"] = benefit
+            wizard["step"] = "ends"
+            GIVEAWAY_WIZARD[user_id] = wizard
+            await say(message, ui.giveaway_step_end_text() + f"\n\n✨ **Benefit:** {benefit}",
+                      reply_markup=ui.giveaway_step_end_keyboard())
+            return
+        elif action == "gw_days":
+            try:
+                days = int(text.strip())
+            except ValueError:
+                await say(message, f"❌ Send a whole number of days (1–{GRANT_MAX_DAYS}).")
+                return
+            if days <= 0 or days > GRANT_MAX_DAYS:
+                await say(message, f"❌ Choose between 1 and {GRANT_MAX_DAYS} days.")
+                return
+            del pending_action[user_id]
+            wizard = GIVEAWAY_WIZARD.get(user_id) or {}
+            wizard["days"] = days
+            wizard["step"] = "benefit"
+            GIVEAWAY_WIZARD[user_id] = wizard
+            await say(message, ui.giveaway_step_benefit_text(),
+                      reply_markup=ui.giveaway_step_benefit_keyboard())
             return
 
     if user_id in login_pending:
@@ -5595,6 +7283,17 @@ async def text_handler(client, message):
 
     if user_id in setchat_pending and setchat_pending[user_id].get("step") == "await_sample":
         await verify_setchat_sample(message, user_id, text)
+        return
+
+    #: A live bot deep link (the share-sheet payload) can arrive anywhere.
+    if await handle_share_deep_link(message):
+        return
+
+    #: The inline-button wizard collects a label and then a link.
+    if user_id in BUTTON_WIZARD and await wizard_text_input(message, user_id, text):
+        return
+
+    if user_id == OWNER_ID and await giveaway_wizard_text(message, user_id, text):
         return
 
     if not await check_access(message):
@@ -5741,6 +7440,9 @@ if __name__ == "__main__":
     os.makedirs("downloads", exist_ok=True)
     Thread(target=run_web, daemon=True).start()
     print("✅ Flask started")
+    print(native_engine.startup_report())
+    print(f"🗄 Dump mirror: TTL {int(DUMP_TTL_SECONDS)} s, "
+          f"cooldown {DUMP_COOLDOWN_SECONDS:g} s, queue cap {int(DUMP_QUEUE_LIMIT)}")
     print(f"🎨 Inline button styles: {ui.style_support_label()}")
     turbo = engines.ENGINE_REGISTRY[ENGINE_CPP]
     print(f"🧠 Engines: Python Standard ⚙️ (single-stream) + "
@@ -5751,6 +7453,9 @@ if __name__ == "__main__":
           f"{ENGINE_PEAK_THRESHOLD} concurrent).")
     print(f"📊 Telemetry HUD: {'on' if ui.telemetry_enabled() else 'off'}")
     print("✅ Bot starting...")
+    #: The mirror and the giveaway pump need the connected client, so both are
+    #: started from the first update (see ``touch_scheduler``): ``Client.run()``
+    #: takes no startup coroutine on this library version.
     bot.run()
     
 

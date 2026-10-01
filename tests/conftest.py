@@ -180,6 +180,99 @@ class FakeDB:
         self.engine_stats: dict[str, int] = {}
         #: chat_id -> files extracted into that dump channel.
         self.channel_files: dict[int, int] = {}
+        #: The owner dump channel (one document, like the real config row).
+        self.dump_channel: dict | None = None
+        #: The single active giveaway and its participant rows.
+        self.giveaway: dict | None = None
+        self.giveaway_participants: list[dict] = []
+        self.indexes: list = []
+
+    # owner dump channel ------------------------------------------------------
+    async def set_dump_channel(self, chat_id, title=None, username=None, kind=None):
+        self.dump_channel = {"chat_id": int(chat_id), "title": title,
+                             "username": username, "kind": kind}
+        return True
+
+    async def get_dump_channel(self):
+        return dict(self.dump_channel) if self.dump_channel else None
+
+    async def delete_dump_channel(self):
+        existed = self.dump_channel is not None
+        self.dump_channel = None
+        return existed
+
+    # giveaways ---------------------------------------------------------------
+    async def ensure_giveaway_indexes(self):
+        self.indexes.append("giveaway_participants")
+        return True
+
+    async def create_giveaway(self, doc: dict):
+        from config import GIVEAWAY_SINGLE_ACTIVE
+        if GIVEAWAY_SINGLE_ACTIVE and self.giveaway and self.giveaway.get("status") == "running":
+            return False
+        payload = dict(doc)
+        payload["_id"] = "active"
+        payload.setdefault("status", "running")
+        payload.setdefault("participant_count", 0)
+        self.giveaway = payload
+        self.giveaway_participants.clear()
+        return True
+
+    async def get_active_giveaway(self):
+        if self.giveaway and self.giveaway.get("status") == "running":
+            return dict(self.giveaway)
+        return None
+
+    async def get_last_giveaway(self):
+        return dict(self.giveaway) if self.giveaway else None
+
+    async def update_giveaway(self, updates: dict):
+        if not self.giveaway:
+            return False
+        self.giveaway.update(updates)
+        return True
+
+    async def finish_giveaway(self, winner=None, *, status="finished"):
+        if not self.giveaway:
+            return False
+        self.giveaway["status"] = status
+        if winner is not None:
+            self.giveaway["winner"] = dict(winner)
+        return True
+
+    async def add_giveaway_participant(self, giveaway_id, user_id, name=None, username=None):
+        if any(row["user_id"] == int(user_id) for row in self.giveaway_participants):
+            return False
+        self.giveaway_participants.append({
+            "giveaway_id": str(giveaway_id), "user_id": int(user_id),
+            "name": name, "username": username, "joined_at": _dt.datetime.now(),
+        })
+        if self.giveaway:
+            self.giveaway["participant_count"] = len(self.giveaway_participants)
+        return True
+
+    async def count_giveaway_participants(self, giveaway_id):
+        return len([row for row in self.giveaway_participants
+                    if row["giveaway_id"] == str(giveaway_id)])
+
+    async def is_giveaway_participant(self, giveaway_id, user_id):
+        return any(row["giveaway_id"] == str(giveaway_id) and row["user_id"] == int(user_id)
+                   for row in self.giveaway_participants)
+
+    async def list_giveaway_participants(self, giveaway_id, skip: int = 0, limit: int = 10):
+        rows = [row for row in self.giveaway_participants
+                if row["giveaway_id"] == str(giveaway_id)]
+        return rows[int(skip):int(skip) + int(limit)]
+
+    async def all_giveaway_participants(self, giveaway_id):
+        return [row for row in self.giveaway_participants
+                if row["giveaway_id"] == str(giveaway_id)]
+
+    async def clear_giveaway_participants(self, giveaway_id):
+        before = len(self.giveaway_participants)
+        self.giveaway_participants = [row for row in self.giveaway_participants
+                                      if row["giveaway_id"] != str(giveaway_id)]
+        return before - len(self.giveaway_participants)
 
     # users -----------------------------------------------------------------
     def _new_user(self, user_id, name, username):
@@ -733,6 +826,13 @@ DB_NAMES = [
     "get_engine_preference", "has_models_access", "has_private_access",
     "set_models_access", "set_private_access", "record_engine_use", "get_engine_stats",
     "get_premium_tier", "increment_channel_files", "get_channel_files",
+    # Round 12: the owner dump channel and the giveaway engine.
+    "set_dump_channel", "get_dump_channel", "delete_dump_channel",
+    "create_giveaway", "get_active_giveaway", "get_last_giveaway", "update_giveaway",
+    "finish_giveaway", "add_giveaway_participant", "count_giveaway_participants",
+    "is_giveaway_participant", "list_giveaway_participants",
+    "all_giveaway_participants", "clear_giveaway_participants",
+    "ensure_giveaway_indexes",
 ]
 
 
@@ -816,6 +916,15 @@ def clean_state(monkeypatch):
     monkeypatch.setattr(main, "fsub_pending", {})
     monkeypatch.setattr(main, "channel_locks", {})
     monkeypatch.setattr(main, "channel_last_request", {})
+    #: Round 12 state: share tokens, the button wizard, the giveaway wizard, the
+    #: dump mirror and the background pump must be born fresh in every test.
+    monkeypatch.setattr(main, "SHARE_TOKENS", {})
+    monkeypatch.setattr(main, "BUTTON_WIZARD", {})
+    monkeypatch.setattr(main, "BUTTON_DRAFT", {})
+    monkeypatch.setattr(main, "GIVEAWAY_WIZARD", {})
+    monkeypatch.setattr(main, "DUMP_MIRROR", main.DumpMirror())
+    monkeypatch.setattr(main, "GIVEAWAY_TASK", None)
+    monkeypatch.setattr(main, "GIVEAWAY_INDEXES_READY", False)
     # A fresh engine controller per test: the mode, the autoscaler counters and
     # the analytics must never leak from one test into the next.  The provider is
     # re-wired so it still reads whatever the FakeDB fixture installs.
@@ -884,6 +993,12 @@ class FakeBot:
         self.declined: list = []
         self.joined_chats: list = []
         self.invoked: list = []
+        #: Round 12 bookkeeping: mirror copies, deletes, pins and edits.
+        self.copies: list = []
+        self.deleted: list = []
+        self.pinned: list = []
+        self.unpinned: list = []
+        self.edited: list = []
 
     async def send_message(self, chat_id, text, **kwargs):
         msg = FakeMessage(text=text, message_id=len(self.sent) + 1000)
@@ -905,6 +1020,41 @@ class FakeBot:
 
     async def get_me(self):
         return SimpleNamespace(id=FAKE_BOT_ID, username="TestRestrictBot", is_self=True)
+
+    # ---- round 12: copy / pin / delete / edit ------------------------------ #
+    #: These verbs are what the dump mirror, /pin and the giveaway poster use.
+    #: They are separate from ``send_message`` so a test can assert exactly
+    #: which of them ran.
+    async def copy_message(self, chat_id, from_chat_id, message_id, **kwargs):
+        copy = FakeMessage(text=f"copy:{from_chat_id}:{message_id}",
+                           message_id=len(self.sent) + 5000)
+        copy.chat = FakeChat(chat_id, chat_type="channel")
+        self.sent.append({"chat_id": chat_id, "copy_from": from_chat_id,
+                          "message_id": message_id, **kwargs})
+        self.copies.append((chat_id, from_chat_id, int(message_id)))
+        return copy
+
+    async def delete_messages(self, chat_id, message_ids):
+        if isinstance(message_ids, (list, tuple, set)):
+            for message_id in message_ids:
+                self.deleted.append((chat_id, int(message_id)))
+        else:
+            self.deleted.append((chat_id, int(message_ids)))
+        return True
+
+    async def pin_chat_message(self, chat_id, message_id, **kwargs):
+        self.pinned.append((chat_id, int(message_id)))
+        return True
+
+    async def unpin_chat_message(self, chat_id, message_id=None, **kwargs):
+        self.unpinned.append((chat_id, message_id))
+        return True
+
+    async def edit_message_text(self, chat_id, message_id, text, **kwargs):
+        self.edited.append((chat_id, int(message_id), text))
+        edited = FakeMessage(text=text, message_id=int(message_id))
+        edited.chat = FakeChat(chat_id, chat_type="channel")
+        return edited
 
     async def get_chat(self, chat_id):
         from types import SimpleNamespace
