@@ -184,7 +184,7 @@ async def test_daily_limit_reached_single_link(db):
 
 
 @pytest.mark.asyncio
-async def test_daily_limit_reached_bulk_and_range(db):
+async def test_daily_limit_reached_bulk_and_range(db, fake_bot):
     await db.add_user(1001, "Tester")
     db.users[1001]["daily_downloads"] = 2  # only one slot left
 
@@ -194,6 +194,16 @@ async def test_daily_limit_reached_bulk_and_range(db):
     assert bulk.button("cmd_premium") and bulk.button("cmd_refer")
 
     db.users[1001]["daily_downloads"] = 2
+    #: Since round 9 a range is pre-flighted first, and the quota is reserved
+    #: against the items that will *actually* be extracted.  The range has to
+    #: really hold 20 media messages for the quota gate to be the thing that
+    #: stops it — an empty range now consumes nothing and says so instead.
+    for msg_id in range(1, 21):
+        fake_bot.messages[msg_id] = SimpleNamespace(
+            id=msg_id, empty=False, text=None, caption=None, media=True,
+            photo=None, video=True, document=None, audio=None, voice=None,
+            video_note=None, sticker=None, animation=None,
+        )
     range_msg = FakeMessage(text="https://t.me/publicname/1-20")
     await main.text_handler(None, range_msg)
     assert sc("Daily Free Limit Reached") in range_msg.shown_text
@@ -568,15 +578,21 @@ async def test_setchat_admin_check_requires_post_permission(db, fake_bot, press)
 @pytest.mark.asyncio
 async def test_setchat_full_flow_verifies_a_sample_message(db, fake_bot, press):
     fake_bot.members[999] = make_member(ChatMemberStatus.ADMINISTRATOR, can_post_messages=True)
-    fake_bot.messages[15] = SimpleNamespace(empty=False, id=15)
+    #: The sample really lives in the channel being registered, so the
+    #: round-8 ownership check has something truthful to compare against.
+    fake_bot.messages[15] = SimpleNamespace(
+        empty=False, id=15, chat=SimpleNamespace(id=fake_bot.channel_id))
 
     message = FakeMessage(text="/setchat t.me/mychannel", user=FakeUser(1001))
     await main.setchat_handler(None, message)
 
     await press(message, "setchat:check")
     assert sc("Admin verified") in message.shown_text
-    assert sc("send a sample message") in message.shown_text
-    assert sc("just the message number") in message.shown_text
+    #: Round 8: the wizard asks for one content link from the channel.
+    assert sc("one content link from this channel") in message.shown_text
+    #: The bare-number prompt is gone for good.
+    assert sc("just the message number") not in message.shown_text
+    assert "15" not in message.shown_text.replace("`-100777`", "")
     assert main.setchat_pending[1001]["step"] == "await_sample"
 
     sample = FakeMessage(text="https://t.me/mychannel/15", user=FakeUser(1001))

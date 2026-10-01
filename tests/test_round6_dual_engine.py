@@ -1131,8 +1131,12 @@ def test_payment_wizard_amount_follows_the_chosen_variant():
 def test_turbo_benefits_are_listed_where_the_addon_is_sold():
     upsell = ui.models_upsell_text()
     assert "C++ TURBO ENGINE" in upsell
-    assert "Multi-threaded" in upsell or "multi-threaded" in upsell.lower()
+    #: Round 10 replaced the false "native C cipher" / "multi-threaded" claims
+    #: with what the code really does: a parallel worker pool on batches, an
+    #: uncapped rate against Python Standard's cap, and zero-copy piping.
+    assert "Parallel worker pool" in upsell
     assert "Zero-copy" in upsell or "zero-copy" in upsell.lower()
+    assert "Uncapped" in upsell or "uncapped" in upsell.lower()
     assert f"{config.RUPEE}149" in upsell
     assert any(b.callback_data == "premium_plans"
                for b in flat(ui.models_upsell_keyboard()))

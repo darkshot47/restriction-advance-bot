@@ -87,6 +87,12 @@ FEEDBACK_LINK_WARNING = (
 CHANNEL_CLEANUP_SECONDS = 5
 #: Minimum delay between two channel-dump extraction requests (anti-ban guard).
 CHANNEL_EXTRACT_COOLDOWN = 3.0
+#: How many dump channels one user may register with /setchat.
+MAX_USER_CHANNELS = int(os.environ.get("MAX_USER_CHANNELS", "2"))
+#: Message ids requested per ``get_messages`` call while pre-scanning a range.
+#: Telegram accepts a list of ids, so the scan is batched instead of firing one
+#: request per id (which would both stall the run and risk a FloodWait).
+RANGE_PREFLIGHT_BATCH = int(os.environ.get("RANGE_PREFLIGHT_BATCH", "100"))
 #: Timeout (in seconds) for asking the owner whether to use the custom caption in a channel dump.
 CHANNEL_CAPTION_TIMEOUT = int(os.environ.get("CHANNEL_CAPTION_TIMEOUT", "60"))
 
@@ -133,6 +139,25 @@ DEFAULT_ENGINE_MODE = ENGINE_MODE_AUTO
 ENGINE_PEAK_THRESHOLD = int(os.environ.get("ENGINE_PEAK_THRESHOLD", "8"))
 #: Multi-threaded worker slots the C++ Turbo engine may run per bulk batch.
 ENGINE_TURBO_WORKERS = int(os.environ.get("ENGINE_TURBO_WORKERS", "4"))
+#: Seconds between two *item starts* inside one bulk batch.  The C++ Turbo pool
+#: overlaps the slow parts of several files, but the starts stay spaced by this
+#: gap so Telegram is never hammered.  Defaults to the same anti-ban value the
+#: channel dump cooldown uses (``CHANNEL_EXTRACT_COOLDOWN``).
+ENGINE_START_GAP_SECONDS = float(os.environ.get(
+    "ENGINE_START_GAP_SECONDS", "3.0"))
+#: Download throughput cap of the ⚙️ Python Standard engine, in MB/s.  This is
+#: what makes C++ Turbo visibly faster on a single stream: Python Standard is
+#: paced by a token bucket, C++ Turbo is uncapped.  ``0`` (or an empty value)
+#: disables the cap entirely.
+ENGINE_PYTHON_SPEED_LIMIT_MBPS = float(os.environ.get(
+    "ENGINE_PYTHON_SPEED_LIMIT_MBPS", "3.0") or 0)
+#: Burst allowance of the Python Standard token bucket, expressed in seconds of
+#: full-rate transfer.  ``0`` (the default) means a strict cap: the transfer of
+#: *N* bytes takes exactly ``N / ENGINE_PYTHON_SPEED_LIMIT_MBPS`` seconds, which
+#: is what makes the throttle measurable.  A positive value would let the first
+#: chunks of a transfer go out at line rate before the pacing kicks in.
+ENGINE_PYTHON_SPEED_BURST_SECONDS = float(os.environ.get(
+    "ENGINE_PYTHON_SPEED_BURST_SECONDS", "0"))
 #: Files up to this size are piped straight through memory by the C++ Turbo
 #: engine ("zero-copy"): the downloader hands a ``BytesIO`` to the uploader, so
 #: the payload is never written to a temp file and never re-read from disk.

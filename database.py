@@ -3,7 +3,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 from datetime import datetime, timedelta
 import calendar
 from pymongo.errors import DuplicateKeyError
-from config import (FREE_DAILY_LIMIT, REDEEM_PREMIUM_MONTHS,
+from config import (FREE_DAILY_LIMIT, MAX_USER_CHANNELS, REDEEM_PREMIUM_MONTHS,
                     PREMIUM_SOURCE_MANUAL, PREMIUM_SOURCE_REDEEM,
                     DEFAULT_ENGINE_MODE, ENGINE_PYTHON, ENGINES, GRANT_TIERS)
 
@@ -64,10 +64,14 @@ async def add_user(user_id, name, username=None):
             "notifications": True,
             "silent_mode": False,
             "favorites": [],
-            # Channel dump (/setchat): the channel this user extracts into.
+            # Channel dump (/setchat): up to config.MAX_USER_CHANNELS channels.
+            # ``channels`` is the source of truth; the three scalars below are a
+            # mirror of its first entry so pre-round-4 readers keep working.
+            "channels": [],
             "channel_chat_id": None,
             "channel_title": None,
             "channel_username": None,
+            "channel_type": None,
         }
         try:
             await users_col.insert_one(user_data)
@@ -596,39 +600,185 @@ async def get_display_name(user_id, fallback="User"):
     return (user or {}).get("name") or fallback
 
 
-async def set_user_chat(user_id, chat_id, title=None, username=None):
-    """Remember the channel where this user enabled the bot dump (/setchat)."""
+# --------------------------------------------------------------------------- #
+#  Dump channels — up to config.MAX_USER_CHANNELS per user
+#
+#  Storage: a ``channels`` list of small documents plus a mirror of the first
+#  entry in the legacy single-channel fields (``channel_chat_id`` /
+#  ``channel_title`` / ``channel_username``).  The mirror is what keeps every
+#  pre-multi-channel document, query and reader working unchanged, so there is
+#  no migration script and no window where a legacy user loses their channel.
+#  Legacy rows are migrated *on read* by :func:`channels_from_document`.
+# --------------------------------------------------------------------------- #
+
+def channels_from_document(user) -> list[dict]:
+    """Normalize any stored shape into the canonical ``channels`` list.
+
+    A document written before multi-channel support only has the three legacy
+    scalar fields; one written after has the list.  Reading through this
+    function migrates on the fly, so no data is ever lost or rewritten.
+    """
+    if not user:
+        return []
+    entries = []
+    seen = set()
+    for raw in (user.get("channels") or []):
+        if not isinstance(raw, dict):
+            continue
+        chat_id = raw.get("chat_id")
+        if chat_id is None or int(chat_id) in seen:
+            continue
+        chat_id = int(chat_id)
+        seen.add(chat_id)
+        entries.append({
+            "chat_id": chat_id,
+            "title": raw.get("title") or str(chat_id),
+            "username": raw.get("username"),
+            "type": raw.get("type") or "channel",
+        })
+    legacy_id = user.get("channel_chat_id")
+    if legacy_id is not None and int(legacy_id) not in seen:
+        entries.insert(0, {
+            "chat_id": int(legacy_id),
+            "title": user.get("channel_title") or str(int(legacy_id)),
+            "username": user.get("channel_username"),
+            "type": user.get("channel_type") or "channel",
+        })
+    return entries
+
+
+def pick_channel_entry(user_row, chat_id):
+    """The stored entry for *chat_id* inside *user_row*, or ``None``."""
+    if chat_id is None:
+        return None
+    try:
+        wanted = int(chat_id)
+    except (TypeError, ValueError):
+        return None
+    for entry in channels_from_document(user_row):
+        if entry["chat_id"] == wanted:
+            return entry
+    return None
+
+
+async def get_user_channels(user_id) -> list[dict]:
+    """Every dump channel of *user_id*, oldest registration first."""
+    user = await users_col.find_one({"user_id": int(user_id)})
+    return channels_from_document(user)
+
+
+async def add_user_channel(user_id, chat_id, title=None, username=None,
+                           chat_type=None):
+    """Register (or refresh) one dump channel, honouring ``MAX_USER_CHANNELS``.
+
+    Returns ``(ok, reason)`` where *reason* is ``"added"``, ``"updated"`` or
+    ``"full"`` — the caller turns that into plain English, so a user who already
+    has two channels is told to disconnect one first instead of getting a
+    silent failure.
+    """
+    user_id, chat_id = int(user_id), int(chat_id)
+    user = await users_col.find_one({"user_id": user_id}) or {}
+    entries = channels_from_document(user)
+    for entry in entries:
+        if entry["chat_id"] == chat_id:
+            entry["title"] = title or entry["title"]
+            entry["username"] = username if username is not None else entry["username"]
+            entry["type"] = chat_type or entry["type"]
+            reason = "updated"
+            break
+    else:
+        if len(entries) >= max(1, int(MAX_USER_CHANNELS)):
+            return False, "full"
+        entries.append({
+            "chat_id": chat_id,
+            "title": title or str(chat_id),
+            "username": username,
+            "type": chat_type or "channel",
+        })
+        reason = "added"
+
+    first = entries[0]
     await users_col.update_one(
         {"user_id": user_id},
         {"$set": {
-            "channel_chat_id": int(chat_id),
-            "channel_title": title,
-            "channel_username": username,
+            "channels": entries,
+            # Mirror of the primary channel: legacy readers keep working.
+            "channel_chat_id": first["chat_id"],
+            "channel_title": first["title"],
+            "channel_username": first["username"],
+            "channel_type": first["type"],
+        }},
+        upsert=True,
+    )
+    return True, reason
+
+
+async def remove_user_channel(user_id, chat_id) -> bool:
+    """Disconnect one dump channel.  ``True`` when something was removed."""
+    user_id = int(user_id)
+    user = await users_col.find_one({"user_id": user_id}) or {}
+    entries = channels_from_document(user)
+    wanted = int(chat_id) if chat_id is not None else None
+    remaining = [e for e in entries if e["chat_id"] != wanted]
+    if len(remaining) == len(entries):
+        return False
+    first = remaining[0] if remaining else None
+    await users_col.update_one(
+        {"user_id": user_id},
+        {"$set": {
+            "channels": remaining,
+            "channel_chat_id": first["chat_id"] if first else None,
+            "channel_title": first["title"] if first else None,
+            "channel_username": first["username"] if first else None,
+            "channel_type": first["type"] if first else None,
         }},
     )
+    return True
+
+
+async def set_user_chat(user_id, chat_id, title=None, username=None):
+    """Remember a channel where this user enabled the bot dump (/setchat).
+
+    Thin wrapper kept for every existing caller: it registers the channel and
+    reports whether the per-user limit refused it.
+    """
+    return await add_user_channel(user_id, chat_id, title=title, username=username)
 
 
 async def get_user_chat(user_id):
-    """The channel-dump target of *user_id* (``None`` when not configured)."""
-    user = await users_col.find_one({"user_id": user_id})
-    if not user or user.get("channel_chat_id") is None:
+    """The **primary** channel-dump target of *user_id* (``None`` if unset).
+
+    Kept byte-compatible with the single-channel era: exactly the three legacy
+    keys, describing the first registered channel.
+    """
+    user = await users_col.find_one({"user_id": int(user_id)})
+    entries = channels_from_document(user)
+    if not entries:
         return None
+    first = entries[0]
     return {
-        "chat_id": user.get("channel_chat_id"),
-        "title": user.get("channel_title") or str(user.get("channel_chat_id")),
-        "username": user.get("channel_username"),
+        "chat_id": first["chat_id"],
+        "title": first["title"] or str(first["chat_id"]),
+        "username": first["username"],
     }
 
 
 async def find_user_chat_owner(chat_id):
-    """Which user configured *chat_id* as their dump channel?"""
-    return await users_col.find_one({"channel_chat_id": int(chat_id)})
+    """Which user configured *chat_id* as one of their dump channels?"""
+    return await users_col.find_one({
+        "$or": [
+            {"channel_chat_id": int(chat_id)},
+            {"channels.chat_id": int(chat_id)},
+        ],
+    })
 
 
 async def clear_user_chat(user_id):
+    """Disconnect **every** dump channel of *user_id*."""
     await users_col.update_one(
-        {"user_id": user_id},
-        {"$set": {"channel_chat_id": None, "channel_title": None, "channel_username": None}},
+        {"user_id": int(user_id)},
+        {"$set": {"channels": [], "channel_chat_id": None, "channel_title": None,
+                  "channel_username": None, "channel_type": None}},
     )
 
 

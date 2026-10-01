@@ -420,3 +420,114 @@ class TransferMeter:
     @property
     def eta_seconds(self) -> float | None:
         return self.state.eta
+
+
+# --------------------------------------------------------------------------- #
+#  Python Standard throughput cap — a real token bucket
+#
+#  ⚙️ Python Standard is deliberately the slower engine: its download is paced
+#  to ``config.ENGINE_PYTHON_SPEED_LIMIT_MBPS`` (default 3 MB/s) while 🚀 C++
+#  Turbo stays uncapped.  The bucket refills continuously at the capped rate and
+#  each progress chunk spends the bytes it just moved, so the *average* transfer
+#  rate can never drift above the cap — and because the pacing decision is taken
+#  once per progress chunk, it costs a single comparison plus (at most) one
+#  sleep, never a busy-wait and never an extra Telegram call.
+# --------------------------------------------------------------------------- #
+
+class SpeedThrottle:
+    """Token-bucket pacer for one download (``None``/0 rate = uncapped).
+
+    ``clock`` and ``sleeper`` are injectable so the pacing can be proven with a
+    fake clock: no test ever really waits for a throttled transfer.
+    """
+
+    def __init__(self, mbps=0.0, *, burst_seconds: float = 1.0,
+                 clock=time.monotonic, sleeper=None):
+        self.mbps = max(0.0, float(mbps or 0.0))
+        #: Bytes per second the bucket refills at (``0.0`` = no cap at all).
+        self.rate = self.mbps * MB
+        self.burst_seconds = max(0.0, float(burst_seconds or 0.0))
+        self.clock = clock
+        self.sleeper = sleeper
+        #: Tokens start full: the first chunk of a transfer is never delayed.
+        self.tokens = self.rate * self.burst_seconds if self.rate else 0.0
+        self.updated_at = clock()
+        #: Seconds this transfer actually spent waiting (for logs and tests).
+        self.waited = 0.0
+        self.bytes_seen = 0
+        self._last_position = 0
+
+    # -- state -------------------------------------------------------------- #
+    @property
+    def enabled(self) -> bool:
+        """False when there is nothing to cap (Turbo, or a ``0`` MB/s config)."""
+        return self.rate > 0.0
+
+    @property
+    def capacity(self) -> float:
+        return self.rate * self.burst_seconds if self.rate else 0.0
+
+    def refill(self, now: float | None = None) -> float:
+        """Add the tokens earned since the last call; returns the new balance."""
+        if not self.enabled:
+            return 0.0
+        now = self.clock() if now is None else float(now)
+        elapsed = max(0.0, now - self.updated_at)
+        self.updated_at = now
+        self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
+        return self.tokens
+
+    # -- pacing ------------------------------------------------------------- #
+    def delay_for(self, nbytes: int, now: float | None = None) -> float:
+        """Seconds *nbytes* must wait for (``0.0`` when the bucket covers it).
+
+        Pure maths — no sleeping — so the decision stays cheap enough to run on
+        every progress chunk and easy to assert on in a test.
+        """
+        if not self.enabled or nbytes <= 0:
+            return 0.0
+        available = self.refill(now)
+        if nbytes <= available:
+            self.tokens = available - nbytes
+            return 0.0
+        deficit = nbytes - available
+        wait = deficit / self.rate
+        # The wait itself earns exactly the missing tokens, so the bucket is
+        # empty (not negative) once the sleep is over.
+        self.tokens = 0.0
+        self.updated_at = (self.clock() if now is None else float(now)) + wait
+        return wait
+
+    async def pace(self, nbytes: int, *, sleeper=None) -> float:
+        """Spend *nbytes* of budget, sleeping only as long as the cap demands."""
+        wait = self.delay_for(nbytes)
+        if wait <= 0:
+            return 0.0
+        sleep = sleeper or self.sleeper or asyncio.sleep
+        await sleep(wait)
+        self.waited += wait
+        return wait
+
+    async def pace_to(self, position: int, *, sleeper=None) -> float:
+        """Pace a **cumulative** byte counter (the pyrogram progress contract).
+
+        The callback reports the total bytes written so far, so only the delta
+        since the previous chunk is charged to the bucket.  A repeated or
+        backwards position spends nothing, which keeps pause/resume and a
+        restarted chunk from double-charging the user's budget.
+        """
+        position = max(0, int(position or 0))
+        self.bytes_seen = max(self.bytes_seen, position)
+        delta = position - self._last_position
+        if delta <= 0:
+            self._last_position = position
+            self.refill()
+            return 0.0
+        self._last_position = position
+        return await self.pace(delta, sleeper=sleeper)
+
+    def resume(self) -> None:
+        """Drop the accrued credit after a pause so the cap stays honest."""
+        self.tokens = min(self.capacity, self.rate * self.burst_seconds) \
+            if self.enabled else 0.0
+        self.updated_at = self.clock()
