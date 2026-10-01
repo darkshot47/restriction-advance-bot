@@ -1007,12 +1007,18 @@ BANNED_CAPTION = "🚫 Banned — fraudulent payment proof"
 # --------------------------------------------------------------------------- #
 
 def setchat_prompt_text() -> str:
+    from config import MAX_USER_CHANNELS
     return (
         "📡 **CHANNEL DUMP SETUP**\n\n"
         "Send me the channel or group where you added me as an admin — link, "
         "@username, numeric ID or a private invite link.\n\n"
         "Example: `@mychannel` or `-1001234567890`\n\n"
-        "I verify my admin rights before enabling automatic extraction. Use /cancel to stop."
+        "🔒 **Private channel?** Tap **📡 Share the channel** and forward any one "
+        "of its posts to me instead — that is how I learn its identity without "
+        "you ever pasting an invite link.\n\n"
+        f"Each account may keep up to {int(MAX_USER_CHANNELS)} channels connected. "
+        "I verify that **you** administer the channel and that **I** may post in "
+        "it before anything is switched on. Use /cancel to stop."
     )
 
 
@@ -1024,11 +1030,30 @@ def setchat_admin_hint_text(title: str) -> str:
     )
 
 
-def setchat_admin_ok_text(title: str) -> str:
+def setchat_admin_ok_text(title: str, *, private: bool = False) -> str:
+    """Step 3 of the wizard: prove the bot can read one real post.
+
+    Round 8 dropped the bare message number — a number says nothing about which
+    chat it came from, so the bot now asks for one **content link** from the
+    channel being registered.  A private channel has no public link, so there
+    the user shares (forwards) one post into the bot instead.
+    """
+    if private:
+        return (
+            f"✅ **Admin verified in {title}!**\n\n"
+            "Final step: this is a private channel, so it has no public link.\n\n"
+            "👉 Open the channel, pick any one post, tap **Share** (forward) and send it "
+            "to me here. I read the post it came from and confirm it belongs to this "
+            "channel.\n\n"
+            "Use /cancel to stop — nothing is saved until this step passes."
+        )
     return (
         f"✅ **Admin verified in {title}!**\n\n"
-        "Final step: send a sample message from this channel so I can verify that I can read its "
-        "content — a message link, or just the message number (for example `15`)."
+        "Final step: send me **one content link from this channel** — open any post, "
+        "tap **Copy Message Link** and paste it here.\n\n"
+        "I read that post and confirm it really belongs to the channel being registered. "
+        "A bare message number is no longer accepted.\n\n"
+        "Use /cancel to stop — nothing is saved until this step passes."
     )
 
 
@@ -1088,11 +1113,159 @@ def setchat_done_text(title: str, chat_id) -> str:
     )
 
 
-def setchat_sample_failed_text() -> str:
+def setchat_sample_failed_text(reason: str = "unreadable") -> str:
+    """Why the content-link step failed, always with the next thing to try.
+
+    The wizard stays alive for a retry in every case; nothing is stored.
+    """
+    if reason == "wrong_chat":
+        return (
+            "❌ **Verification failed**\n\n"
+            "That post belongs to a **different chat**, not the channel you are registering.\n\n"
+            "👉 Open the channel you are adding, pick one of **its** posts, copy that "
+            "message link and send it. The setup is still running — nothing was saved."
+        )
+    if reason == "deleted":
+        return (
+            "❌ **Verification failed**\n\n"
+            "That post has been **deleted**, so there is nothing left for me to read.\n\n"
+            "👉 Pick a different post in the same channel and send its link. "
+            "The setup is still running — nothing was saved."
+        )
+    if reason == "no_access":
+        return (
+            "❌ **Verification failed**\n\n"
+            "I **cannot see** that channel, so I cannot read the post you linked.\n\n"
+            "👉 Make sure the bot is still a member with **Post Messages** on, then send "
+            "another link. The setup is still running — nothing was saved."
+        )
+    if reason == "not_a_link":
+        return (
+            "❌ **Verification failed**\n\n"
+            "I need **one content link from that channel**, not a message number.\n\n"
+            "👉 Open the channel, tap a post, choose **Copy Message Link** and paste it "
+            "here. For a private channel, share (forward) one post to me instead. "
+            "The setup is still running — nothing was saved."
+        )
     return (
         "❌ **Verification failed**\n\n"
-        "That sample message could not be read. Make sure the message exists in the channel, that it "
-        "is not deleted, and send the message link or the message number again."
+        "That sample message could not be read.\n\n"
+        "👉 Make sure the post still exists in the channel you are registering and send "
+        "its message link again. The setup is still running — nothing was saved."
+    )
+
+
+#: ------------------------------------------------------------------------ #:
+#:  Round 5 — the person adding the channel must be an admin of it
+#: ------------------------------------------------------------------------ #:
+
+def setchat_requester_failed_text(reason: str = "not_admin", title: str | None = None) -> str:
+    """The adding user is not an admin — the wizard is cancelled, plainly.
+
+    Unlike force-sub (which fails open on an inconclusive Telegram answer), an
+    inconclusive result here **fails safe**: the setup is cancelled and nothing
+    is stored, so a channel can never be registered by somebody who cannot
+    manage it.  No stack traces, no invite links, no raw chat ids.
+    """
+    where = f" in {title}" if title else ""
+    if reason == "not_member":
+        return (
+            "🚫 **Setup cancelled**\n\n"
+            f"You are **not a member** of that channel{where}, so it cannot be "
+            "registered.\n\n"
+            "👉 Join the channel first, ask an owner to make you an administrator, "
+            "then start again with /setchat."
+        )
+    if reason == "error":
+        return (
+            "🚫 **Setup cancelled**\n\n"
+            f"Telegram did not tell me reliably whether you administer that channel{where}, "
+            "and I never register a channel on an uncertain answer.\n\n"
+            "👉 Try again in a minute with /setchat. Nothing was saved."
+        )
+    return (
+        "🚫 **Setup cancelled**\n\n"
+        f"You are **not an administrator** of that channel{where}. Only an owner or an "
+        "administrator may connect a channel to this bot.\n\n"
+        "👉 Ask the channel owner to promote you, then start again with /setchat. "
+        "Nothing was saved."
+    )
+
+
+#: ------------------------------------------------------------------------ #:
+#:  Round 7 — registering a private channel by sharing it into the bot
+#: ------------------------------------------------------------------------ #:
+
+def setchat_share_prompt_text() -> str:
+    """Offered instead of asking for a link a private channel does not have."""
+    from config import MAX_USER_CHANNELS
+    return (
+        "📡 **SHARE THE CHANNEL**\n\n"
+        "A private channel has no public link, so register it by sharing it with me:\n\n"
+        "1️⃣ Open the channel in Telegram.\n"
+        "2️⃣ Pick any one post and tap **Share** (forward).\n"
+        "3️⃣ Send it to me in this chat.\n\n"
+        "I read the channel it came from, store it as a pending registration and "
+        "then verify **your** admin rights and **my** posting rights before anything "
+        "is switched on.\n\n"
+        f"Each account may keep up to {int(MAX_USER_CHANNELS)} channels connected. "
+        "Use /cancel to stop."
+    )
+
+
+def setchat_share_failed_text(reason: str = "not_a_channel") -> str:
+    """Plain English for every way a share can fail — never a raw link or id."""
+    if reason == "not_received":
+        return (
+            "❌ **I did not receive a shared channel**\n\n"
+            "That message was not a forward from a channel.\n\n"
+            "👉 Open the channel, long-press a post, choose **Forward**, pick this bot "
+            "and send it. Or use /cancel to stop."
+        )
+    if reason == "cancelled":
+        return (
+            "🚫 **Channel sharing cancelled**\n\n"
+            "Nothing was registered. Send /setchat again whenever you want to restart."
+        )
+    if reason == "not_a_channel":
+        return (
+            "❌ **That is not a channel**\n\n"
+            "I can only be connected to a **channel** or a **supergroup**.\n\n"
+            "👉 Forward a post from the channel itself, not from a private chat or a "
+            "basic group."
+        )
+    if reason == "bot_not_in_chat":
+        return (
+            "❌ **I am not in that channel**\n\n"
+            "Add this bot to the channel before sharing a post from it.\n\n"
+            "👉 Channel → Administrators → Add Admin → select this bot → turn "
+            "**Post Messages** ON, then share a post again."
+        )
+    if reason == "cannot_see":
+        return (
+            "❌ **I cannot see that channel**\n\n"
+            "Telegram would not let me open it, so I cannot verify anything.\n\n"
+            "👉 Check the bot is still a member with **Post Messages** on, then share "
+            "another post."
+        )
+    if reason == "not_admin":
+        return (
+            "🚫 **Setup cancelled**\n\n"
+            "You are not an administrator of the channel you shared, so it cannot be "
+            "registered.\n\n"
+            "👉 Ask the channel owner to promote you, then share a post again."
+        )
+    return (
+        "❌ **That share did not work**\n\n"
+        "👉 Forward one post from the channel again, or send /setchat to start over."
+    )
+
+
+def setchat_share_resolved_text(title: str) -> str:
+    """The share was understood: report the channel and run the verifications."""
+    return (
+        f"📡 **Channel received:** {title}\n\n"
+        "Now checking that **you** administer it and that **I** may post in it…"
     )
 
 
@@ -1110,6 +1283,119 @@ def channel_not_found_text() -> str:
 
 def channel_floodwait_text(seconds) -> str:
     return (f"⏳ Telegram rate limit reached. Pausing safely for **{seconds}s** before continuing…")
+
+
+# --------------------------------------------------------------------------- #
+#  Bulk batches — private chat and dump channels share this copy
+# --------------------------------------------------------------------------- #
+
+def batch_heading_text(total: int) -> str:
+    """Opening line of a private multi-link batch."""
+    return f"⏳ Processing {int(total)}..."
+
+
+def range_heading_text(total: int) -> str:
+    """Opening line of a private range batch."""
+    return f"⏳ Range: {int(total)} messages"
+
+
+def batch_item_text(label) -> str:
+    """Per-item status message: each item keeps its own, so nothing interleaves."""
+    return f"📥 {label}"
+
+
+def batch_progress_text(done: int, total: int) -> str:
+    """The shared aggregate line — counts *finished* items, so it stays true
+    even while several 🚀 C++ Turbo workers edit it at the same time."""
+    return f"⏳ {int(done)}/{int(total)}..."
+
+
+def batch_done_text(success: int, failed: int) -> str:
+    """Final tally of a batch."""
+    return f"✅ Done!\n✅ {int(success)} ❌ {int(failed)}"
+
+
+def private_login_text() -> str:
+    """A private link arrived but the user has no session logged in."""
+    return "🔒 **Private link!**\n\nPlease /login first."
+
+
+def range_preflight_text(start: int, end: int, media: int, text_only: int,
+                         unavailable: int, unreadable: int = 0) -> str:
+    """What the pre-flight scan actually found before the batch starts."""
+    line = (f"🔎 Range {int(start)}-{int(end)} → **{int(media)}** with media, "
+            f"**{int(text_only)}** text-only, **{int(unavailable)}** unavailable")
+    if int(unreadable) > 0:
+        # A probe failure is not proof a message is gone: those ids stay in.
+        line += (f"\n\nℹ️ {int(unreadable)} could not be checked and will be "
+                 "attempted anyway.")
+    return line
+
+
+def range_scan_text(start: int, end: int) -> str:
+    """Shown while the pre-flight scan counts the range."""
+    return f"🔎 Checking range {int(start)}-{int(end)}…"
+
+
+def range_too_large_text(total: int, max_range: int) -> str:
+    """A range bigger than the tier allows (private chat wording)."""
+    return ("⚠️ Range too large!\n"
+            f"🆓 Free: 20\n💎 Premium: 1000\nRequested: {int(total)} "
+            f"(limit {int(max_range)})")
+
+
+def range_nothing_to_extract_text(start: int, end: int, unavailable: int) -> str:
+    """A range where nothing at all is extractable — no quota is consumed."""
+    return ("❌ **Nothing to extract**\n\n"
+            f"None of the messages in range {int(start)}-{int(end)} could be read "
+            f"({int(unavailable)} unavailable). They may be deleted, empty or "
+            "hidden from the bot.\n\n"
+            "No quota was used. Check the range and send it again.")
+
+
+def range_preflight_floodwait_text(seconds) -> str:
+    return ("⏳ Telegram asked for a pause while scanning the range. "
+            f"Waiting **{int(seconds)}s** before continuing…")
+
+
+# --------------------------------------------------------------------------- #
+#  Limits hit **inside a dump channel** — always point back to the bot
+#
+#  A channel is not a place for personal commands: the reply explains the limit
+#  and carries the open-bot ``url=`` button (``open_bot_keyboard``) so the user
+#  can continue the conversation in private.  No raw link ever appears in the
+#  body copy and no personal command is advertised or accepted there.
+# --------------------------------------------------------------------------- #
+
+def channel_limit_text(kind: str, *, sent: int | None = None, used: int | None = None,
+                       limit: int | None = None, size_mb: float | None = None,
+                       requested: int | None = None, premium: bool = False) -> str:
+    """The "limit reached — continue in the bot" notice for a dump channel."""
+    from config import FREE_DAILY_LIMIT
+    back = "Continue in the bot with the button below."
+    if kind == "daily":
+        quota = FREE_DAILY_LIMIT if limit is None else int(limit)
+        spent = quota if used is None else int(used)
+        return (f"🚫 **Daily Free Limit Reached**\n\n"
+                f"🆓 Free accounts get **{quota} public extractions per day** — "
+                f"(**{spent}/{quota}** used today).\n\n"
+                f"{back}")
+    if kind == "links":
+        free, paid = 5, 50
+        return (f"⚠️ **Too many links in one post**\n\n"
+                f"🆓 Free: {free}\n💎 Premium: {paid}\n"
+                f"📨 Sent: {int(sent or 0)}\n\n{back}")
+    if kind == "range":
+        free, paid = 20, 1000
+        return (f"⚠️ **Range too large**\n\n"
+                f"🆓 Free: {free}\n💎 Premium: {paid}\n"
+                f"📨 Requested: {int(requested or 0)}\n\n{back}")
+    if kind == "size":
+        size = f"{float(size_mb):.1f} MB" if size_mb is not None else "unknown"
+        return (f"❌ **File too large**\n\n"
+                f"📦 Size: {size}\n🆓 Free limit: 50 MB\n💎 Premium limit: 2 GB\n\n"
+                f"{back}")
+    return f"⚠️ **Limit reached**\n\n{back}"
 
 
 def feedback_cancelled_text() -> str:
@@ -1571,8 +1857,16 @@ def models_locked_text(mode=None) -> str:
 
 
 def models_upsell_text() -> str:
-    """Feature overview + add-on pricing for a user **without** the feature."""
-    from config import PREMIUM_PLANS, RUPEE, plan_addon_price, plan_base_price
+    """Feature overview + add-on pricing for a user **without** the feature.
+
+    Every claim is engine-specific and true of this codebase: a parallel worker
+    pool on multi-item batches, zero-copy in-memory piping, an **uncapped**
+    transfer rate against Python Standard's ``ENGINE_PYTHON_SPEED_LIMIT_MBPS``
+    cap, and priority routing above ``ENGINE_PEAK_THRESHOLD``.
+    """
+    from config import (ENGINE_PEAK_THRESHOLD, ENGINE_PYTHON_SPEED_LIMIT_MBPS,
+                        ENGINE_TURBO_WORKERS, ENGINE_ZERO_COPY_MAX_MB,
+                        PREMIUM_PLANS, RUPEE, plan_addon_price, plan_base_price)
     rows = []
     for plan in PREMIUM_PLANS.values():
         addon = plan_addon_price(plan)
@@ -1582,17 +1876,25 @@ def models_upsell_text() -> str:
         rows.append(f"• **{plan['title']}** — {RUPEE}{base} Standard · "
                     f"+{RUPEE}{addon} with C++ Turbo = **{RUPEE}{base + addon}**")
     pricing = "\n".join(rows) or "• C++ Turbo is sold as an add-on on every plan."
+    workers = max(1, int(ENGINE_TURBO_WORKERS))
+    cap = speed_cap_label(ENGINE_PYTHON_SPEED_LIMIT_MBPS)
     return "\n".join([
         "🚀 **C++ TURBO ENGINE**",
         "",
         "Your account runs on the **Python Standard** engine. The C++ Turbo "
         "engine is a paid add-on:",
         "",
-        "✅ Multi-threaded extraction workers instead of one stream",
-        "✅ Zero-copy stream piping — the file is never re-buffered",
-        "✅ Ultra-low latency during traffic peaks",
-        "✅ Priority routing while the server is busy",
+        f"✅ Parallel worker pool — up to {workers} items of a multi-link, "
+        "range or channel batch run at once; Python Standard is single-stream",
+        f"✅ Zero-copy in-memory piping up to {int(ENGINE_ZERO_COPY_MAX_MB)} MB "
+        "— no temp file, no re-read",
+        f"✅ Uncapped speed, against Python Standard's {cap} cap",
+        f"✅ Priority routing above {int(ENGINE_PEAK_THRESHOLD)} concurrent "
+        "extractions",
         "✅ Live telemetry HUD with speed, ETA and server load",
+        "",
+        "ℹ️ A single small file is one MTProto stream on both engines, so there "
+        "Turbo only adds the zero-copy path and the missing cap.",
         "",
         "💰 **Add-on pricing**",
         pricing,
@@ -1617,13 +1919,35 @@ def models_architecture_button() -> InlineKeyboardButton:
     return button("🧠 Models Architecture", callback_data="models_info", style="danger")
 
 
+def speed_cap_label(mbps=None) -> str:
+    """``~3 MB/s`` for the Python Standard cap, ``uncapped`` when there is none."""
+    from config import ENGINE_PYTHON_SPEED_LIMIT_MBPS
+    value = ENGINE_PYTHON_SPEED_LIMIT_MBPS if mbps is None else mbps
+    try:
+        value = float(value or 0)
+    except (TypeError, ValueError):
+        value = 0.0
+    if value <= 0:
+        return "uncapped"
+    shown = int(value) if float(value).is_integer() else round(value, 1)
+    return f"~{shown} MB/s"
+
+
 def models_architecture_text(active=None) -> str:
-    """The detailed Python vs C++ Turbo page opened by the red /start button."""
-    from config import (ENGINE_PEAK_THRESHOLD, ENGINE_TURBO_WORKERS,
-                        ENGINE_ZERO_COPY_MAX_MB, PAYMENT_CONTACT, PREMIUM_PLANS,
-                        RUPEE, plan_addon_price, plan_base_price)
+    """The detailed Python vs C++ Turbo page opened by the red /start button.
+
+    Every claim here is engine-specific and actually true of this codebase.
+    TgCrypto is deliberately **not** listed as a Turbo feature: the native C
+    cipher is installed for the whole bot, so both engines use it on every
+    MTProto chunk and it differentiates nothing.
+    """
+    from config import (ENGINE_PEAK_THRESHOLD, ENGINE_PYTHON_SPEED_LIMIT_MBPS,
+                        ENGINE_TURBO_WORKERS, ENGINE_ZERO_COPY_MAX_MB,
+                        PAYMENT_CONTACT, PREMIUM_PLANS, RUPEE, plan_addon_price,
+                        plan_base_price)
     workers = max(1, int(ENGINE_TURBO_WORKERS))
     zero_copy_mb = max(0, int(ENGINE_ZERO_COPY_MAX_MB))
+    cap = speed_cap_label(ENGINE_PYTHON_SPEED_LIMIT_MBPS)
     prices = "\n".join(
         f"• **{plan['title']}** — {RUPEE}{plan_base_price(plan)} Standard · "
         f"{RUPEE}{plan_base_price(plan) + plan_addon_price(plan)} with C++ Turbo"
@@ -1636,23 +1960,34 @@ def models_architecture_text(active=None) -> str:
         "",
         "⚙️ **PYTHON STANDARD**",
         "• Single-thread, single-stream pipeline",
-        "• One link at a time per extraction batch",
-        "• Buffered transfer: download, then re-upload",
+        "• One item at a time per batch, strictly in the order you sent",
+        f"• Download throughput capped at {cap} by a token-bucket pacer",
+        "• Buffered transfer: streamed to disk, then re-uploaded",
         "• Included in every plan, free tier included",
         "",
         "🚀 **C++ TURBO**",
-        f"• Multi-threaded pool — up to {workers} concurrent workers",
-        f"• Zero-copy stream piping: files up to {zero_copy_mb} MB are handed to "
-        "the uploader straight from memory — no temp file, no re-read",
-        "• Native C cipher (TgCrypto) on every MTProto chunk",
-        f"• Priority routing above {int(ENGINE_PEAK_THRESHOLD)} concurrent extractions",
+        f"• Parallel worker pool — up to {workers} items of a multi-link, range "
+        "or channel batch run at the same time (Python Standard is single-stream)",
+        f"• Zero-copy in-memory piping: files up to {zero_copy_mb} MB are handed "
+        "to the uploader straight from memory — no temp file, no re-read",
+        "• Uncapped speed — no throughput limit at all, against Python "
+        f"Standard's {cap} cap",
+        f"• Priority routing above {int(ENGINE_PEAK_THRESHOLD)} concurrent "
+        "extractions",
         "",
         "📊 **TRAFFIC HANDLING**",
         "• Python Standard: 1 stream per batch — queues grow with traffic",
-        f"• C++ Turbo: {workers} overlapping streams per batch — the download and "
-        "the upload of different files run at the same time",
-        f"• Indicative throughput: up to ~{workers}x the concurrent streams of a "
-        "single-stream batch on the same link",
+        f"• C++ Turbo: {workers} overlapping streams per batch — the download "
+        "and the upload of different files run at the same time",
+        "• Item starts stay spaced by the anti-ban gap on both engines, so "
+        "parallelism never turns into hammering Telegram",
+        "",
+        "🔍 **WHERE TURBO DOES NOT CHANGE ANYTHING**",
+        "A single small file is **one MTProto stream on both engines** — there "
+        "is nothing to parallelise, so the worker pool stays idle. The win on "
+        "that path is only the zero-copy piping (no temp file, no re-read) and "
+        "the missing speed cap. Turbo pays off on batches: multi-link posts, "
+        "ranges and dump-channel posts.",
         "",
         "🤖 **AUTO MODE (default)**",
         "The controller watches live concurrency. During a traffic spike every "
@@ -1976,61 +2311,205 @@ def mychannels_empty_text() -> str:
     ])
 
 
+def channel_entries(value) -> list[dict]:
+    """Normalize any ``/mychannels`` argument into a list of channel entries.
+
+    Accepts ``None`` (nothing connected), a bare chat id, one entry dict or a
+    list of entries, so the single-channel call sites keep working unchanged
+    while the dashboard can now render both of a user's channels.
+    """
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        return [value]
+    if isinstance(value, (list, tuple)):
+        return [entry for entry in value if isinstance(entry, dict) and entry.get("chat_id")]
+    try:
+        return [{"chat_id": int(value), "title": None, "username": None, "type": "channel"}]
+    except (TypeError, ValueError):
+        return []
+
+
 def mychannels_keyboard(chat_id, *, connected: bool = True) -> InlineKeyboardMarkup:
-    """Test permissions / re-verify admin rights / disconnect."""
+    """Test permissions / re-verify admin rights / disconnect.
+
+    With two channels connected every action is numbered per channel, and the
+    whole dashboard still fits the mobile budget (max 7 rows, max 2 buttons per
+    row, labels at most 28 visible characters).
+    """
+    entries = channel_entries(chat_id) if connected else []
     rows = []
-    if connected and chat_id is not None:
+    if len(entries) == 1:
+        cid = int(entries[0]["chat_id"])
         rows += [
-            [button("🔍 Test Permissions", callback_data=f"mych_test:{int(chat_id)}",
-                    style="primary"),
-             button("🔄 Re-verify Admin", callback_data=f"mych_verify:{int(chat_id)}",
-                    style="primary")],
-            [button("🗑 Disconnect", callback_data=f"mych_del:{int(chat_id)}", style="danger")],
+            [button("🔍 Test Permissions", callback_data=f"mych_test:{cid}", style="primary"),
+             button("🔄 Re-verify Admin", callback_data=f"mych_verify:{cid}", style="primary")],
+            [button("🗑 Disconnect", callback_data=f"mych_del:{cid}", style="danger")],
         ]
+    elif entries:
+        numbered = []
+        for index, entry in enumerate(entries, start=1):
+            cid = int(entry["chat_id"])
+            numbered += [
+                button(f"🔍 Test {index}", callback_data=f"mych_test:{cid}", style="primary"),
+                button(f"🔄 Verify {index}", callback_data=f"mych_verify:{cid}", style="primary"),
+                button(f"🗑 Disconnect {index}", callback_data=f"mych_del:{cid}", style="danger"),
+            ]
+        for start in range(0, len(numbered), 2):
+            rows.append(numbered[start:start + 2])
     rows.append([button("📡 Set channel", callback_data="cmd_setchat", style="success"),
                  home_button()])
     return keyboard(rows)
 
 
-def mychannels_text(entry, *, admin_ok=None, admin_reason: str = "", files: int = 0,
-                    engine=None) -> str:
-    """The dashboard: title, id, posting rights and files extracted."""
+def delchat_choice_keyboard(entries) -> InlineKeyboardMarkup:
+    """/delchat with two channels connected: pick the one to disconnect."""
     from config import CHANNEL_TITLE_FALLBACK
-    entry = entry or {}
-    chat_id = entry.get("chat_id")
-    title = entry.get("title") or (CHANNEL_TITLE_FALLBACK.format(chat_id=chat_id)
-                                   if chat_id else "Unknown chat")
-    if admin_ok is None:
-        rights = "❔ Not checked yet — tap **Test Permissions**"
-    elif admin_ok:
-        rights = "✅ Admin with posting rights"
-    else:
-        reasons = {
-            "not_admin": "❌ The bot is not an admin there",
-            "no_post_rights": "⚠️ Admin, but **Post Messages** is disabled",
-            "error": "❔ Telegram did not answer — try again",
-        }
-        rights = reasons.get(admin_reason, "❌ Cannot post there")
-    kind = str(entry.get("type") or entry.get("kind") or "").lower()
-    kind_label = {"supergroup": "Supergroup", "group": "Group",
-                  "channel": "Channel"}.get(kind, "Channel or supergroup")
-    lines = [
-        "📺 **MY CHANNELS**",
+    rows = []
+    for index, entry in enumerate(channel_entries(entries), start=1):
+        title = entry.get("title") or CHANNEL_TITLE_FALLBACK.format(chat_id=entry["chat_id"])
+        rows.append([button(clamp_label(f"🗑 {index}. {title}"),
+                            callback_data=f"delchat_pick:{int(entry['chat_id'])}",
+                            style="danger")])
+    rows.append([button("❌ Keep both", callback_data="cancel_action", style="primary")])
+    return keyboard(rows)
+
+
+def delchat_choice_text(entries) -> str:
+    """/delchat asks which of the two connected channels to disconnect."""
+    from config import CHANNEL_TITLE_FALLBACK
+    lines = ["🗑 **DISCONNECT A CHANNEL**", ""]
+    for index, entry in enumerate(channel_entries(entries), start=1):
+        chat_id = entry["chat_id"]
+        title = entry.get("title") or CHANNEL_TITLE_FALLBACK.format(chat_id=chat_id)
+        lines.append(f"{index}️⃣ **{title}** — `{chat_id}`")
+    lines += ["", "Tap the channel you want to disconnect. The other one keeps working."]
+    return "\n".join(lines)
+
+
+def channel_limit_reached_text(kind: str = "daily") -> str:
+    """A limit hit **inside a dump channel**: go back to the bot to continue.
+
+    Deliberately short and command-free — a channel is not a dashboard, so the
+    only way forward offered here is the open-bot ``url=`` button that always
+    accompanies this text.
+    """
+    headings = {
+        "daily": "🚫 **Daily Free Limit Reached**",
+        "links": "🚫 **Too Many Links In One Post**",
+        "range": "🚫 **Range Too Large**",
+        "size": "🚫 **File Too Large**",
+    }
+    return "\n".join([
+        headings.get(kind, headings["daily"]),
         "",
-        f"📌 **{title}**",
-        f"🆔 ID: `{chat_id}`",
-        f"🗂 Type: {kind_label}",
-        f"🔐 Bot posting rights: {rights}",
-        f"📦 Files extracted here: **{int(files)}**",
-    ]
+        "This limit cannot be lifted from inside the channel.",
+        "",
+        "👉 Open the bot with the button below to check your remaining quota, "
+        "upgrade or continue there.",
+    ])
+
+
+def channel_rights_text(admin_ok, admin_reason: str = "") -> str:
+    """The posting-rights line of one channel row."""
+    if admin_ok is None:
+        return "❔ Not checked yet — tap **Test Permissions**"
+    if admin_ok:
+        return "✅ Admin with posting rights"
+    reasons = {
+        "not_admin": "❌ The bot is not an admin there",
+        "no_post_rights": "⚠️ Admin, but **Post Messages** is disabled",
+        "error": "❔ Telegram did not answer — try again",
+    }
+    return reasons.get(admin_reason, "❌ Cannot post there")
+
+
+def channel_kind_label(entry) -> str:
+    kind = str((entry or {}).get("type") or (entry or {}).get("kind") or "").lower()
+    return {"supergroup": "Supergroup", "group": "Group",
+            "channel": "Channel"}.get(kind, "Channel or supergroup")
+
+
+def mychannels_text(entry, *, admin_ok=None, admin_reason: str = "", files=0,
+                    engine=None, rights=None) -> str:
+    """The dashboard: title, id, type, posting rights, files and engine badge.
+
+    ``entry`` may be one channel dict (the original single-channel shape) or a
+    list of them; ``files`` and ``rights`` may then be per-channel lists, so
+    both counters stay separate and truthful.
+    """
+    from config import CHANNEL_TITLE_FALLBACK
+    entries = channel_entries(entry)
+    single = not isinstance(entry, (list, tuple))
+    counts = list(files) if isinstance(files, (list, tuple)) else [files] * max(1, len(entries))
+    probes = list(rights) if isinstance(rights, (list, tuple)) else [admin_ok] * max(1, len(entries))
+    lines = ["📺 **MY CHANNELS**"]
+    if not entries:
+        entry = entry or {}
+        chat_id = entry.get("chat_id")
+        title = entry.get("title") or (CHANNEL_TITLE_FALLBACK.format(chat_id=chat_id)
+                                       if chat_id else "Unknown chat")
+        lines += ["", f"📌 **{title}**", f"🆔 ID: `{chat_id}`",
+                  f"🗂 Type: {channel_kind_label(entry)}",
+                  f"🔐 Bot posting rights: {channel_rights_text(admin_ok, admin_reason)}",
+                  f"📦 Files extracted here: **{int(counts[0] or 0)}**"]
+    else:
+        from config import MAX_USER_CHANNELS
+        if not single:
+            lines += ["", f"🔗 Connected: **{len(entries)}/{int(MAX_USER_CHANNELS)}**"]
+        for index, row in enumerate(entries, start=1):
+            chat_id = row.get("chat_id")
+            title = row.get("title") or CHANNEL_TITLE_FALLBACK.format(chat_id=chat_id)
+            probe = probes[index - 1] if index - 1 < len(probes) else None
+            count = counts[index - 1] if index - 1 < len(counts) else 0
+            head = f"📌 **{title}**" if single else f"📌 **{index}. {title}**"
+            lines += ["", head, f"🆔 ID: `{chat_id}`",
+                      f"🗂 Type: {channel_kind_label(row)}",
+                      f"🔐 Bot posting rights: {channel_rights_text(probe, admin_reason)}",
+                      f"📦 Files extracted here: **{int(count or 0)}**"]
+            username = row.get("username")
+            if username:
+                lines.append(f"🔗 Public handle: @{username}")
     if engine:
         lines += ["", active_engine_status(engine)]
-    username = entry.get("username")
-    if username:
-        lines.append(f"🔗 Public handle: @{username}")
     lines += ["", "Use the buttons below to test the bot's permissions, re-verify "
-                 "admin rights or disconnect this channel."]
+                 "admin rights or disconnect a channel."]
     return "\n".join(lines)
+
+
+def channel_slots_full_text(entries) -> str:
+    """Round 4: the account already holds ``MAX_USER_CHANNELS`` channels.
+
+    Plain English, no raw links, and the chat ids only where the dashboard
+    already shows them (inline ``code``), so the user can tell the two apart
+    before disconnecting one.
+    """
+    from config import CHANNEL_TITLE_FALLBACK, MAX_USER_CHANNELS
+    limit = max(1, int(MAX_USER_CHANNELS))
+    rows = []
+    for index, entry in enumerate(channel_entries(entries), start=1):
+        chat_id = entry["chat_id"]
+        title = entry.get("title") or CHANNEL_TITLE_FALLBACK.format(chat_id=chat_id)
+        rows.append(f"{index}️⃣ **{title}** — `{chat_id}`")
+    listed = "\n".join(rows) or "• your connected channels"
+    return "\n".join([
+        f"🚫 **CHANNEL LIMIT REACHED**",
+        "",
+        f"An account may keep **{limit}** channels connected, and yours is full:",
+        "",
+        listed,
+        "",
+        f"👉 Disconnect one of them first, then run /setchat again to add the new "
+        "channel.",
+    ])
+
+
+def setchat_prompt_keyboard() -> InlineKeyboardMarkup:
+    """Step 1 of /setchat: type a reference, or share a private channel."""
+    return keyboard([
+        [button("📡 Share the channel", callback_data="setchat:share", style="primary")],
+        [button("❌ Cancel", callback_data="cancel_action", style="danger")],
+    ])
 
 
 def mychannels_test_text(title: str, ok: bool, reason: str = "") -> str:

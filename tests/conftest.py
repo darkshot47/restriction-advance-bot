@@ -361,35 +361,90 @@ class FakeDB:
     async def unban_user(self, user_id):
         self.users.setdefault(user_id, self._new_user(user_id, "Tester", None))["is_banned"] = False
 
-    # channel dump (/setchat) -------------------------------------------------
+    # channel dump (/setchat) — up to config.MAX_USER_CHANNELS per user --------
+    #: The fake stores documents in the *real* shape and normalizes them through
+    #: the real pure helpers in database.py, so the on-read migration of legacy
+    #: single-channel documents is exercised by the tests rather than faked.
     async def set_user_chat(self, user_id, chat_id, title=None, username=None):
+        return await self.add_user_channel(user_id, chat_id, title, username)
+
+    async def add_user_channel(self, user_id, chat_id, title=None, username=None,
+                               chat_type=None):
+        import database as _database
         user = self.users.setdefault(user_id, self._new_user(user_id, "Tester", None))
+        entries = _database.channels_from_document(user)
+        chat_id = int(chat_id)
+        for entry in entries:
+            if entry["chat_id"] == chat_id:
+                entry["title"] = title or entry["title"]
+                entry["username"] = username if username is not None else entry["username"]
+                entry["type"] = chat_type or entry["type"]
+                reason = "updated"
+                break
+        else:
+            if len(entries) >= max(1, int(_database.MAX_USER_CHANNELS)):
+                return False, "full"
+            entries.append({"chat_id": chat_id, "title": title or str(chat_id),
+                            "username": username, "type": chat_type or "channel"})
+            reason = "added"
+        first = entries[0]
         user.update({
-            "channel_chat_id": int(chat_id), "channel_title": title,
-            "channel_username": username,
+            "channels": entries,
+            # Mirror of the primary channel: legacy readers keep working.
+            "channel_chat_id": first["chat_id"], "channel_title": first["title"],
+            "channel_username": first["username"], "channel_type": first["type"],
         })
+        return True, reason
+
+    async def get_user_channels(self, user_id):
+        import database as _database
+        return _database.channels_from_document(self.users.get(user_id) or {})
+
+    async def remove_user_channel(self, user_id, chat_id):
+        import database as _database
+        user = self.users.get(user_id)
+        if not user:
+            return False
+        entries = _database.channels_from_document(user)
+        wanted = int(chat_id) if chat_id is not None else None
+        remaining = [e for e in entries if e["chat_id"] != wanted]
+        if len(remaining) == len(entries):
+            return False
+        first = remaining[0] if remaining else None
+        user.update({
+            "channels": remaining,
+            "channel_chat_id": first["chat_id"] if first else None,
+            "channel_title": first["title"] if first else None,
+            "channel_username": first["username"] if first else None,
+            "channel_type": first["type"] if first else None,
+        })
+        return True
 
     async def get_user_chat(self, user_id):
-        user = self.users.get(user_id) or {}
-        if user.get("channel_chat_id") is None:
+        """The **primary** channel, byte-compatible with the single-channel era."""
+        entries = await self.get_user_channels(user_id)
+        if not entries:
             return None
+        first = entries[0]
         return {
-            "chat_id": user["channel_chat_id"],
-            "title": user.get("channel_title") or str(user["channel_chat_id"]),
-            "username": user.get("channel_username"),
+            "chat_id": first["chat_id"],
+            "title": first["title"] or str(first["chat_id"]),
+            "username": first["username"],
         }
 
     async def find_user_chat_owner(self, chat_id):
+        import database as _database
+        wanted = int(chat_id)
         for user in self.users.values():
-            if user.get("channel_chat_id") == int(chat_id):
+            if _database.pick_channel_entry(user, wanted):
                 return user
         return None
 
     async def clear_user_chat(self, user_id):
         user = self.users.get(user_id)
         if user:
-            user.update({"channel_chat_id": None, "channel_title": None,
-                         "channel_username": None})
+            user.update({"channels": [], "channel_chat_id": None, "channel_title": None,
+                         "channel_username": None, "channel_type": None})
 
     # payments ----------------------------------------------------------------
     async def mark_payment(self, user_id, status, reviewer=None, plan=None):
@@ -671,6 +726,8 @@ DB_NAMES = [
     "redeem_points", "set_qr", "get_qr", "delete_qr", "add_payment", "get_payments",
     "reserve_daily", "refund_daily", "utcnow", "sync_user_profile", "get_display_name",
     "set_user_chat", "get_user_chat", "find_user_chat_owner", "clear_user_chat", "mark_payment",
+    # Round 4: two dump channels per user, migrated on read.
+    "get_user_channels", "add_user_channel", "remove_user_channel",
     # Dual engines, granular VIP flags and the /mychannels counters.
     "set_engine_mode", "get_engine_mode", "set_user_engine", "get_user_engine",
     "get_engine_preference", "has_models_access", "has_private_access",
@@ -774,6 +831,8 @@ def clean_state(monkeypatch):
 
 #: The bot's own user id inside FakeBot (used by every admin check).
 FAKE_BOT_ID = 999
+#: The user id every FakeUser() defaults to — see ``FakeUser.__init__``.
+DEFAULT_USER_ID = 1001
 #: Raw channel id FakeBot reports for a private invite link.
 FAKE_RAW_CHANNEL_ID = 4242
 #: High-level id of that private channel (what the bot stores and checks).
@@ -859,6 +918,14 @@ class FakeBot:
                                type="channel")
 
     async def get_messages(self, chat_id, message_ids):
+        """Mirror Kurigram: one id returns a message, a list returns a list.
+
+        A list answer keeps the requested order and puts ``None`` where the
+        message does not exist, which is exactly what the range pre-flight
+        relies on to tell "missing" from "unreadable".
+        """
+        if isinstance(message_ids, (list, tuple, set, range)):
+            return [self.messages.get(int(mid)) for mid in message_ids]
         return self.messages.get(message_ids)
 
     async def download_media(self, *args, **kwargs):
@@ -924,6 +991,14 @@ class FakeBot:
 @pytest.fixture(autouse=True)
 def fake_bot(monkeypatch) -> FakeBot:
     bot = FakeBot()
+    #: Round 5 verifies the **person** adding a channel before it verifies the
+    #: bot, so the default test user is an administrator by default.  A test
+    #: that needs a plain member, a non-member or an error overrides this
+    #: explicitly (``bot.members[...]`` / ``bot.not_members``).  The bot's own
+    #: membership (id 999) is deliberately left at the plain-member default, so
+    #: every existing "make the bot an admin" test still has to say so.
+    bot.members[DEFAULT_USER_ID] = make_member(ChatMemberStatus.ADMINISTRATOR,
+                                               can_post_messages=True)
     monkeypatch.setattr(main, "bot", bot)
     return bot
 

@@ -2,8 +2,10 @@ import os
 import re
 import html
 import math
+import time
 import asyncio
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 from flask import Flask
 from threading import Thread
@@ -27,12 +29,13 @@ from config import (BOT_USERNAME, FREE_DAILY_LIMIT, FREE_PRIVATE_LINKS, WATERMAR
                     PREMIUM_PLANS, PREMIUM_BENEFITS, REDEEM_LIMITATION, RUPEE,
                     PREMIUM_SOURCE_MANUAL, PREMIUM_SOURCE_PUBLIC, PREMIUM_SOURCE_MODELS,
                     PURCHASE_PREMIUM_SOURCE, CHANNEL_CLEANUP_SECONDS, CHANNEL_EXTRACT_COOLDOWN,
-                    CHANNEL_CAPTION_TIMEOUT,
+                    CHANNEL_CAPTION_TIMEOUT, MAX_USER_CHANNELS, RANGE_PREFLIGHT_BATCH,
                     FSUB_MAX_BUTTON_CHARS, FSUB_ITEMS_PER_PAGE, FSUB_JOINER_SCAN_LIMIT,
                     FSUB_VERIFY_LABEL, CHANNEL_TITLE_FALLBACK,
                     OWNER_CONTACT_URL, plan_addon_price, plan_base_price, plan_total_price,
                     ENGINE_PYTHON, ENGINE_CPP, ENGINE_PEAK_THRESHOLD, ENGINE_TURBO_WORKERS,
-                    ENGINE_ZERO_COPY_MAX_BYTES,
+                    ENGINE_ZERO_COPY_MAX_BYTES, ENGINE_START_GAP_SECONDS,
+                    ENGINE_PYTHON_SPEED_LIMIT_MBPS, ENGINE_PYTHON_SPEED_BURST_SECONDS,
                     ENGINE_MODE_AUTO, ENGINE_MODE_LOCK_CPP, ENGINE_MODE_LOCK_PYTHON,
                     DEFAULT_ENGINE_MODE, GRANT_TIERS, GRANT_TIER_KEYS, GRANT_DURATIONS,
                     GRANT_CUSTOM_DAYS_KEY, GRANT_MAX_DAYS, LEGACY_TIER_ALIASES,
@@ -61,6 +64,8 @@ from database import (
     redeem_points, set_qr, get_qr, delete_qr, add_payment, get_payments,
     reserve_daily, refund_daily, utcnow, sync_user_profile, get_display_name,
     set_user_chat, get_user_chat, find_user_chat_owner, clear_user_chat, mark_payment,
+    get_user_channels, add_user_channel, remove_user_channel, channels_from_document,
+    pick_channel_entry,
     set_engine_mode, get_engine_mode, set_user_engine, get_user_engine,
     get_engine_preference, has_models_access, has_private_access,
     set_models_access, set_private_access, record_engine_use, get_engine_stats,
@@ -326,6 +331,29 @@ async def set_engine_preference(user_id, engine):
     value = engines.normalize_engine(engine)
     await set_user_engine(user_id, value)
     return value
+
+
+#: Injectable clock/sleeper for the transfer maths and the Python Standard speed
+#: cap.  A test replaces both with a fake clock, which is what makes the ~3 MB/s
+#: pacing provable without ever really waiting.
+TRANSFER_CLOCK = time.monotonic
+TRANSFER_SLEEPER = asyncio.sleep
+
+
+def engine_speed_limit(decision) -> float:
+    """MB/s cap of the resolved engine — ``0.0`` means "uncapped".
+
+    ⚙️ Python Standard is throttled to ``config.ENGINE_PYTHON_SPEED_LIMIT_MBPS``
+    (default 3 MB/s); 🚀 C++ Turbo is never capped.  Setting the constant to
+    ``0`` disables the cap for Python Standard too.
+    """
+    engine = getattr(decision, "engine", None) or decision
+    if engines.normalize_engine(engine) != ENGINE_PYTHON:
+        return 0.0
+    try:
+        return max(0.0, float(ENGINE_PYTHON_SPEED_LIMIT_MBPS or 0.0))
+    except (TypeError, ValueError):  # pragma: no cover - a bad env value
+        return 0.0
 
 
 def joined_channel(member):
@@ -652,6 +680,97 @@ async def check_access(message, *, enforce_fsub: bool = True):
     return True
 
 
+@dataclass(frozen=True)
+class DeliveryTarget:
+    """Where one extraction is delivered, and by whom.
+
+    Every delivery path in the bot resolves its destination through
+    :func:`resolve_delivery_target` instead of reading ``message.chat.id``
+    inline, so the Saved Messages trap can never silently come back.
+
+    ``copy_client``   the client allowed to run a server-side
+                      ``copy_message``/``forward_messages`` — ``None`` when that
+                      shortcut is illegal for this destination.
+    ``upload_client`` the client used for the download-then-upload path (always
+                      the bot: only the bot may post into the bot chat).
+    """
+
+    chat_id: int
+    copy_client: object | None
+    upload_client: object
+    reason: str = "direct"
+
+    @property
+    def native_copy(self) -> bool:
+        """True when the fast server-side copy may be used."""
+        return self.copy_client is not None
+
+
+def is_user_session(client, user_id=None) -> bool:
+    """True when *client* is a logged-in **user** account, not the bot.
+
+    The detection is deliberately positive rather than "anything that is not the
+    bot": a client is a user session when it is the one this user registered with
+    /login, when it declares itself as such, when Telegram reports a non-bot
+    ``me``, or when it is a real pyrogram/kurigram ``Client`` without a bot
+    token.  Everything else (the bot itself, a plain stand-in object) is treated
+    as bot-like, which keeps the server-side copy available.
+    """
+    if client is None or client is bot:
+        return False
+    if getattr(client, "is_user_client", False):
+        return True
+    if user_id is not None and user_clients.get(user_id) is client:
+        return True
+    me = getattr(client, "me", None)
+    if me is not None:
+        is_bot = getattr(me, "is_bot", None)
+        if is_bot is not None:
+            return not bool(is_bot)
+    if isinstance(client, Client):
+        return not bool(getattr(client, "bot_token", None))
+    return False
+
+
+def resolve_delivery_target(message, user_id, fetch_client) -> DeliveryTarget:
+    """Resolve and validate the destination of one delivery.
+
+    **The Saved Messages trap.** For private/restricted content ``fetch_client``
+    is the *user's own* session, and in a private chat with the bot
+    ``message.chat.id`` **is that same user's id**.  "Send to my own id through
+    my own session" is Telegram's Saved Messages, so the content would land in
+    the user's personal cloud instead of the bot chat.  Inside a registered dump
+    channel the destination is the channel id, which is why that path was always
+    fine.
+
+    The rule is therefore: **a user session may never deliver to its own id.**
+    When that combination is detected the native copy is refused and the
+    delivery falls back to the bot — download with the user session, upload with
+    ``bot.send_*`` into the bot chat.  Caption and attribution behaviour is
+    identical on whichever path ends up delivering.
+    """
+    chat = getattr(message, "chat", None)
+    raw_chat_id = getattr(chat, "id", None)
+    try:
+        chat_id = int(raw_chat_id)
+    except (TypeError, ValueError):
+        # No usable destination at all: fall back to the requester's id so the
+        # bot path still has somewhere to post, and never allow a native copy.
+        return DeliveryTarget(int(user_id or 0), None, bot, reason="no_chat_id")
+
+    try:
+        own_id = int(user_id)
+    except (TypeError, ValueError):
+        own_id = None
+
+    if own_id is not None and chat_id == own_id and is_user_session(fetch_client, own_id):
+        # Private chat + the user's own session = Saved Messages. Refuse the
+        # server-side copy and deliver through the bot instead.
+        return DeliveryTarget(chat_id, None, bot, reason="saved_messages_guard")
+
+    return DeliveryTarget(chat_id, fetch_client, bot, reason="direct")
+
+
 async def try_native_copy(message, fetch_client, chat_target, msg_id, *, use_custom_caption: bool = True):
     user_id = message.from_user.id
 
@@ -659,6 +778,14 @@ async def try_native_copy(message, fetch_client, chat_target, msg_id, *, use_cus
         f"[COPY TRY] chat={chat_target}, msg_id={msg_id}, user={user_id}",
         flush=True
     )
+
+    #: Every delivery resolves its destination through the same guard, so a
+    #: user session can never be asked to post to its own id (Saved Messages).
+    target = resolve_delivery_target(message, user_id, fetch_client)
+    if not target.native_copy:
+        print(f"[COPY SKIPPED] {target.reason}: delivering through the bot instead",
+              flush=True)
+        return False
 
     try:
         premium = user_id == OWNER_ID or await is_premium(user_id)
@@ -672,8 +799,8 @@ async def try_native_copy(message, fetch_client, chat_target, msg_id, *, use_cus
             flush=True
         )
 
-        copied = await fetch_client.copy_message(
-            chat_id=message.chat.id,
+        copied = await target.copy_client.copy_message(
+            chat_id=target.chat_id,
             from_chat_id=msg.chat.id,
             message_id=msg.id
         )
@@ -848,16 +975,26 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
         elif msg.audio:
             file_size = msg.audio.file_size
 
+        #: A dump channel gets the "limit reached — back to the bot" wording
+        #: with an open-bot url= button; private chat keeps the detailed sizes.
+        in_channel = is_channel_context(message)
         if file_size > max_size:
-            await say_edit(status,
-                f"❌ **File too large!**\n\n"
-                f"📦 Size: {file_size / 1024 / 1024:.1f} MB\n"
-                f"🆓 Free limit: 50 MB\n"
-                f"💎 Premium limit: 2 GB"
-            )
+            if in_channel:
+                await say_edit(
+                    status,
+                    ui.channel_limit_text("size", size_mb=file_size / 1024 / 1024),
+                    reply_markup=ui.open_bot_keyboard(),
+                )
+            else:
+                await say_edit(status,
+                    f"❌ **File too large!**\n\n"
+                    f"📦 Size: {file_size / 1024 / 1024:.1f} MB\n"
+                    f"🆓 Free limit: 50 MB\n"
+                    f"💎 Premium limit: 2 GB"
+                )
             return False
 
-        is_channel = isinstance(message, ChannelRequester) or getattr(message.chat, "type", None) in ("channel", "supergroup", "group") or message.chat.id != user_id
+        is_channel = in_channel or message.chat.id != user_id
         is_private_content = fetch_client is not bot
 
         if is_channel and not is_private_content:
@@ -887,7 +1024,16 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
         active_downloads[job_id] = job
 
         #: Live transfer maths: percent, smoothed MB/s and ETA for the HUD.
-        meter = telemetry.TransferMeter(file_size)
+        meter = telemetry.TransferMeter(file_size, clock=TRANSFER_CLOCK)
+        #: ⚙️ Python Standard is paced to config.ENGINE_PYTHON_SPEED_LIMIT_MBPS
+        #: by a token bucket; 🚀 C++ Turbo runs uncapped (rate 0 = no pacing).
+        #: Both share the meter's clock, so the HUD speed line reports exactly
+        #: the rate the throttle is producing.
+        throttle = telemetry.SpeedThrottle(
+            engine_speed_limit(decision),
+            burst_seconds=ENGINE_PYTHON_SPEED_BURST_SECONDS,
+            clock=TRANSFER_CLOCK, sleeper=TRANSFER_SLEEPER,
+        )
 
         async def telemetry_sample():
             """One host reading (CPU/RAM/ping), or ``None`` when unavailable.
@@ -918,9 +1064,18 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
         async def download_progress(current, total):
             if job.get("cancelled"):
                 raise asyncio.CancelledError()
+            was_paused = job["paused"]
             await pause_event.wait()
             if job.get("cancelled"):
                 raise asyncio.CancelledError()
+            if was_paused:
+                # A paused transfer must not come back with a full bucket.
+                throttle.resume()
+
+            #: Pace *before* the meter samples, so the HUD reports the throttled
+            #: rate truthfully instead of the raw line rate.  One comparison and
+            #: at most one sleep per chunk — no busy-wait, no extra API call.
+            await throttle.pace_to(current)
 
             now = asyncio.get_running_loop().time()
             state = meter.update(current, total)
@@ -983,7 +1138,10 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
         if not premium:
             credit = attribution_text()
             caption = f"{caption}\n{credit}" if caption else credit
-        chat_id = message.chat.id
+        #: Destination resolved (and validated) exactly once for this delivery.
+        delivery = resolve_delivery_target(message, user_id, fetch_client)
+        chat_id = delivery.chat_id
+        uploader = delivery.upload_client
         overflow_caption = caption if ui.utf16_length(caption) > 1024 else None
         if overflow_caption:
             if not premium and ui.utf16_length(msg.caption or "") <= 1024:
@@ -1002,23 +1160,23 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
                 pass
 
         if msg.photo:
-            await bot.send_photo(chat_id, file_path, caption=caption, parse_mode=ParseMode.DISABLED)
+            await uploader.send_photo(chat_id, file_path, caption=caption, parse_mode=ParseMode.DISABLED)
         elif msg.video:
-            await bot.send_video(chat_id, file_path, caption=caption, thumb=thumb_path, parse_mode=ParseMode.DISABLED)
+            await uploader.send_video(chat_id, file_path, caption=caption, thumb=thumb_path, parse_mode=ParseMode.DISABLED)
         elif msg.document:
-            await bot.send_document(chat_id, file_path, caption=caption, thumb=thumb_path, parse_mode=ParseMode.DISABLED)
+            await uploader.send_document(chat_id, file_path, caption=caption, thumb=thumb_path, parse_mode=ParseMode.DISABLED)
         elif msg.audio:
-            await bot.send_audio(chat_id, file_path, caption=caption, parse_mode=ParseMode.DISABLED)
+            await uploader.send_audio(chat_id, file_path, caption=caption, parse_mode=ParseMode.DISABLED)
         elif msg.voice:
-            await bot.send_voice(chat_id, file_path, caption=caption, parse_mode=ParseMode.DISABLED)
+            await uploader.send_voice(chat_id, file_path, caption=caption, parse_mode=ParseMode.DISABLED)
         elif msg.video_note:
-            await bot.send_video_note(chat_id, file_path)
+            await uploader.send_video_note(chat_id, file_path)
         elif msg.sticker:
-            await bot.send_sticker(chat_id, file_path)
+            await uploader.send_sticker(chat_id, file_path)
         elif msg.animation:
-            await bot.send_animation(chat_id, file_path, caption=caption, parse_mode=ParseMode.DISABLED)
+            await uploader.send_animation(chat_id, file_path, caption=caption, parse_mode=ParseMode.DISABLED)
         else:
-            await bot.send_document(chat_id, file_path, caption=caption, parse_mode=ParseMode.DISABLED)
+            await uploader.send_document(chat_id, file_path, caption=caption, parse_mode=ParseMode.DISABLED)
 
         delivered = True
         if overflow_caption or msg.video_note or msg.sticker:
@@ -3184,15 +3342,27 @@ async def redeem_handler(client, message):
 @bot.on_message(filters.command("setchat") & (filters.private | filters.channel | filters.group))
 async def setchat_handler(client, message):
     """Channel dump — step 1: which channel should the bot extract into?"""
-    await refresh_profile(getattr(message, "from_user", None))
+    #: An anonymous channel post has no sender, so there is nobody to verify and
+    #: nobody to own the registration: stay silent rather than raise.
+    if getattr(message, "from_user", None) is None:
+        return
+    await refresh_profile(message.from_user)
     ref = chat_ref_from_text(message.text)
     in_channel = _chat_kind(message.chat)
     await start_setchat_flow(message, ref, chat=message.chat if (in_channel and not ref) else None)
 
 
-@bot.on_message(filters.command("delchat") & filters.private)
+@bot.on_message(filters.command("delchat") & (filters.private | filters.channel | filters.group))
 async def delchat_handler(client, message):
-    """Unlink a dump channel — any user for themselves, admins for anyone."""
+    """Unlink a dump channel — any user for themselves, admins for anyone.
+
+    Round 4: an account may hold up to ``config.MAX_USER_CHANNELS`` channels, so
+    a bare ``/delchat`` asks which one to disconnect when two are connected and
+    behaves exactly as before when only one is.
+    """
+    if getattr(message, "from_user", None) is None:
+        #: Posted anonymously in a channel: there is no owner to act for.
+        return
     uid = message.from_user.id
     args = (message.text or "").split()
     target = uid
@@ -3205,15 +3375,140 @@ async def delchat_handler(client, message):
         except ValueError:
             await say(message, "❌ Invalid user id.")
             return
+    elif target == uid:
+        entries = await get_user_channels(uid)
+        if len(entries) > 1:
+            await say(message, ui.delchat_choice_text(entries),
+                      reply_markup=ui.delchat_choice_keyboard(entries))
+            return
     await clear_user_chat(target)
     setchat_pending.pop(target, None)
     await say(message, f"✅ Channel link removed for `{target}`.")
+
+
+async def cb_delchat_pick(client, query):
+    """``delchat_pick:<chat_id>`` — disconnect the channel the user tapped."""
+    uid = query.from_user.id
+    _, _, raw = (query.data or "").partition(":")
+    try:
+        chat_id = int(raw)
+    except (TypeError, ValueError):
+        await query.answer(ui_text("⚠️ This menu is out of date — send /delchat again."),
+                           show_alert=True)
+        return
+    entries = await get_user_channels(uid)
+    entry = pick_channel_entry({"channels": entries}, chat_id)
+    if entry is None:
+        await query.answer(ui_text("⚠️ That channel is no longer connected."), show_alert=True)
+        return
+    title = entry.get("title") or CHANNEL_TITLE_FALLBACK.format(chat_id=chat_id)
+    await remove_user_channel(uid, chat_id)
+    setchat_pending.pop(uid, None)
+    await query.answer(ui_text("🗑 Channel disconnected."))
+    remaining, counts = await mychannels_snapshot(uid)
+    payload, _files = mychannels_payload(remaining, counts) if remaining else (None, 0)
+    await render(query, ui.mychannels_disconnected_text(title),
+                 ui.mychannels_keyboard(payload, connected=bool(remaining)))
 
 
 @callback_action("cmd_setchat")
 async def cb_setchat(client, query):
     await query.answer()
     await start_setchat_flow(query, chat_ref_from_text(query.data or ""))
+
+
+@callback_action("setchat:share")
+async def cb_setchat_share(client, query):
+    """Round 7 — register a **private** channel by sharing one of its posts.
+
+    A private channel has no public link, so instead of asking for one the bot
+    waits for a forward and reads the channel identity off it.  Nothing is
+    stored until both verifications pass, and no invite link or raw chat id is
+    ever printed into the conversation.
+    """
+    uid = query.from_user.id
+    entries = await get_user_channels(uid)
+    if len(entries) >= max(1, int(MAX_USER_CHANNELS)):
+        await query.answer(ui_text("🚫 Channel limit reached."), show_alert=True)
+        await render(query, ui.channel_slots_full_text(entries),
+                     ui.mychannels_keyboard(entries))
+        return
+    await query.answer()
+    setchat_pending.pop(uid, None)
+    pending_action[uid] = "setchat_share"
+    await render(query, ui.setchat_share_prompt_text(), ui.feedback_keyboard())
+
+
+async def register_shared_channel(message, uid) -> bool:
+    """Handle one message while the share-based registration is waiting.
+
+    Returns ``True`` when the message was consumed by this step (so the caller
+    stops), whatever the outcome — a failure keeps the wizard alive for another
+    try and always explains itself in plain English.
+    """
+    shared = forwarded_chat_of(message)
+    if shared is None:
+        await say(message, ui.setchat_share_failed_text("not_received"),
+                  reply_markup=ui.feedback_keyboard())
+        return True
+    if shared["type"] not in {"channel", "supergroup", "group"}:
+        await say(message, ui.setchat_share_failed_text("not_a_channel"),
+                  reply_markup=ui.feedback_keyboard())
+        return True
+
+    chat_id = shared["chat_id"]
+    entries = await get_user_channels(uid)
+    known = {int(entry["chat_id"]) for entry in entries}
+    if chat_id not in known and len(entries) >= max(1, int(MAX_USER_CHANNELS)):
+        pending_action.pop(uid, None)
+        await say(message, ui.channel_slots_full_text(entries),
+                  reply_markup=ui.mychannels_keyboard(entries))
+        return True
+
+    await say(message, ui.setchat_share_resolved_text(shared["title"]))
+
+    #: The bot must be able to open the chat at all before anything is checked.
+    try:
+        await floodwait_guard(bot.get_chat, chat_id)
+    except (ChannelPrivate, ChatAdminRequired, UserNotParticipant, PeerIdInvalid):
+        #: The step stays open: once the bot is added, sharing again just works.
+        await say(message, ui.setchat_share_failed_text("bot_not_in_chat"),
+                  reply_markup=ui.feedback_keyboard())
+        return True
+    except Exception as exc:
+        print(f"[SETCHAT SHARE] cannot open {chat_id}: {exc}", flush=True)
+        await say(message, ui.setchat_share_failed_text("cannot_see"),
+                  reply_markup=ui.feedback_keyboard())
+        return True
+
+    #: Pending registration only — the channel is not live until step 3 passes.
+    setchat_pending[uid] = {
+        "chat_id": chat_id, "title": shared["title"], "username": shared["username"],
+        "step": "await_sample", "invite_link": None, "type": shared["type"],
+        "shared": True,
+    }
+    pending_action.pop(uid, None)
+
+    #: Verification 1 (round 5): the person sharing it must administer it.
+    person_ok, person_reason = await describe_requester_admin(chat_id, uid)
+    if not person_ok:
+        setchat_pending.pop(uid, None)
+        await say(message, ui.setchat_requester_failed_text(person_reason, shared["title"]))
+        return True
+    #: Verification 2: the bot must be an admin with Post Messages.
+    ok, reason = await describe_channel_admin(chat_id)
+    if not ok:
+        #: The wizard stays alive so the owner can fix the rights and press
+        #: **🔍 Check Admin Status** again.
+        setchat_pending[uid]["step"] = "await_check"
+        await say(message, ui.setchat_admin_failed_text(reason),
+                  reply_markup=ui.setchat_check_keyboard())
+        return True
+
+    await say(message, ui.setchat_admin_ok_text(shared["title"],
+                                                private=not shared["username"]),
+              reply_markup=ui.feedback_keyboard())
+    return True
 
 
 @callback_action("setchat:check")
@@ -3249,11 +3544,28 @@ async def cb_setchat_check(client, query):
                      ui.setchat_check_keyboard())
         return
     await query.answer(ui_text("🔍 Checking admin rights…"))
+    #: Round 5 — verify the **person** adding the channel first.  A plain
+    #: member, a non-member or an inconclusive Telegram answer cancels the
+    #: wizard outright and stores nothing.
+    person_ok, person_reason = await describe_requester_admin(pending["chat_id"], uid)
+    if not person_ok:
+        setchat_pending.pop(uid, None)
+        pending_action.pop(uid, None)
+        await render(query,
+                     ui.setchat_requester_failed_text(person_reason, pending.get("title")),
+                     ui.back_keyboard())
+        return
+    #: The bot's own admin + Post Messages check stays a separate step: both
+    #: must pass before the channel can be registered.
     ok, reason = await describe_channel_admin(pending["chat_id"])
     if ok:
         pending["step"] = "await_sample"
         setchat_pending[uid] = pending
-        await render(query, ui.setchat_admin_ok_text(pending["title"]), ui.feedback_keyboard())
+        #: A private channel has no public link, so step 3 asks for a share of
+        #: one post instead of a content link.
+        private = bool(pending.get("invite_link")) or not pending.get("username")
+        await render(query, ui.setchat_admin_ok_text(pending["title"], private=private),
+                     ui.feedback_keyboard())
     else:
         await render(query, ui.setchat_admin_failed_text(reason), ui.setchat_check_keyboard())
 
@@ -3262,19 +3574,42 @@ async def cb_setchat_check(client, query):
 #  /mychannels — the user's dump-channel dashboard
 # --------------------------------------------------------------------------- #
 
+async def mychannels_snapshot(uid):
+    """``(entries, per-channel file counts)`` for one user's dump channels.
+
+    Round 4 made this a list: every account may keep up to
+    ``config.MAX_USER_CHANNELS`` channels connected, each with its **own**
+    counter, so the dashboard reads them separately instead of sharing one.
+    """
+    entries = await get_user_channels(uid)
+    counts = [await get_channel_files(entry["chat_id"]) for entry in entries]
+    return entries, counts
+
+
+def mychannels_payload(entries, counts):
+    """Shape the dashboard arguments: one entry stays a dict, two become a list.
+
+    Keeping the single-channel shape identical is what makes every existing
+    reader (and every legacy Mongo document) render exactly as before.
+    """
+    if len(entries) == 1:
+        return entries[0], counts[0]
+    return entries, counts
+
+
 async def show_mychannels(source):
-    """List the connected dump channel with its rights and file counter."""
+    """List every connected dump channel with its rights and file counter."""
     uid = source.from_user.id
     await ensure_user(source.from_user)
-    entry = await get_user_chat(uid)
-    if not entry:
+    entries, counts = await mychannels_snapshot(uid)
+    if not entries:
         await render(source, ui.mychannels_empty_text(),
                      ui.mychannels_keyboard(None, connected=False))
         return
-    files = await get_channel_files(entry["chat_id"])
+    entry, files = mychannels_payload(entries, counts)
     decision = await resolve_engine_for(uid, record=False)
     await render(source, ui.mychannels_text(entry, files=files, engine=decision.engine),
-                 ui.mychannels_keyboard(entry["chat_id"]))
+                 ui.mychannels_keyboard(entry))
 
 
 @callback_action("cmd_mychannels")
@@ -3298,11 +3633,15 @@ async def mychannels_permission_check(query, entry, *, reverify: bool = False):
         try:
             chat = await bot.get_chat(chat_id)
             title = chat_title(chat, chat_id)
-            await set_user_chat(uid, chat_id, title, getattr(chat, "username", None))
+            #: add_user_channel refreshes this one entry and leaves the other
+            #: connected channel (and its counter) completely alone.
+            await add_user_channel(uid, chat_id, title, getattr(chat, "username", None))
         except Exception as exc:
             print(f"[MYCHANNELS] refresh failed for {chat_id}: {exc}", flush=True)
+    entries, counts = await mychannels_snapshot(uid)
+    entry, _files = mychannels_payload(entries, counts) if entries else (None, 0)
     await render(query, ui.mychannels_test_text(title, ok, reason),
-                 ui.mychannels_keyboard(chat_id))
+                 ui.mychannels_keyboard(entry if entry else chat_id))
 
 
 async def handle_mychannels_callback(client, query, data: str):
@@ -3319,18 +3658,26 @@ async def handle_mychannels_callback(client, query, data: str):
         await query.answer(ui_text("⚠️ This dashboard is out of date — send /mychannels."),
                            show_alert=True)
         return
-    entry = await get_user_chat(uid)
-    if not entry or int(entry["chat_id"]) != chat_id:
+    #: The id in the button is checked against the caller's **own list** of
+    #: channels, so a stale or hand-forged callback can never touch another
+    #: user's dump chat — or a channel this user already disconnected.
+    entries = await get_user_channels(uid)
+    entry = pick_channel_entry({"channels": entries}, chat_id)
+    if entry is None:
         await query.answer(ui_text("⚠️ That channel is no longer connected."), show_alert=True)
         await show_mychannels(query)
         return
     if action == "mych_del":
         title = entry.get("title") or CHANNEL_TITLE_FALLBACK.format(chat_id=chat_id)
-        await clear_user_chat(uid)
+        #: Only this channel goes: the other one keeps working and keeps its
+        #: own file counter.
+        await remove_user_channel(uid, chat_id)
         setchat_pending.pop(uid, None)
         await query.answer(ui_text("🗑 Channel disconnected."))
+        remaining, counts = await mychannels_snapshot(uid)
+        payload, _files = mychannels_payload(remaining, counts) if remaining else (None, 0)
         await render(query, ui.mychannels_disconnected_text(title),
-                     ui.mychannels_keyboard(None, connected=False))
+                     ui.mychannels_keyboard(payload, connected=bool(remaining)))
         return
     await mychannels_permission_check(query, entry, reverify=(action == "mych_verify"))
 
@@ -3341,6 +3688,48 @@ def bot_self_id():
         return getattr(getattr(bot, "me", None), "id", None)
     except Exception:  # pragma: no cover - only when pyrogram is disconnected
         return None
+
+
+def is_channel_context(message) -> bool:
+    """True when *message* lives in a channel/group rather than a private chat.
+
+    Inside a dump channel the bot never advertises or accepts personal commands,
+    and every limit it reports points back to the bot with a ``url=`` button.
+    """
+    if isinstance(message, ChannelRequester):
+        return True
+    chat = getattr(message, "chat", None)
+    if chat_type_value(chat) in {"channel", "supergroup", "group"}:
+        return True
+    sender_chat = getattr(message, "sender_chat", None)
+    return sender_chat is not None
+
+
+#: Callback prefixes that only ever exist on a message the bot itself posted
+#: inside a dump channel (download controls and the custom-caption prompt).
+CHANNEL_CALLBACK_PREFIXES = ("dl:", "cap_yes:", "cap_no:")
+
+
+def query_in_channel(query) -> bool:
+    """True when a button was pressed inside a channel/group rather than a DM."""
+    message = getattr(query, "message", None)
+    return message is not None and is_channel_context(message)
+
+
+def channel_callback_allowed(query) -> bool:
+    """A channel button press is honoured only on the bot's own message.
+
+    A dashboard callback that arrives from a channel (a forwarded press, a
+    stale client, a crafted request) is dropped completely silently — not even
+    a ``query.answer`` toast, because a dump channel is not a bot dashboard.
+    """
+    if not query_in_channel(query):
+        return True
+    if is_own_message(getattr(query, "message", None)):
+        return True
+    #: The download-control and caption prompts are only ever rendered by the
+    #: bot itself, so they are the channel's own vocabulary.
+    return (getattr(query, "data", None) or "").startswith(CHANNEL_CALLBACK_PREFIXES)
 
 
 def is_own_message(message) -> bool:
@@ -3366,7 +3755,15 @@ async def channel_dump_handler(client, message):
     if is_own_message(message):
         return
     text = (message.text or "").strip()
-    if not text or "t.me/" not in text or text.startswith("/"):
+    if not text:
+        return
+    if text.startswith("/"):
+        # Channel vocabulary only: /setchat, /delchat and owner/admin commands.
+        # Every personal command is a silent no-op here — zero replies, edits
+        # or sends — so the channel never turns into a second bot dashboard.
+        await dispatch_channel_command(client, message)
+        return
+    if "t.me/" not in text:
         return
     owner_row = await find_user_chat_owner(message.chat.id)
     if not owner_row:
@@ -3666,7 +4063,9 @@ async def start_setchat_flow(source, ref=None, chat=None):
     await refresh_profile(source.from_user)
     if not ref and chat is None:
         pending_action[uid] = "setchat"
-        await render(source, ui.setchat_prompt_text(), ui.feedback_keyboard())
+        #: Round 7 — the prompt offers the share path for private channels,
+        #: which have no link to paste.
+        await render(source, ui.setchat_prompt_text(), ui.setchat_prompt_keyboard())
         return False
     if chat is not None:
         # Command posted inside the channel/group: we already hold its details.
@@ -3708,6 +4107,16 @@ async def start_setchat_flow(source, ref=None, chat=None):
         )
         return False
     chat_id, title, username = resolved["chat_id"], resolved["title"], resolved["username"]
+    #: Round 4 — refuse a third channel *before* running the user through the
+    #: whole wizard, and say plainly that one has to be disconnected first.
+    entries = await get_user_channels(uid)
+    known = {int(entry["chat_id"]) for entry in entries}
+    if int(chat_id) not in known and len(entries) >= max(1, int(MAX_USER_CHANNELS)):
+        pending_action.pop(uid, None)
+        setchat_pending.pop(uid, None)
+        await render(source, ui.channel_slots_full_text(entries),
+                     ui.mychannels_keyboard(entries))
+        return False
     setchat_pending[uid] = {
         "chat_id": chat_id, "title": title, "username": username,
         "step": "await_check", "invite_link": resolved.get("invite_link"),
@@ -3762,38 +4171,252 @@ async def verify_channel_admin(chat_id) -> bool:
     return ok
 
 
-async def verify_setchat_sample(message, uid, text) -> bool:
-    """Step 3 — a sample message proves the bot can read the channel."""
-    pending = setchat_pending.get(uid)
-    if not pending:
-        return False
-    text = (text or "").strip()
-    chat_target, msg_id, _ = parse_link(text)
-    if chat_target is None:
-        # Private channels rarely expose t.me/<name>/<id>: while the wizard
-        # waits for the sample a bare message number is accepted too.
-        if re.fullmatch(r"\d+", text):
-            msg_id = int(text)
-        else:
-            await say(message, ui.setchat_sample_failed_text())
-            return False
+#: Membership states that Telegram reports for somebody who may **not** manage a
+#: chat.  Anything outside these two sets is treated as inconclusive.
+REQUESTER_ADMIN_STATUSES = {"owner", "creator", "administrator"}
+REQUESTER_MEMBER_STATUSES = {"member", "restricted", "left", "banned"}
+
+
+async def describe_requester_admin(chat_id, user_id):
+    """``(ok, reason)`` — may *this person* connect *chat_id* to the bot?
+
+    Round 5: the bot verifies that whoever is adding the channel actually
+    administers it.  ``reason`` is ``ok``, ``not_admin``, ``not_member`` or
+    ``error``.
+
+    Unlike force-sub — which fails **open** so a Telegram hiccup never locks a
+    user out of the bot — an inconclusive answer here fails **safe**: the caller
+    cancels the wizard and stores nothing, because registering a channel on an
+    uncertain answer is how a stranger gets somebody else's channel connected.
+    """
     try:
-        sample = await floodwait_guard(bot.get_messages, pending["chat_id"], msg_id)
+        member = await floodwait_guard(bot.get_chat_member, chat_id, int(user_id))
+    except UserNotParticipant:
+        return False, "not_member"
     except Exception as exc:
-        print(f"[SETCHAT] sample check failed: {exc}", flush=True)
-        sample = None
-    if not sample or getattr(sample, "empty", False):
-        await say(message, ui.setchat_sample_failed_text())
+        print(f"[SETCHAT] requester check error chat={chat_id} user={user_id}: {exc}",
+              flush=True)
+        return False, "error"
+    status = getattr(getattr(member, "status", None), "value", getattr(member, "status", None))
+    status = str(status or "").lower()
+    print(f"[SETCHAT] requester check chat={chat_id} user={user_id} status={status!r}",
+          flush=True)
+    if status in REQUESTER_ADMIN_STATUSES:
+        return True, "ok"
+    if status in REQUESTER_MEMBER_STATUSES:
+        return False, "not_admin"
+    #: An answer this build does not recognise proves nothing — fail safe.
+    return False, "error"
+
+
+async def verify_requester_admin(chat_id, user_id) -> bool:
+    """True when *user_id* administers *chat_id* (see :func:`describe_requester_admin`)."""
+    ok, _reason = await describe_requester_admin(chat_id, user_id)
+    return ok
+
+
+def forwarded_chat_of(message):
+    """The channel a shared (forwarded) post came from, or ``None``.
+
+    Round 7 registers a private channel from a share: forwarding one of its
+    posts into the bot is the only way to learn a private channel's identity
+    without ever printing an invite link or a raw chat id into the chat.
+    """
+    chat = getattr(message, "forward_from_chat", None)
+    if chat is None:
+        return None
+    chat_id = getattr(chat, "id", None)
+    if chat_id is None:
+        return None
+    return {
+        "chat_id": int(chat_id),
+        "title": chat_title(chat, chat_id),
+        "username": getattr(chat, "username", None),
+        "type": chat_type_value(chat) or "channel",
+    }
+
+
+async def complete_setchat(message, uid, pending) -> bool:
+    """Store the verified channel and close the wizard.
+
+    The per-user cap is enforced here as well as at the start of the flow, so a
+    wizard that was left open while the user connected another channel still
+    cannot push the account over ``config.MAX_USER_CHANNELS``.
+    """
+    chat_id = pending["chat_id"]
+    ok, reason = await add_user_channel(uid, chat_id, pending.get("title"),
+                                        pending.get("username"), pending.get("type"))
+    if not ok and reason == "full":
+        entries = await get_user_channels(uid)
+        await say(message, ui.channel_slots_full_text(entries),
+                  reply_markup=ui.mychannels_keyboard(entries))
         return False
-    await set_user_chat(uid, pending["chat_id"], pending["title"], pending["username"])
     setchat_pending.pop(uid, None)
     pending_action.pop(uid, None)
     await say(
         message,
-        ui.setchat_done_text(pending["title"], pending["chat_id"]),
+        ui.setchat_done_text(pending.get("title") or str(chat_id), chat_id),
         reply_markup=ui.back_keyboard(),
     )
     return True
+
+
+async def verify_setchat_sample(message, uid, text) -> bool:
+    """Step 3 — one real post proves the bot can read *this* channel.
+
+    Round 8 dropped the bare message number: ``15`` says nothing about which
+    chat it came from, so it could not confirm the post belongs to the channel
+    being registered.  The bot now resolves a **content link**, reads the
+    message and compares the chat it lives in with the pending registration.
+    A private channel has no public link, so a share (forward) of one of its
+    posts is accepted as the equivalent proof.
+    """
+    pending = setchat_pending.get(uid)
+    if not pending:
+        return False
+    chat_id = pending["chat_id"]
+
+    #: Private channels: a forwarded post carries the channel it came from.
+    shared = forwarded_chat_of(message)
+    if shared is not None:
+        if int(shared["chat_id"]) == int(chat_id):
+            return await complete_setchat(message, uid, pending)
+        await say(message, ui.setchat_sample_failed_text("wrong_chat"))
+        return False
+
+    text = (text or "").strip()
+    chat_target, msg_id, _is_private = parse_link(text)
+    if chat_target is None or msg_id is None:
+        #: A bare number is refused with its own explanation; anything else that
+        #: is not a link gets the generic "send a content link" next step.
+        reason = "not_a_link" if re.fullmatch(r"\d+", text) else "unreadable"
+        await say(message, ui.setchat_sample_failed_text(reason))
+        return False
+
+    reason = "unreadable"
+    sample = None
+    try:
+        sample = await floodwait_guard(bot.get_messages, chat_target, msg_id)
+    except (ChannelPrivate, ChatAdminRequired, UserNotParticipant):
+        reason = "no_access"
+    except PeerIdInvalid:
+        reason = "wrong_chat"
+    except Exception as exc:
+        print(f"[SETCHAT] sample check failed: {exc}", flush=True)
+    if not sample or getattr(sample, "empty", False):
+        await say(message, ui.setchat_sample_failed_text(reason))
+        return False
+
+    #: The decisive check: the post must belong to the channel being registered.
+    sample_chat = getattr(getattr(sample, "chat", None), "id", None)
+    if sample_chat is not None and int(sample_chat) != int(chat_id):
+        await say(message, ui.setchat_sample_failed_text("wrong_chat"))
+        return False
+    return await complete_setchat(message, uid, pending)
+
+
+class BatchProgress:
+    """The one aggregate status message of a batch, safe under concurrency.
+
+    Every edit goes through a single :class:`asyncio.Lock` and the line counts
+    *finished* items rather than "the item I happen to be", so two 🚀 C++ Turbo
+    workers editing at the same time can never interleave nonsense into the
+    same message.  Each item still owns its **own** per-item status message.
+    """
+
+    def __init__(self, status, total: int):
+        self.status = status
+        self.total = max(0, int(total))
+        self.done = 0
+        self._lock = asyncio.Lock()
+
+    async def advance(self, count: int = 1) -> None:
+        async with self._lock:
+            self.done = min(self.total, self.done + max(0, int(count)))
+            try:
+                await say_edit(self.status, ui.batch_progress_text(self.done, self.total))
+            except Exception:  # a progress edit must never break a download
+                pass
+
+    async def finish(self, success: int, failed: int) -> None:
+        async with self._lock:
+            try:
+                await say_edit(self.status, ui.batch_done_text(success, failed))
+            except Exception:  # pragma: no cover - the tally is best effort
+                pass
+
+
+async def run_private_batch(message, items, *, heading: str | None = None,
+                            status=None, sleeper=asyncio.sleep,
+                            start_gap: float | None = None,
+                            engine=None) -> engines.BatchResult:
+    """Run one private-chat batch — multi-link **or** range — on the engine.
+
+    ``items`` is a list of ``(label, link)`` pairs in the order the user sent
+    them.  This is the private-chat twin of :func:`extract_channel_links`: both
+    delegate to :func:`engines.run_engine_batch`, so 🚀 C++ Turbo overlaps the
+    slow parts of up to ``ENGINE_TURBO_WORKERS`` files here too, while ⚙️ Python
+    Standard stays strictly sequential in the order sent.
+
+    A single engine decision is resolved for the whole batch (one batch, one
+    engine — exactly what the telemetry HUD reports), and the anti-ban start gap
+    comes from :data:`config.ENGINE_START_GAP_SECONDS`.
+    """
+    user_id = message.from_user.id
+    items = list(items or [])
+    decision = engine if isinstance(engine, engines.EngineDecision) \
+        else await resolve_engine_for(user_id)
+    total = len(items)
+    #: A range flow already owns one status message (it printed the pre-flight
+    #: report there) — reuse it instead of opening a second one.
+    if status is None:
+        status = await say(message, heading or ui.batch_heading_text(total))
+    elif heading:
+        await say_edit(status, heading)
+    progress = BatchProgress(status, total)
+
+    async def run_item(index, item):
+        """Extract one item; returns ``True`` / ``False`` / ``"cancelled"``."""
+        label, link = item
+        status = None
+        try:
+            chat_target, msg_id, is_private = parse_link(link)
+            if chat_target is None:
+                return False
+            status = await say(message, ui.batch_item_text(label))
+            if is_private:
+                if not await private_access(user_id):
+                    await say_edit(status, ui.private_access_text(),
+                                   reply_markup=ui.private_access_keyboard())
+                    return False
+                fetch_client = await get_user_client(user_id)
+                if not fetch_client:
+                    await say_edit(status, ui.private_login_text())
+                    return False
+            else:
+                fetch_client = bot
+            return await fetch_and_send(message, status, fetch_client,
+                                        chat_target, msg_id, engine=decision)
+        except FloodWait as error:
+            # One throttled item pauses; it must never kill the whole batch.
+            seconds = floodwait_seconds(error)
+            if status is not None:
+                await say_edit(status, ui.channel_floodwait_text(seconds))
+            await sleeper(seconds)
+            return False
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[BATCH ITEM FAILED] {type(exc).__name__}: {exc}", flush=True)
+            return False
+        finally:
+            await progress.advance()
+
+    gap = ENGINE_START_GAP_SECONDS if start_gap is None else start_gap
+    batch = await engines.run_engine_batch(items, run_item, decision,
+                                           sleeper=sleeper, start_gap=gap)
+    await progress.finish(batch.success, batch.failed)
+    return batch
 
 
 class ChannelRequester:
@@ -3843,6 +4466,214 @@ def collect_channel_links(text: str, premium: bool):
     return links, (50 if premium else 5), len(links)
 
 
+def channel_range_of(text: str):
+    """``(base_link, start, end)`` when a channel post is a single range request."""
+    match = re.fullmatch(r"\s*(\S*t\.me/\S+)/(\d+)-(\d+)\s*", text or "")
+    if not match:
+        return None
+    return match.group(1), int(match.group(2)), int(match.group(3))
+
+
+# --------------------------------------------------------------------------- #
+#  Range pre-flight — count what actually exists *before* the batch starts
+#
+#  A range like ``t.me/channel/1-500`` used to start blindly: missing, deleted
+#  and contentless messages were discovered one by one mid-batch, so the run
+#  stalled and the final tally was misleading.  The scan below asks Telegram for
+#  the ids in batches (``get_messages`` accepts a list), classifies them, and
+#  reports the counts up front.
+# --------------------------------------------------------------------------- #
+
+#: The scan found media worth downloading.
+PREFLIGHT_MEDIA = "media"
+#: The scan found a message, but it only holds text.
+PREFLIGHT_TEXT = "text"
+#: Deleted, empty or otherwise inaccessible — never attempted.
+PREFLIGHT_MISSING = "missing"
+#: The scan itself could not read this chunk (a probe failure is not proof that
+#: the message is gone, so these ids stay in the batch).
+PREFLIGHT_UNREADABLE = "unreadable"
+
+
+def classify_preflight_message(msg) -> str:
+    """Which pre-flight bucket one scanned message falls into."""
+    if msg is None or getattr(msg, "empty", False):
+        return PREFLIGHT_MISSING
+    if getattr(msg, "media", None):
+        return PREFLIGHT_MEDIA
+    for kind in ("photo", "video", "document", "audio", "voice",
+                 "video_note", "sticker", "animation"):
+        if getattr(msg, kind, None):
+            return PREFLIGHT_MEDIA
+    if getattr(msg, "text", None) or getattr(msg, "caption", None):
+        return PREFLIGHT_TEXT
+    return PREFLIGHT_MISSING
+
+
+@dataclass
+class RangePreflight:
+    """What a requested range really holds, counted before anything downloads.
+
+    ``media + text_only + unreadable`` is exactly the number of items the batch
+    will attempt, and ``missing`` is exactly the number it will not — which is
+    what lets the final ``Done!`` tally reconcile with the pre-flight report.
+    """
+
+    start: int = 0
+    end: int = 0
+    #: Requested ids, in the order the user asked for them.
+    ids: list = field(default_factory=list)
+    #: id -> one of the ``PREFLIGHT_*`` buckets.
+    kinds: dict = field(default_factory=dict)
+    #: Seconds a FloodWait forced the scan to pause (0 when Telegram was happy).
+    floodwait_seconds: int = 0
+    #: ``get_messages`` calls the scan made (batched — never one request per id).
+    requests: int = 0
+
+    # -- counts ------------------------------------------------------------- #
+    def count(self, kind: str) -> int:
+        return sum(1 for value in self.kinds.values() if value == kind)
+
+    @property
+    def media(self) -> int:
+        return self.count(PREFLIGHT_MEDIA)
+
+    @property
+    def text_only(self) -> int:
+        return self.count(PREFLIGHT_TEXT)
+
+    @property
+    def missing(self) -> int:
+        return self.count(PREFLIGHT_MISSING)
+
+    @property
+    def unreadable(self) -> int:
+        return self.count(PREFLIGHT_UNREADABLE)
+
+    @property
+    def requested(self) -> int:
+        return len(self.ids)
+
+    @property
+    def extractable(self) -> list:
+        """Ids worth attempting, in the order sent.
+
+        A chunk the scan could not read at all stays in the batch: a failed
+        probe is never treated as proof that a message does not exist.
+        """
+        skip = {PREFLIGHT_MISSING}
+        return [mid for mid in self.ids if self.kinds.get(mid) not in skip]
+
+    @property
+    def empty(self) -> bool:
+        """True when nothing at all can be extracted (no quota may be spent)."""
+        return not self.extractable
+
+
+async def preflight_range(fetch_client, chat_target, ids, *, batch=None,
+                          sleeper=asyncio.sleep, notify=None) -> RangePreflight:
+    """Classify every id of a range with batched ``get_messages`` calls.
+
+    ``batch``    ids per request (``config.RANGE_PREFLIGHT_BATCH``) — the scan is
+                 never one request per id, which would both stall the run and
+                 invite a FloodWait.
+    ``notify``   optional ``await notify(seconds)`` called when Telegram asks for
+                 a pause, so the user sees why the scan is taking longer.
+
+    Rate limits are respected: a ``FloodWait`` pauses for the requested seconds
+    and the chunk is retried once.  Any other failure degrades gracefully — the
+    affected ids are marked unreadable and stay in the batch, so a broken probe
+    can never silently drop a user's files.
+    """
+    ids = [int(mid) for mid in (ids or [])]
+    scan = RangePreflight(start=ids[0] if ids else 0, end=ids[-1] if ids else 0,
+                          ids=list(ids))
+    if not ids:
+        return scan
+    #: Nothing to scan with is not evidence that the messages are gone: every
+    #: id is reported "could not be checked" and stays in the batch.
+    if fetch_client is None:
+        scan.kinds = {mid: PREFLIGHT_UNREADABLE for mid in ids}
+        return scan
+    size = max(1, int(batch or RANGE_PREFLIGHT_BATCH))
+    getter = getattr(fetch_client, "get_messages", None)
+    if getter is None:                      # a client that cannot scan at all
+        scan.kinds = {mid: PREFLIGHT_UNREADABLE for mid in ids}
+        return scan
+
+    for offset in range(0, len(ids), size):
+        chunk = ids[offset:offset + size]
+        scan.requests += 1
+        try:
+            found = await getter(chat_target, chunk)
+        except FloodWait as error:
+            # Telegram asked for a pause: wait it out, then retry the chunk.
+            seconds = floodwait_seconds(error)
+            scan.floodwait_seconds += seconds
+            print(f"[RANGE PREFLIGHT] FloodWait {seconds}s on {len(chunk)} ids",
+                  flush=True)
+            if notify is not None:
+                try:
+                    await notify(seconds)
+                except Exception:  # a status edit must never break the scan
+                    pass
+            await sleeper(seconds)
+            try:
+                found = await getter(chat_target, chunk)
+            except Exception as exc:
+                print(f"[RANGE PREFLIGHT] retry failed: {exc}", flush=True)
+                found = None
+        except Exception as exc:
+            print(f"[RANGE PREFLIGHT] scan failed: {type(exc).__name__}: {exc}",
+                  flush=True)
+            found = None
+
+        items = list(found) if isinstance(found, (list, tuple)) else (
+            [found] if found is not None else [])
+        by_id = {}
+        for item in items:
+            item_id = getattr(item, "id", None)
+            if item_id is not None:
+                try:
+                    by_id[int(item_id)] = item
+                except (TypeError, ValueError):
+                    continue
+        aligned = len(items) == len(chunk)
+        for position, mid in enumerate(chunk):
+            item = by_id.get(mid)
+            if item is None and aligned:
+                #: Kurigram answers a list request with one slot per id, so a
+                #: hole in an aligned answer really is a missing message.
+                item = items[position]
+            if item is None and not aligned:
+                #: A short or unidentifiable answer did not cover this id and
+                #: therefore proves nothing about it: keep it in the batch
+                #: instead of silently dropping one of the user's files.
+                scan.kinds[mid] = PREFLIGHT_UNREADABLE
+                continue
+            scan.kinds[mid] = classify_preflight_message(item)
+    return scan
+
+
+async def channel_scan_client(user_id, base_link, first_id):
+    """``(client, chat_target)`` able to read a channel post's range, or Nones.
+
+    The pre-flight scan must read the source with the same client that will
+    later download it: the bot for public channels, the user's own session for
+    private/restricted ones (and only when that user actually holds private
+    access and has a session logged in).
+    """
+    chat_target, _msg_id, is_private = parse_link(f"{base_link}/{int(first_id)}")
+    if chat_target is None:
+        return None, None
+    if not is_private:
+        return bot, chat_target
+    if not await private_access(user_id):
+        return None, None
+    client = await get_user_client(user_id)
+    return (client, chat_target) if client else (None, None)
+
+
 async def extract_channel_links(message, user_row, *, sleeper=asyncio.sleep):
     """Extraction behaviour for a registered dump channel.
 
@@ -3856,13 +4687,42 @@ async def extract_channel_links(message, user_row, *, sleeper=asyncio.sleep):
     links, max_links, total = collect_channel_links(text, premium)
     if not links:
         return 0, 0
+    requested_range = channel_range_of(text)
     if total > max_links:
-        await say(message, f"⚠️ Too many links!\n🆓 Free: 5\n💎 Premium: 50\nSent: {total}")
+        #: A limit hit **inside a dump channel** points back to the bot with a
+        #: url= button; personal commands are never advertised or accepted here.
+        #: A range post gets the range wording, a multi-link post the link one.
+        notice = (ui.channel_limit_text("range", requested=total, premium=premium)
+                  if requested_range else
+                  ui.channel_limit_text("links", sent=total, premium=premium))
+        await say(message, notice, reply_markup=ui.open_bot_keyboard())
         return 0, 0
+
+    #: Range posts are counted before they start, exactly like in private chat.
+    scan = None
+    if requested_range:
+        base_link, start, end = requested_range
+        scan_client, scan_target = await channel_scan_client(user_id, base_link, start)
+        if scan_client is not None:
+            scan = await preflight_range(
+                scan_client, scan_target, range(start, end + 1), sleeper=sleeper)
+            await say(message, ui.range_preflight_text(
+                start, end, scan.media, scan.text_only, scan.missing,
+                scan.unreadable))
+            if scan.empty:
+                await say(message, ui.range_nothing_to_extract_text(
+                    start, end, scan.missing), reply_markup=ui.open_bot_keyboard())
+                return 0, 0
+            links = [f"{base_link}/{mid}" for mid in scan.extractable]
+            total = len(links)
+
     if not premium and user_id != OWNER_ID:
         allowed, current = await check_daily_limit(user_id, FREE_DAILY_LIMIT)
+        #: The quota is reserved against the items that will *actually* be
+        #: extracted, not the raw size of the range the user typed.
         if not allowed or current + len(links) > FREE_DAILY_LIMIT:
-            await say(message, ui.daily_limit_text(used=current), reply_markup=ui.daily_limit_keyboard())
+            await say(message, ui.channel_limit_text("daily", used=current),
+                      reply_markup=ui.open_bot_keyboard())
             return 0, 0
 
     use_custom_caption = False
@@ -3899,12 +4759,6 @@ async def extract_channel_links(message, user_row, *, sleeper=asyncio.sleep):
     #: One decision per batch: every link of this post runs on the same engine,
     #: which is also what the telemetry HUD reports.
     decision = await resolve_engine_for(user_id)
-    engine = decision.engine_object
-    #: The C++ Turbo engine spreads a batch over its worker pool; the Python
-    #: engine (and any single-link post) keeps the strict single stream.
-    workers = engine.workers if len(links) > 1 else 1
-    success = failed = 0
-    stop = False
 
     async def run_link(index, link):
         """Extract one link; returns ``True`` / ``False`` / ``"cancelled"``."""
@@ -3936,49 +4790,14 @@ async def extract_channel_links(message, user_row, *, sleeper=asyncio.sleep):
             await sleeper(seconds)
             return False
 
-    def tally(result) -> bool:
-        """Count one finished link; ``False`` means "stop the batch"."""
-        nonlocal success, failed
-        if result == "cancelled":
-            return False
-        success += 1 if result else 0
-        failed += 0 if result else 1
-        return True
-
+    #: The very same engine-aware runner the two private-chat batch paths use:
+    #: 🚀 C++ Turbo spreads the post over its bounded worker pool, ⚙️ Python
+    #: Standard stays strictly sequential in the order posted.
     async with channel_rate_limit(chat_id, sleeper=sleeper):
-        if workers <= 1:
-            # Python Standard — one stream, strictly in the order posted.
-            for index, link in enumerate(links, 1):
-                if not tally(await run_link(index, link)):
-                    break
-                await sleeper(CHANNEL_EXTRACT_COOLDOWN)
-        else:
-            # C++ Turbo — a bounded worker pool.  Starts stay spaced by the
-            # anti-ban cooldown so Telegram is never hammered, while the slow
-            # parts (download + re-upload) of different files overlap.
-            start_gate = asyncio.Lock()
-            slots = asyncio.Semaphore(workers)
-
-            async def worker(index, link):
-                nonlocal stop
-                async with start_gate:
-                    if stop:
-                        return None
-                    if index > 1:
-                        await sleeper(CHANNEL_EXTRACT_COOLDOWN)
-                async with slots:
-                    if stop:
-                        return None
-                    result = await run_link(index, link)
-                    if result == "cancelled":
-                        stop = True
-                    return result
-
-            for result in await asyncio.gather(
-                    *(worker(index, link) for index, link in enumerate(links, 1))):
-                if result is None:      # never started: the batch was stopped
-                    continue
-                tally(result)
+        batch = await engines.run_engine_batch(
+            links, run_link, decision, sleeper=sleeper,
+            start_gap=ENGINE_START_GAP_SECONDS)
+    success, failed = batch.as_tuple()
     if success:
         # /mychannels reports how many files landed in this channel.
         try:
@@ -4172,6 +4991,134 @@ ADMIN_OWNER_COMMANDS = {
 }
 
 
+# --------------------------------------------------------------------------- #
+#  Channel vocabulary — one explicit allow-list, everything else is a no-op
+# --------------------------------------------------------------------------- #
+#: Every registered slash command mapped to the handler that implements it.
+#: pyrogram's ``filters.private`` already keeps personal commands out of a
+#: channel, but a dump channel is a *registered* chat the bot must still answer
+#: in for channel vocabulary and for owner/admin work, so the routing is written
+#: down here explicitly instead of relying on filter side effects.
+COMMAND_HANDLERS = {
+    "start": start_handler,
+    "help": help_handler,
+    "login": login_handler,
+    "logout": logout_handler,
+    "status": status_handler,
+    "cancel": cancel_handler,
+    "setcaption": setcaption_handler,
+    "delcaption": delcaption_handler,
+    "setthumb": setthumb_handler,
+    "delthumb": delthumb_handler,
+    "setprefix": setprefix_handler,
+    "setsuffix": setsuffix_handler,
+    "mystats": mystats_handler,
+    "myinfo": myinfo_handler,
+    "history": history_handler,
+    "settings": settings_handler,
+    "language": language_handler,
+    "refer": refer_handler,
+    "bookmark": bookmark_handler,
+    "bookmarks": bookmarks_handler,
+    "favorite": favorite_handler,
+    "favorites": favorites_handler,
+    "share": share_handler,
+    "feedback": feedback_handler,
+    "premium": premium_handler,
+    "models": models_handler,
+    "engine": models_handler,
+    "mychannels": mychannels_handler,
+    "redeem": redeem_handler,
+    "stats": stats_handler,
+    "users": users_handler,
+    "loggedusers": loggedusers_handler,
+    "activeusers": active_users_handler,
+    "newusers": new_users_handler,
+    "topusers": top_users_handler,
+    "broadcast": broadcast_handler,
+    "ban": ban_handler,
+    "unban": unban_handler,
+    "banlist": banlist_handler,
+    "finduser": finduser_handler,
+    "userinfo": userinfo_handler,
+    "addpremium": addpremium_handler,
+    "removepremium": removepremium_handler,
+    "premiumlist": premiumlist_handler,
+    "addadmin": addadmin_handler,
+    "removeadmin": removeadmin_handler,
+    "adminlist": adminlist_handler,
+    "setfsub": setfsub_handler,
+    "delfsub": delfsub_handler,
+    "fsublist": fsublist_handler,
+    "fsublabel": fsublabel_handler,
+    "fsubcheck": fsubcheck_handler,
+    "maintenance": maintenance_handler,
+    "feedbacks": feedbacks_handler,
+    "sendmsg": sendmsg_handler,
+    "clearlogs": clearlogs_handler,
+    "export": export_handler,
+    "adminhelp": adminhelp_handler,
+    "addqr": addqr_handler,
+    "delqr": delqr_handler,
+    "removeqr": delqr_handler,
+    "payments": payments_handler,
+    "setchat": setchat_handler,
+    "delchat": delchat_handler,
+    "setengine": setengine_handler,
+    "admin": admin_handler,
+    "admins": admin_handler,
+}
+
+#: Channel vocabulary: registering and removing a dump channel, plus the
+#: owner/admin panel.  Anything *not* listed here is a silent no-op inside a
+#: registered channel — no reply, no edit, no send, no stack trace.
+CHANNEL_VOCABULARY = frozenset({"setchat", "delchat"})
+CHANNEL_ALLOWED_COMMANDS = (
+    CHANNEL_VOCABULARY | frozenset(ADMIN_PANEL_COMMANDS) | frozenset(ADMIN_OWNER_COMMANDS)
+    | frozenset({"admin", "admins"})
+)
+#: Personal commands that must never answer inside a channel.
+CHANNEL_BLOCKED_COMMANDS = frozenset(COMMAND_HANDLERS) - CHANNEL_ALLOWED_COMMANDS
+
+
+def command_name_of(message) -> str | None:
+    """The bare command name of *message* (``/setchat@MyBot x`` -> ``setchat``)."""
+    text = (getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
+    if not text.startswith("/"):
+        return None
+    token = text.split()[0][1:].split("@")[0].strip().lower()
+    return token or None
+
+
+def channel_command_allowed(message) -> bool:
+    """True when this command belongs to the channel's vocabulary."""
+    name = command_name_of(message)
+    return bool(name) and name in CHANNEL_ALLOWED_COMMANDS
+
+
+async def dispatch_channel_command(client, message) -> bool:
+    """Run an allow-listed command that was typed inside a channel.
+
+    Returns ``True`` when a handler ran.  A command that is not channel
+    vocabulary, has no sender identity (a bare channel post) or has no handler
+    is ignored completely silently.
+    """
+    if not channel_command_allowed(message):
+        return False
+    if getattr(message, "from_user", None) is None:
+        # An anonymous channel post cannot be an admin — say nothing at all.
+        return False
+    handler = COMMAND_HANDLERS.get(command_name_of(message))
+    if handler is None:
+        return False
+    try:
+        await handler(client, message)
+    except Exception as exc:
+        # A channel command must never leak a traceback into the channel.
+        print(f"[CHANNEL COMMAND FAILED] {command_name_of(message)}: {exc}", flush=True)
+    return True
+
+
 def admin_help_text() -> str:
     """The full command list shown by /admins and /adminhelp.
 
@@ -4275,6 +5222,10 @@ async def run_admin_inline(client, query, command):
 @bot.on_callback_query()
 async def callback_handler(client, query):
     """Route every button press straight to its action."""
+    #: Channel-context presses that do not belong to a bot-posted message are
+    #: ignored before any side effect runs — no answer, no profile refresh.
+    if not channel_callback_allowed(query):
+        return
     data = query.data or ""
     uid = query.from_user.id
     # Button presses refresh the stored profile too (renames show up everywhere).
@@ -4313,6 +5264,9 @@ async def callback_handler(client, query):
     if data.startswith("engine_mode:"):
         # Owner-only global engine controller (AUTO / LOCK C++ / LOCK PYTHON).
         await handle_engine_mode_callback(client, query, data)
+        return
+    if data.startswith("delchat_pick:"):
+        await cb_delchat_pick(client, query)
         return
     if data.startswith(("mych_test:", "mych_verify:", "mych_del:")):
         await handle_mychannels_callback(client, query, data)
@@ -4534,6 +5488,12 @@ async def text_handler(client, message):
             del pending_action[user_id]
             await start_setchat_flow(message, text)
             return
+        elif action == "setchat_share":
+            #: Round 7 — the user shared a post from a private channel.  The
+            #: step consumes the message whatever the outcome; the wizard only
+            #: ends when it succeeds or the user sends /cancel.
+            await register_shared_channel(message, user_id)
+            return
 
     if user_id in login_pending:
         pending = login_pending[user_id]
@@ -4658,40 +5618,10 @@ async def text_handler(client, message):
             if not allowed or current + len(tg_links) > FREE_DAILY_LIMIT:
                 await reply_daily_limit(message, used=current)
                 return
-        status = await say(message, f"⏳ Processing {len(tg_links)}...")
-        success = failed = 0
-        for i, link in enumerate(tg_links, 1):
-            try:
-                await say_edit(status, f"⏳ {i}/{len(tg_links)}...")
-                chat_target, mid, is_priv = parse_link(link)
-                if chat_target is None:
-                    failed += 1
-                    continue
-                ts = await say(message, f"📥 {i}")
-                if is_priv:
-                    if not await private_access(user_id):
-                        await say_edit(ts, ui.private_access_text(),
-                                       reply_markup=ui.private_access_keyboard())
-                        failed += 1
-                        continue
-                    uc = await get_user_client(user_id)
-                    if not uc:
-                        await say_edit(ts, "🔒 Login required")
-                        failed += 1
-                        continue
-                    ok = await fetch_and_send(message, ts, uc, chat_target, mid)
-                else:
-                    ok = await fetch_and_send(message, ts, bot, chat_target, mid)
-                if ok == "cancelled":
-                    break
-                if ok:
-                    success += 1
-                else:
-                    failed += 1
-                await asyncio.sleep(1)
-            except:
-                failed += 1
-        await say_edit(status, f"✅ Done!\n✅ {success} ❌ {failed}")
+        #: 🚀 C++ Turbo overlaps this batch, ⚙️ Python Standard keeps it
+        #: strictly sequential — the same runner the channel dump uses.
+        items = [(index, link) for index, link in enumerate(tg_links, 1)]
+        await run_private_batch(message, items)
         return
 
     if "t.me/" not in text:
@@ -4712,48 +5642,53 @@ async def text_handler(client, message):
         premium = await is_premium(user_id)
         max_range = 1000 if premium else 20
         if total > max_range:
-            await say(message, "⚠️ Range too large!\n🆓 Free: 20\n💎 Premium: 1000")
+            await say(message, ui.range_too_large_text(total, max_range))
+            return
+        base_link = text.rsplit("/", 1)[0]
+        chat_target, _first_id, is_private = parse_link(f"{base_link}/{start}")
+        if chat_target is None:
+            await say(message, "❌ Invalid link.")
+            return
+        #: One status message for the whole range flow: the scan report, the
+        #: batch heading and the final tally are all edits of this message.
+        status = await say(message, ui.range_scan_text(start, end))
+        if is_private:
+            if not await private_access(user_id):
+                await edit_private_access(status)
+                return
+            scan_client = await get_user_client(user_id)
+            if not scan_client:
+                await say_edit(status, ui.private_login_text())
+                return
+        else:
+            scan_client = bot
+
+        #: Count what actually exists *before* starting, so nothing surprising
+        #: happens mid-batch and the quota is reserved for the real count.
+        async def announce_scan_pause(seconds):
+            # A FloodWait during the scan is reported, then waited out safely.
+            await say_edit(status, ui.range_preflight_floodwait_text(seconds))
+
+        scan = await preflight_range(scan_client, chat_target, range(start, end + 1),
+                                     notify=announce_scan_pause)
+        await say_edit(status, ui.range_preflight_text(
+            start, end, scan.media, scan.text_only, scan.missing, scan.unreadable))
+        planned = scan.extractable
+        if not planned:
+            # Nothing extractable: a clear message and no quota consumed.
+            await say_edit(status, ui.range_nothing_to_extract_text(
+                start, end, scan.missing))
             return
         if not premium and user_id != OWNER_ID:
             allowed, current = await check_daily_limit(user_id, FREE_DAILY_LIMIT)
-            if not allowed or current + total > FREE_DAILY_LIMIT:
-                await reply_daily_limit(message, used=current)
+            #: Reserved against the items that will *actually* be extracted,
+            #: not the raw size of the range the user typed.
+            if not allowed or current + len(planned) > FREE_DAILY_LIMIT:
+                await edit_daily_limit(status, used=current)
                 return
-        base_link = text.rsplit("/", 1)[0]
-        status = await say(message, f"⏳ Range: {total} messages")
-        success = failed = 0
-        for msg_id in range(start, end + 1):
-            try:
-                link = f"{base_link}/{msg_id}"
-                chat_target, mid, is_priv = parse_link(link)
-                if chat_target is None:
-                    failed += 1
-                    continue
-                ts = await say(message, f"📥 {msg_id}")
-                if is_priv:
-                    if not await private_access(user_id):
-                        await say_edit(ts, ui.private_access_text(),
-                                       reply_markup=ui.private_access_keyboard())
-                        failed += 1
-                        continue
-                    uc = await get_user_client(user_id)
-                    if not uc:
-                        await say_edit(ts, "🔒 Login required")
-                        failed += 1
-                        continue
-                    ok = await fetch_and_send(message, ts, uc, chat_target, mid)
-                else:
-                    ok = await fetch_and_send(message, ts, bot, chat_target, mid)
-                if ok == "cancelled":
-                    break
-                if ok:
-                    success += 1
-                else:
-                    failed += 1
-                await asyncio.sleep(1)
-            except:
-                failed += 1
-        await say_edit(status, f"✅ Done!\n✅ {success} ❌ {failed}")
+        items = [(msg_id, f"{base_link}/{msg_id}") for msg_id in planned]
+        await run_private_batch(message, items, status=status,
+                                heading=ui.range_heading_text(len(planned)))
         return
 
     chat_target, msg_id, is_private = parse_link(text)

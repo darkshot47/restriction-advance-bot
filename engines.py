@@ -45,6 +45,7 @@ Global controller modes
 
 from __future__ import annotations
 
+import asyncio
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -52,7 +53,9 @@ from dataclasses import dataclass, field
 from config import (
     DEFAULT_ENGINE_MODE, ENGINE_CPP, ENGINE_MODE_AUTO, ENGINE_MODE_LOCK_CPP,
     ENGINE_MODE_LOCK_PYTHON, ENGINE_PEAK_THRESHOLD, ENGINE_PYTHON,
-    ENGINE_PYTHON_VERSION, ENGINE_TURBO_VERSION, ENGINE_TURBO_WORKERS, ENGINES,
+    ENGINE_PYTHON_SPEED_LIMIT_MBPS, ENGINE_PYTHON_VERSION,
+    ENGINE_START_GAP_SECONDS, ENGINE_TURBO_VERSION, ENGINE_TURBO_WORKERS,
+    ENGINES,
 )
 
 #: Human readable engine names (also used to build the HUD and the switcher).
@@ -320,6 +323,150 @@ def resolve_engine(
 def autoscaler_active(mode=None) -> bool:
     """True only in AUTO mode — both lock modes pause the autoscaler."""
     return normalize_mode(mode) == ENGINE_MODE_AUTO
+
+
+# --------------------------------------------------------------------------- #
+#  Bulk batch runner — one shared concurrency pattern for every batch path
+#
+#  Three places run a *batch* of extractions: the private multi-link loop, the
+#  private range loop and the dump-channel post.  They all share this runner so
+#  the C++ Turbo worker pool behaves identically everywhere (and so the pattern
+#  can be unit tested once, with in-memory fakes only).
+# --------------------------------------------------------------------------- #
+
+#: Returned by ``runner`` when the user stopped the download: ends the batch.
+CANCELLED = "cancelled"
+
+#: Internal marker for an item that never started because the batch was stopped.
+_NOT_STARTED = object()
+
+
+def batch_workers(decision, item_count: int) -> int:
+    """Worker slots this batch may use.
+
+    ``1`` for the ⚙️ Python Standard engine (strictly sequential, in the order
+    sent) and for *any* single-item request — one item has nothing to overlap,
+    so spawning the pool would only add overhead.  🚀 C++ Turbo gets its full
+    ``Engine.workers`` budget.
+    """
+    try:
+        count = int(item_count)
+    except (TypeError, ValueError):
+        count = 0
+    if count <= 1:
+        return 1
+    engine = getattr(decision, "engine_object", None)
+    if engine is None:
+        engine = get_engine(getattr(decision, "engine", None))
+    return max(1, int(getattr(engine, "workers", 1) or 1))
+
+
+@dataclass
+class BatchResult:
+    """Outcome of one :func:`run_engine_batch` call.
+
+    ``success + failed`` always equals the number of items that actually ran,
+    which is what keeps the user facing ``Done! N success / M failed`` tally
+    truthful under concurrency (no lost and no double counts).
+    """
+
+    success: int = 0
+    failed: int = 0
+    #: True when an item reported ``"cancelled"`` and the batch was stopped.
+    stopped: bool = False
+    #: Items that never started because the batch was already stopped.
+    skipped: int = 0
+    #: Raw per-item results, in item order (``None`` for skipped items).
+    results: list = field(default_factory=list)
+
+    @property
+    def ran(self) -> int:
+        return self.success + self.failed
+
+    def as_tuple(self) -> tuple[int, int]:
+        """``(success, failed)`` — the shape the channel dump path returns."""
+        return self.success, self.failed
+
+
+def _tally(result, outcome: BatchResult) -> bool:
+    """Count one finished item; ``False`` means "stop the batch"."""
+    outcome.results.append(result)
+    if isinstance(result, str) and result == CANCELLED:
+        outcome.stopped = True
+        return False
+    if result:
+        outcome.success += 1
+    else:
+        outcome.failed += 1
+    return True
+
+
+async def run_engine_batch(items, runner, decision, *, sleeper=asyncio.sleep,
+                           start_gap: float | None = None,
+                           workers: int | None = None) -> BatchResult:
+    """Run every item of a bulk batch through *runner*, engine-aware.
+
+    ``items``       the batch (links, message ids, …) in the order sent.
+    ``runner``      ``await runner(index, item)`` with a **1-based** index; it
+                    returns ``True`` / ``False`` / ``"cancelled"``.
+    ``decision``    the resolved :class:`EngineDecision` — one per batch, so
+                    every item of a post runs on the same engine.
+    ``sleeper``     injectable sleep (tests pass a mock instead of waiting).
+    ``start_gap``   seconds between two item *starts*; defaults to
+                    ``config.ENGINE_START_GAP_SECONDS``.
+
+    🚀 **C++ Turbo** runs up to ``Engine.workers`` items concurrently through a
+    bounded :class:`asyncio.Semaphore`.  The *starts* stay spaced by the
+    anti-ban gap, so Telegram is never hammered, while the slow parts of
+    different files (the MTProto download and the re-upload) genuinely overlap.
+
+    ⚙️ **Python Standard** stays strictly sequential — one item at a time, in
+    the order sent — which is exactly the behaviour the free tier has always
+    had.
+
+    A single ``"cancelled"`` stops the whole batch; items that have not started
+    yet are skipped and are counted in neither success nor failed.
+    """
+    items = list(items or [])
+    outcome = BatchResult()
+    if not items:
+        return outcome
+    gap = ENGINE_START_GAP_SECONDS if start_gap is None else float(start_gap)
+    pool = batch_workers(decision, len(items)) if workers is None else max(1, int(workers))
+
+    if pool <= 1:
+        # ⚙️ Python Standard (or any single-item request): one stream, in order.
+        for index, item in enumerate(items, 1):
+            if not _tally(await runner(index, item), outcome):
+                break
+            await sleeper(gap)
+        return outcome
+
+    # 🚀 C++ Turbo: a bounded worker pool with spaced starts.
+    start_gate = asyncio.Lock()
+    slots = asyncio.Semaphore(pool)
+
+    async def worker(index, item):
+        async with start_gate:
+            if outcome.stopped:
+                return _NOT_STARTED
+            if index > 1:
+                await sleeper(gap)
+        async with slots:
+            if outcome.stopped:
+                return _NOT_STARTED
+            result = await runner(index, item)
+            if isinstance(result, str) and result == CANCELLED:
+                outcome.stopped = True
+            return result
+
+    for result in await asyncio.gather(
+            *(worker(index, item) for index, item in enumerate(items, 1))):
+        if result is _NOT_STARTED:      # never started: the batch was stopped
+            outcome.skipped += 1
+            continue
+        _tally(result, outcome)
+    return outcome
 
 
 def can_switch_engine(mode=None, *, has_models: bool = False) -> bool:
