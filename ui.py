@@ -324,8 +324,13 @@ def start_keyboard(show_admin: bool = False) -> InlineKeyboardMarkup:
     Layout budget (mobile): 7 rows maximum, 2 buttons maximum per row.  The
     last row is always the red **🧠 Models Architecture** button, so the
     dual-engine explainer is one tap away from every menu.
+
+    User commands are listed first with emojis.  Admin tools are kept out of
+    the main menu — only the ``/admins`` panel link appears for admins, at the
+    very bottom, so regular users never see owner-only actions.
     """
     rows = [
+        # ── User commands (everyone) ──────────────────────────────────────
         [
             button("🔐 Login", callback_data="cmd_login", style="success"),
             button("🚪 Logout", callback_data="cmd_logout", style="danger"),
@@ -343,16 +348,19 @@ def start_keyboard(show_admin: bool = False) -> InlineKeyboardMarkup:
             button("📺 My Channels", callback_data="cmd_mychannels", style="primary"),
         ],
         [
+            button("📥 Dump Channel", callback_data="cmd_setdump", style="primary"),
+            button("📤 Share Bot", callback_data="cmd_share", style="success"),
+        ],
+        [
             button("📖 Help", callback_data="cmd_help", style="primary"),
             button("💬 Feedback", callback_data="cmd_feedback", style="primary"),
         ],
-        # The owner's row: the giveaway console and the admin panel.  The owner
-        # keeps the language switch in ⚙️ Settings, which is where the menu row
-        # would have sent them anyway — and the keyboard stays inside the
-        # 7-row / 2-button mobile budget (see the presentation tests).
-        ([button("🎁 Start Giveaway", callback_data="cmd_giveaway_panel",
-                 style="success"),
-          button("🛠 Admins", callback_data="cmd_admin", style="primary")]
+        # ── Admin row (owner / admins only) ───────────────────────────────
+        # The /admins panel is the single entry point for all admin commands;
+        # nothing else from the admin toolbox appears here.
+        ([button("🛠 Admins", callback_data="cmd_admin", style="primary"),
+          button("🎁 Start Giveaway", callback_data="cmd_giveaway_panel",
+                 style="success")]
          if show_admin else
          [button("🌐 Language", callback_data="cmd_language", style="primary")]),
         # Red (ButtonStyle.DANGER) footer button — the engine architecture page.
@@ -403,6 +411,19 @@ def logout_keyboard() -> InlineKeyboardMarkup:
 
 def feedback_keyboard() -> InlineKeyboardMarkup:
     return keyboard([[button("❌ Cancel", callback_data="cancel_action", style="danger")]])
+
+
+def invite_keyboard(link: str) -> InlineKeyboardMarkup:
+    """Share + copy buttons for the bot invite link."""
+    return keyboard([
+        [button(
+            "📤 Share link",
+            url=f"https://t.me/share/url?url={link}&text=Check out this awesome bot!",
+            style="success",
+        )],
+        [button("📋 Copy link", copy_text=link, style="primary")],
+        [home_button()],
+    ])
 
 
 def stats_keyboard() -> InlineKeyboardMarkup:
@@ -3207,12 +3228,22 @@ def dump_status_text(entry, stats: dict | None = None, permissions: dict | None 
 
 
 def dump_status_keyboard(connected: bool) -> InlineKeyboardMarkup:
+    """Dump channel dashboard — mirrors the ``/mychannels`` layout for the dump.
+
+    When a dump is connected the owner gets a *Pick my dump* button (Telegram's
+    native channel chooser) plus a test-permissions action, so the dump channel
+    can be reconfigured or re-verified without leaving the flow.
+    """
     rows = []
     if connected:
+        rows.append([button("🗄 Pick my dump", callback_data="cmd_setdump",
+                             style="success"),
+                     button("🔍 Test Permissions", callback_data="dump:test",
+                             style="primary")])
         rows.append([button("🗑 Disconnect", callback_data="dump:off", style="danger")])
     else:
         rows.append([button("🗄 Connect dump channel", callback_data="cmd_setdump",
-                            style="success")])
+                             style="success")])
     rows.append([home_button()])
     return keyboard(rows)
 
@@ -3643,6 +3674,43 @@ def giveaway_none_text() -> str:
     return ("🎁 **No giveaway is running**\n\n"
             "There is nothing to join right now. Watch this chat — the next "
             "giveaway is announced here.")
+
+
+def giveaway_quick_status_text(gw, count: int) -> str:
+    """One-screen summary for ``/giveawaystatus`` — prize, timer, participants."""
+    from datetime import datetime_utcnow
+    now = datetime_utcnow()
+    ends_at = gw.get("ends_at")
+    ends_in = None
+    if ends_at:
+        try:
+            ends_in = int((ends_at - now).total_seconds())
+        except (TypeError, ValueError):
+            ends_in = None
+    prize = giveaway_prize_label(gw.get("prize_tier"), gw.get("prize_days"))
+    lines = [
+        "🎁 **GIVEAWAY STATUS**",
+        "",
+        f"🎯 **Prize:** {prize}",
+        f"👥 **Participants:** {int(count)}",
+        f"🔗 **Token:** `{gw.get('token') or '—'}`",
+        "",
+    ]
+    if ends_in is not None and ends_in > 0:
+        lines.append(f"⏱ **Ends in:** {giveaway_when(ends_at)}")
+    else:
+        lines.append("✅ **Ends:** — (no deadline set)")
+    if gw.get("channel_id"):
+        lines.append(f"📡 **Channel:** `{gw.get('channel_id')}`")
+    lines += [
+        "",
+        f"📅 **Started:** {giveaway_when(gw.get('created_at'))}",
+        f"👑 **Created by:** `{gw.get('created_by') or '—'}`",
+        "",
+        "Use ``/giveaway`` for the full panel, ``/participants`` to browse "
+        "the list, or ``/endgiveaway`` to draw the winner now.",
+    ]
+    return "\n".join(lines)
 
 
 def giveaway_closed_text() -> str:

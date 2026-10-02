@@ -2332,9 +2332,9 @@ async def handle_fsub_callback(client, query, data: str):
 NEW_COMMAND_NAMES = [
     "pin", "pinned", "unpin", "menu", "cmsg", "botcast",
     "setdump", "deldump", "dump", "post", "native",
-    "giveaway", "participants", "endgiveaway",
+    "giveaway", "participants", "endgiveaway", "giveawaystatus",
 ]
-COMMAND_NAMES = NEW_COMMAND_NAMES + ["start", "help", "login", "logout", "status", "cancel", "setcaption", "delcaption", "setthumb", "delthumb", "setprefix", "setsuffix", "mystats", "myinfo", "history", "settings", "language", "refer", "bookmark", "bookmarks", "favorite", "favorites", "share", "feedback", "premium", "stats", "users", "loggedusers", "activeusers", "newusers", "topusers", "broadcast", "botcast", "menu", "cmsg", "unpin", "ban", "unban", "banlist", "finduser", "userinfo", "addpremium", "removepremium", "premiumlist", "addadmin", "removeadmin", "adminlist", "setfsub", "fsublist", "delfsub", "fsublabel", "fsubcheck", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export", "adminhelp", "admin", "admins", "addqr", "delqr", "removeqr", "payments", "redeem", "setchat", "delchat", "models", "engine", "mychannels", "setengine"]
+COMMAND_NAMES = NEW_COMMAND_NAMES + ["start", "help", "login", "logout", "status", "cancel", "setcaption", "delcaption", "setthumb", "delthumb", "setprefix", "setsuffix", "mystats", "myinfo", "history", "settings", "language", "refer", "bookmark", "bookmarks", "favorite", "favorites", "share", "feedback", "invite", "premium", "stats", "users", "loggedusers", "activeusers", "newusers", "topusers", "broadcast", "botcast", "menu", "cmsg", "unpin", "ban", "unban", "banlist", "finduser", "userinfo", "addpremium", "removepremium", "premiumlist", "addadmin", "removeadmin", "adminlist", "setfsub", "fsublist", "delfsub", "fsublabel", "fsubcheck", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export", "adminhelp", "admin", "admins", "addqr", "delqr", "removeqr", "payments", "redeem", "setchat", "delchat", "models", "engine", "mychannels", "setengine"]
 ABORT_GROUP = -1
 
 
@@ -2627,6 +2627,17 @@ async def feedback_handler(client, message):
         await say(message, ui.feedback_link_warning(), reply_markup=ui.feedback_keyboard())
         return
     await say(message, ui.feedback_saved_text(), reply_markup=ui.back_keyboard())
+
+@bot.on_message(filters.command("invite") & filters.private)
+async def invite_handler(client, message):
+    """Shareable bot invite link for spreading the word."""
+    from config import BOT_USERNAME
+    link = f"https://t.me/{BOT_USERNAME}"
+    await say(message,
+        "📤 **Invite this bot to your friends!**\\n\\n"
+        f"[Click here to invite]({link})\\n\\n"
+        "Or copy the link: `t.me/" + (BOT_USERNAME or "bot") + "`",
+        reply_markup=ui.invite_keyboard(link) if hasattr(ui, "invite_keyboard") else ui.back_keyboard())
 
 
 @bot.on_message(filters.command("premium") & filters.private)
@@ -7169,6 +7180,17 @@ async def giveaway_handler(client, message):
         return
     await giveaway_panel(message)
 
+@bot.on_message(filters.command("giveawaystatus") & filters.private)
+@owner_only
+async def giveaway_status_handler(client, message):
+    """Quick one-screen giveaway status — prize, ends-at, participant count."""
+    gw = await get_active_giveaway()
+    if not gw:
+        await say(message, ui.giveaway_none_text(), reply_markup=ui.back_keyboard())
+        return
+    count = await count_giveaway_participants(gw.get("_id") or "active")
+    await say(message, ui.giveaway_quick_status_text(gw, count),
+              reply_markup=ui.giveaway_panel_keyboard(gw))
 
 async def show_giveaway_participants(source, page=0):
     gw = await get_active_giveaway() or await get_last_giveaway()
@@ -7513,7 +7535,9 @@ async def giveaway_join(message, token) -> bool:
     await update_giveaway({"participant_count": int(count)})
     if not joined:
         await say(message, ui.giveaway_already_joined_text(count), reply_markup=ui.back_keyboard())
-        return False
+        #: Already joined — still return True so /start does not render the main
+        #: menu again.  The "already joined" notice is enough feedback on its own.
+        return True
     await say(message, ui.giveaway_joined_text(get_user_display_name(user), gw, count),
               reply_markup=ui.back_keyboard())
     #: The pinned message is refreshed right away so the count really is live.
@@ -7709,6 +7733,12 @@ async def handle_giveaway_callback(client, query, data: str):
 async def create_giveaway_from_wizard(uid, wizard, channel_id, channel_title):
     """Persist the giveaway, publish it and pin it."""
     token = secrets.token_hex(5)
+    #: Clear any stale participants from a previous giveaway so the new one
+    #: starts with a clean slate — every participant must opt in fresh.
+    old = await get_active_giveaway() or await get_last_giveaway()
+    if old:
+        await clear_giveaway_participants(old.get("_id") or "active")
+
     doc = {
         "token": token,
         "status": "running",
@@ -7915,7 +7945,7 @@ ADMIN_PAGES = [
       "clearlogs", "adminhelp"]),
     ("🎁 Owner Tools",
      ["pin", "pinned", "setdump", "deldump", "dump", "post", "native",
-      "giveaway", "participants", "endgiveaway"]),
+      "giveaway", "participants", "endgiveaway", "giveawaystatus"]),
 ]
 
 #: Every command that appears somewhere in the admin panel.
@@ -7979,6 +8009,7 @@ COMMAND_HANDLERS = {
     "giveaway": giveaway_handler,
     "participants": giveaway_handler,
     "endgiveaway": giveaway_handler,
+    "giveawaystatus": giveaway_status_handler,
     "start": start_handler,
     "help": help_handler,
     "login": login_handler,
@@ -8003,6 +8034,7 @@ COMMAND_HANDLERS = {
     "favorites": favorites_handler,
     "share": share_handler,
     "feedback": feedback_handler,
+    "invite": invite_handler,
     "premium": premium_handler,
     "models": models_handler,
     "engine": models_handler,
@@ -8327,6 +8359,20 @@ async def callback_handler(client, query):
         return
     if data.startswith(("mych_test:", "mych_verify:", "mych_del:")):
         await handle_mychannels_callback(client, query, data)
+        return
+    if data.startswith("dump:test"):
+        if uid != OWNER_ID:
+            await query.answer(ui_text("👑 Owner only."), show_alert=True)
+            return
+        await query.answer(ui_text("🔍 Checking dump permissions…"))
+        entry = await get_dump_channel()
+        if not entry:
+            await query.answer(ui_text("⚠️ No dump channel connected."), show_alert=True)
+            await render(query, ui.dump_status_text(None), ui.dump_status_keyboard(False))
+            return
+        permissions = await dump_permissions(entry["chat_id"])
+        await render(query, ui.dump_status_text(entry, DUMP_MIRROR.snapshot(), permissions),
+                     ui.dump_status_keyboard(True))
         return
     if data.startswith("admin_page:"):
         if uid != OWNER_ID and not await is_admin(uid):
