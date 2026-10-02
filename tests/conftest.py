@@ -955,7 +955,7 @@ _UNSET = object()
 
 
 def make_member(status=ChatMemberStatus.MEMBER, *, can_post_messages=None,
-                privileges=_UNSET, user=None):
+                can_delete_messages=None, privileges=_UNSET, user=None):
     """A **real** :class:`pyrogram.types.ChatMember`.
 
     ``can_post_messages`` deliberately lives in ``privileges``
@@ -965,8 +965,10 @@ def make_member(status=ChatMemberStatus.MEMBER, *, can_post_messages=None,
     """
     if privileges is _UNSET:
         privileges = ChatAdministratorRights(
-            can_post_messages=bool(can_post_messages), can_manage_chat=True,
-        ) if (can_post_messages is not None or status == ChatMemberStatus.ADMINISTRATOR) else None
+            can_post_messages=bool(can_post_messages),
+            can_delete_messages=bool(can_delete_messages), can_manage_chat=True,
+        ) if (can_post_messages is not None or can_delete_messages is not None
+              or status == ChatMemberStatus.ADMINISTRATOR) else None
     return ChatMember(status=status, user=user, privileges=privileges)
 
 

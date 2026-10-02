@@ -2696,7 +2696,10 @@ ADMIN_COMMAND_LABELS = {
     "addpremium": "Granular VIP Grant",
     "removepremium": "Revoke VIP",
     "stats": "Global & Engine Analytics",
-    "broadcast": "Broadcast Message",
+    "broadcast": "Broadcast to Channels & Users",
+    "botcast": "Broadcast to Bot Users Only",
+    "cmsg": "Customize a Message",
+    "unpin": "Unpin Configured Channels",
     "ban": "User Moderation",
     "unban": "User Moderation",
     "payments": "Verify Payment Proofs",
@@ -2743,7 +2746,8 @@ ADMIN_COMMAND_LABELS = {
 ADMIN_COMMAND_ICONS = {
     "setfsub": "📢", "fsublist": "📋", "delfsub": "🗑️", "setchat": "⚙️",
     "setengine": "🧠", "addpremium": "💎", "removepremium": "❌", "stats": "📊",
-    "broadcast": "📢", "ban": "🚫", "unban": "🚫", "payments": "💳",
+    "broadcast": "📢", "botcast": "🤖", "cmsg": "🎨", "unpin": "📍",
+    "ban": "🚫", "unban": "🚫", "payments": "💳",
     "maintenance": "🛠️", "users": "👥", "loggedusers": "🔐", "newusers": "🆕",
     "activeusers": "📈", "topusers": "🏆", "finduser": "🔎", "userinfo": "ℹ️",
     "export": "📤", "premiumlist": "💎", "addqr": "🖼", "delqr": "🗑️",
@@ -2999,22 +3003,125 @@ def pin_offer_keyboard() -> InlineKeyboardMarkup:
     ])
 
 
+def message_menu_text() -> str:
+    return ("🧰 **MESSAGE ACTIONS**\n\n"
+            "Choose what to do with the message you replied to. Broadcast copies "
+            "go to connected owner channels and bot users; the dump is used as a "
+            "temporary workspace when connected.")
+
+
+def unpin_complete_text(report: dict) -> str:
+    total = int(report.get("channels_total", 0))
+    done = int(report.get("unpinned", 0))
+    failed = int(report.get("failed", 0))
+    if total == 0:
+        return ("📍 **NO CHANNELS CONNECTED**\n\n"
+                "Connect a channel with /setdump or /setchat before using /unpin.")
+    text = f"📍 **UNPIN COMPLETE**\n\nChannels checked: {total}\nPins removed: {done}"
+    if failed:
+        text += f"\n⚠️ Could not unpin: {failed}"
+    return text
+
+
+def message_menu_keyboard() -> InlineKeyboardMarkup:
+    return keyboard([
+        [button("📌 Pin + broadcast", callback_data="msgmenu:pin", style="success"),
+         button("📢 Broadcast all", callback_data="msgmenu:broadcast", style="primary")],
+        [button("🤖 Bot users only", callback_data="msgmenu:botcast", style="primary"),
+         button("🎨 Customize (cMSG)", callback_data="msgmenu:cmsg", style="success")],
+        [button("📍 Unpin", callback_data="msgmenu:unpin", style="danger"),
+         button("❌ Close", callback_data="msgmenu:close", style="danger")],
+    ])
+
+
+def custom_message_prompt_text() -> str:
+    return ("🎨 **CUSTOM MESSAGE**\n\n"
+            "Reply to any message with /cMSG, or send /cMSG and then send the "
+            "message you want to customize. Add up to three blue, green or red "
+            "inline buttons; I stage it in your dump and copy it to connected "
+            "channels and bot users without an Edited label. Use /cancel to stop.")
+
+
+def custom_message_offer_text(preview: str) -> str:
+    return ("🎨 **CUSTOM MESSAGE READY**\n\n"
+            f"┌ {preview}\n\n"
+            "Add up to three coloured inline buttons, then send the finished "
+            "copy to connected channels and bot users — or send it plain.")
+
+
+def broadcast_complete_text(report: dict, *, users_only: bool = False,
+                            pin: bool = False) -> str:
+    channels_total = int(report.get("channels_total", 0))
+    channels_sent = int(report.get("channels_sent", 0))
+    users_total = int(report.get("users_total", 0))
+    users_sent = int(report.get("users_sent", 0))
+    lines = ["✅ **BROADCAST COMPLETE**", ""]
+    if not users_only:
+        lines.append(f"📣 Channels: {channels_sent}/{channels_total}")
+    lines.append(f"🤖 Bot users: {users_sent}/{users_total}")
+    if pin:
+        lines.append(f"📌 Channel copies pinned: {int(report.get('pinned_channels', 0))}")
+        pin_failures = int(report.get("pin_failed_channels", 0))
+        if pin_failures:
+            lines.append(f"⚠️ Could not pin {pin_failures} channel copy/copies. "
+                         "The bot needs **Pin Messages** rights in each channel.")
+        user_attempts = int(report.get("users_sent", 0))
+        lines.append("ℹ️ Private-chat pins are best-effort: "
+                     f"{int(report.get('pinned_users', 0))} accepted from "
+                     f"{user_attempts} attempts.")
+        if int(report.get("pin_failed_users", 0)):
+            lines.append("Telegram or the chat's pin settings refused some private pins; "
+                         "they are not guaranteed.")
+    failures = int(report.get("failed", 0))
+    blocked = int(report.get("blocked", 0))
+    if failures:
+        lines.append(f"⚠️ Could not deliver: {failures}")
+    if blocked:
+        lines.append(f"🚫 Blocked / unavailable bot users: {blocked}")
+    if not users_only and channels_total == 0:
+        lines.append("No channel is connected. Run /setchat, or /setdump to use the dump as the channel target.")
+    return "\n".join(lines)
+
+
 # --------------------------------------------------------------------------- #
 #  Owner dump channel — /setdump
 # --------------------------------------------------------------------------- #
 
-def setdump_share_button(share_url: str | None):
-    if not share_url:
-        return None
-    return share_url_button("📤 Send to my dump channel", share_url,
-                            "Bot dump channel", "success")
-
-
 def setdump_prompt_keyboard(share_url: str | None = None) -> InlineKeyboardMarkup:
-    return keyboard([
-        [setdump_share_button(share_url)],
-        [button("❌ Cancel", callback_data="cancel_action", style="danger")],
-    ])
+    """Compatibility keyboard for old deep links: only offers cancellation.
+
+    New setup uses :func:`setdump_picker_keyboard`, because a reply keyboard is
+    required for Telegram's native channel chooser. ``share_url`` is ignored.
+    """
+    return keyboard([[button("❌ Cancel", callback_data="cancel_action", style="danger")]])
+
+
+def setdump_picker_keyboard() -> "ReplyKeyboardMarkup":
+    """Open Telegram's channel chooser for the owner's dump channel."""
+    if KeyboardButton is None or KeyboardButtonRequestChat is None:
+        return None  # pragma: no cover - legacy Pyrogram without request_chat
+    from config import DUMP_PICKER_BUTTON_ID
+    chooser = KeyboardButton(
+        text="🗄 Pick my dump",
+        request_chat=KeyboardButtonRequestChat(
+            button_id=DUMP_PICKER_BUTTON_ID,
+            chat_is_channel=True,
+            chat_has_username=None,
+            bot_is_member=True,
+            request_title=True,
+            request_username=True,
+            request_photo=True,
+            max_quantity=1,
+            user_administrator_rights=ChatAdministratorRights(
+                is_anonymous=False, can_post_messages=True),
+            bot_administrator_rights=ChatAdministratorRights(
+                is_anonymous=False, can_post_messages=True, can_delete_messages=True),
+        ),
+    )
+    return ReplyKeyboardMarkup(
+        [[chooser]], resize_keyboard=True, one_time_keyboard=True,
+        placeholder="Tap to choose your dump channel",
+    )
 
 
 def setdump_prompt_text() -> str:
@@ -3022,16 +3129,14 @@ def setdump_prompt_text() -> str:
     minutes = max(1, int(DUMP_TTL_SECONDS) // 60)
     return (
         "🗄 **DUMP CHANNEL SETUP**\n\n"
-        "The dump channel is your private mirror: every extraction the bot "
-        "delivers is **copied** there too (never forwarded), so you always see "
-        "exactly what went out — with no *Forwarded from* header and no *edited* "
-        f"tag — and the copy deletes itself after **{minutes} minutes**.\n\n"
-        "Two ways to connect it:\n"
-        "1️⃣ Tap **📤 Send to my dump channel**: Telegram's share sheet opens, you "
-        "pick the channel and send. I add the channel it landed in.\n"
-        "2️⃣ Send me its link, `@username` or numeric id here.\n\n"
-        "I must already be an admin in it. Use /deldump to disconnect and "
-        "/cancel to stop."
+        "The dump is a temporary workspace: downloads and custom messages are "
+        "copied here first, then copied to their destination without a "
+        "*Forwarded from* or *Edited* label. Temporary copies are removed after "
+        f"delivery (the mirror TTL is {minutes} minutes as a safety net).\n\n"
+        "Tap **🗄 Pick my dump** below to choose the channel with Telegram's own "
+        "channel picker, or send its link, `@username` or numeric id here.\n\n"
+        "I must already be an administrator with posting and delete rights. "
+        "Use /deldump to disconnect and /cancel to stop."
     )
 
 
@@ -3040,9 +3145,10 @@ def setdump_done_text(title: str, chat_id) -> str:
     minutes = max(1, int(DUMP_TTL_SECONDS) // 60)
     return (
         f"✅ **Dump channel connected: {title}**\n\n"
-        "Every extraction the bot delivers is now copied here, and each copy "
-        f"deletes itself after {minutes} minutes. FloodWait pauses are handled "
-        "automatically, so a busy hour can never get the bot restricted.\n\n"
+        "Downloads and custom messages can now use this as a temporary "
+        "workspace. Staging copies are removed after delivery; ordinary mirror "
+        f"copies expire after {minutes} minutes. FloodWait pauses are handled "
+        "automatically.\n\n"
         "Send /dump for the live status or /deldump to disconnect."
     )
 
@@ -3060,9 +3166,9 @@ def dump_status_text(entry, stats: dict | None = None) -> str:
     if not entry:
         return ("🗄 **DUMP CHANNEL**\n\n"
                 "No dump channel is connected.\n\n"
-                "👉 Send /setdump to connect the channel where I should mirror "
-                "every delivery. This is the channel that keeps *Forwarded* and "
-                "*edited* tags out of the content you distribute.")
+                "👉 Send /setdump to connect a temporary workspace. The bot stages "
+                "content there, then copies it to the final destination so "
+                "recipients do not see a *Forwarded* or *Edited* label.")
     title = entry.get("title") or f"chat {entry.get('chat_id')}"
     username = entry.get("username")
     lines = [
@@ -3291,14 +3397,14 @@ def giveaway_panel_keyboard(active) -> InlineKeyboardMarkup:
 
 
 def giveaway_step_tier_text() -> str:
-    return ("🎁 **NEW GIVEAWAY • STEP 1/5**\n\n"
+    return ("🎁 **NEW GIVEAWAY • STEP 1/6**\n\n"
             "What is the prize? Pick the premium tier the winner receives.\n\n"
             "The tier decides exactly which features are unlocked and is granted "
             "with the full duration you choose in the next step.")
 
 
 def giveaway_step_duration_text(tier_label: str) -> str:
-    return (f"🎁 **NEW GIVEAWAY • STEP 2/5**\n\n"
+    return (f"🎁 **NEW GIVEAWAY • STEP 2/6**\n\n"
             f"Prize tier: **{tier_label}**\n\n"
             "How long should the winner's premium last?")
 
@@ -3306,7 +3412,7 @@ def giveaway_step_duration_text(tier_label: str) -> str:
 def giveaway_step_benefit_text() -> str:
     from config import GIVEAWAY_BENEFIT_SUGGESTIONS, GIVEAWAY_MAX_BENEFIT_CHARS
     suggestions = "\n".join(f"• {line}" for line in GIVEAWAY_BENEFIT_SUGGESTIONS)
-    return ("🎁 **NEW GIVEAWAY • STEP 3/5**\n\n"
+    return ("🎁 **NEW GIVEAWAY • STEP 3/6**\n\n"
             "Type the **benefit line** that is shown in the public giveaway "
             "message — the clear reason to join.\n\n"
             f"Max {int(GIVEAWAY_MAX_BENEFIT_CHARS)} characters. Suggestions:\n"
@@ -3320,14 +3426,29 @@ def giveaway_step_benefit_keyboard() -> InlineKeyboardMarkup:
     for index, _ in enumerate(GIVEAWAY_BENEFIT_SUGGESTIONS):
         rows.append([button(f"💡 Suggestion {index + 1}",
                             callback_data=f"gw:benefit:{index}", style="primary")])
-    rows.append([button("❌ Cancel everything", callback_data="btnwiz:cancel",
+    rows.append([button("❌ Cancel everything", callback_data="gw:cancel",
                         style="danger")])
     return keyboard(rows)
 
 
+def giveaway_step_custom_text() -> str:
+    return ("🎁 **NEW GIVEAWAY • STEP 4/6**\n\n"
+            "Send the announcement text you want everyone to see. Put `[]` "
+            "where the current participant count should appear; the brackets "
+            "will be replaced by the number. Leave it blank with **Skip custom "
+            "message** to use the standard announcement.")
+
+
+def giveaway_step_custom_keyboard() -> InlineKeyboardMarkup:
+    return keyboard([
+        [button("⏭ Skip custom message", callback_data="gw:custom:skip", style="primary")],
+        [button("❌ Cancel everything", callback_data="gw:cancel", style="danger")],
+    ])
+
+
 def giveaway_step_end_text() -> str:
     from config import GIVEAWAY_MAX_DAYS
-    return ("🎁 **NEW GIVEAWAY • STEP 4/5**\n\n"
+    return ("🎁 **NEW GIVEAWAY • STEP 5/6**\n\n"
             "When does it end? That is also the moment the random winner is "
             "announced.\n\n"
             "Type a duration (`6h`, `3d`, `2w`) or an exact UTC date and time "
@@ -3341,7 +3462,7 @@ def giveaway_step_end_keyboard() -> InlineKeyboardMarkup:
          button("📅 3 days", callback_data="gw:end:3d", style="primary")],
         [button("🗓 1 week", callback_data="gw:end:7d", style="primary"),
          button("📆 2 weeks", callback_data="gw:end:14d", style="primary")],
-        [button("❌ Cancel everything", callback_data="btnwiz:cancel", style="danger")],
+        [button("❌ Cancel everything", callback_data="gw:cancel", style="danger")],
     ])
 
 
@@ -3350,7 +3471,7 @@ def giveaway_step_channel_text(entries) -> str:
         f"{index}️⃣ {entry.get('title') or entry.get('chat_id')}"
         for index, entry in enumerate(entries or [], start=1))
     body = listed or "• no channel connected yet"
-    return ("🎁 **NEW GIVEAWAY • STEP 5/5**\n\n"
+    return ("🎁 **NEW GIVEAWAY • STEP 6/6**\n\n"
             "Where should I publish it? Pick a connected channel — I post the "
             "message there, pin it and keep the participant count updated on "
             "that pinned copy.\n\n"
@@ -3366,7 +3487,7 @@ def giveaway_step_channel_keyboard(entries) -> InlineKeyboardMarkup:
                             callback_data=f"gw:channel:{index}", style="primary")])
     rows.append([button("💬 Post in the bot only", callback_data="gw:channel:none",
                         style="success")])
-    rows.append([button("❌ Cancel everything", callback_data="btnwiz:cancel",
+    rows.append([button("❌ Cancel everything", callback_data="gw:cancel",
                         style="danger")])
     return keyboard(rows)
 
@@ -3400,6 +3521,9 @@ def giveaway_created_keyboard(link: str | None) -> InlineKeyboardMarkup:
 
 
 def giveaway_public_text(gw, participants: int, *, ends_label: str | None = None) -> str:
+    template = gw.get("custom_message")
+    if template:
+        return re.sub(r"\[\s*\]", str(int(participants)), str(template))
     prize = giveaway_prize_label(gw.get("prize_tier"), gw.get("prize_days"))
     lines = [
         "🎁 **GIVEAWAY**",
@@ -3453,8 +3577,9 @@ def giveaway_broadcast_keyboard(link: str | None) -> InlineKeyboardMarkup:
 def giveaway_broadcast_started_text(total: int) -> str:
     return (
         "📣 **Announcing the giveaway**\n\n"
-        f"The message is pinned and I am now delivering it to **{int(total)}** "
-        "users in their private chats. This runs in the background — I will "
+        "The message is pinned in the channel and I am now delivering it to "
+        f"**{int(total)}** users in their private chats. I will also try to pin "
+        "each DM where Telegram allows it. This runs in the background — I will "
         "send you a delivery report as soon as the last one is done.\n\n"
         "Telegram rate limits are respected, so a large list takes a while."
     )
@@ -3481,6 +3606,9 @@ def giveaway_broadcast_report_text(report: dict) -> str:
         lines.append(f"⏱ Time spent waiting on Telegram: **{wait:.0f}s**")
     lines.append("")
     lines.append("The giveaway message itself stays pinned in the channel.")
+    lines.append(f"📌 Private-chat pin attempts: {int(report.get('pin_attempted', 0))}; "
+                 f"Telegram accepted {int(report.get('pin_succeeded', 0))}.")
+    lines.append("Telegram may not allow bots to pin messages in private chats.")
     return "\n".join(lines)
 
 
@@ -3663,10 +3791,9 @@ def setchat_deep_link_private_text() -> str:
 
 def setdump_deep_link_private_text() -> str:
     return (
-        "🗄 **SHARE THE DUMP CHANNEL — ONE TAP**\n\n"
-        "Tap **📤 Send to my dump channel**, pick the channel in Telegram's "
-        "share sheet and send. I add the channel the message landed in.\n\n"
-        "You can also send its link, `@username` or numeric id right here. "
+        "🗄 **PICK THE DUMP CHANNEL**\n\n"
+        "Tap **🗄 Pick my dump** below to select it with Telegram's channel "
+        "picker, or send its link, `@username` or numeric id.\n\n"
         "Use /cancel to stop."
     )
 
@@ -3685,6 +3812,11 @@ def setdump_join_request_text() -> str:
 
 
 def dump_admin_failed_text(reason: str = "not_admin") -> str:
+    if reason == "requester_not_admin":
+        return ("⚠️ **The selected channel is not yours to connect**\n\n"
+                "Your Telegram account is not an administrator there. Ask the "
+                "channel owner to make you an admin, then choose it again. "
+                "Nothing has been connected.")
     base = ("⚠️ **I cannot work with that channel yet**\n\n"
             "{detail}\n\n"
             "👉 Make me an administrator with **Post Messages** and **Delete "
@@ -3693,6 +3825,9 @@ def dump_admin_failed_text(reason: str = "not_admin") -> str:
     details = {
         "not_admin": "I am not an administrator in that chat.",
         "no_post_rights": "I am an admin there but **Post Messages** is disabled.",
+        "no_delete_rights": "I am an admin there but **Delete Messages** is disabled. "
+                           "The temporary workspace must be cleaned after each delivery.",
+        "requester_not_admin": "Your Telegram account is not an administrator of that channel.",
         "error": "Telegram did not answer the permission check — this is usually "
                  "temporary, try again in a moment.",
     }

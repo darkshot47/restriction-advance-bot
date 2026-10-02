@@ -295,6 +295,8 @@ GIVEAWAY_BROADCAST_FLOOD_RETRIES = int(
 #: chooser.  The choice arrives back in ``message.chat_shared`` and must carry
 #: this exact id, so a stale or forged pick is ignored.
 CHANNEL_PICKER_BUTTON_ID = int(os.environ.get("CHANNEL_PICKER_BUTTON_ID", "7411"))
+#: Distinct chat-chooser button id for the owner-only dump setup.
+DUMP_PICKER_BUTTON_ID = int(os.environ.get("DUMP_PICKER_BUTTON_ID", "7412"))
 #: How long the bot watches for the echo of a native copy it made with the
 #: user's own session.  The copy lands in the bot's chat within milliseconds;
 #: the window only has to be long enough for a slow connection.

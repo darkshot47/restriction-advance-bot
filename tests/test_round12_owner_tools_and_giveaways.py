@@ -90,7 +90,9 @@ def content_message(msg_id, chat_id=SECRET):
 @pytest.fixture
 def bot(fake_bot):
     """The fake bot with the memberships the owner tools need."""
-    fake_bot.members[(CHANNEL, BOT_ID)] = make_member(ADMIN, can_post_messages=True)
+    fake_bot.members[(CHANNEL, BOT_ID)] = make_member(
+        ADMIN, can_post_messages=True, can_delete_messages=True)
+    fake_bot.members[(CHANNEL, OWNER)] = make_member(ADMIN, can_post_messages=True)
     fake_bot.members[(SECRET, BOT_ID)] = make_member(ADMIN, can_post_messages=True)
     fake_bot.members[(SECRET, OWNER)] = make_member(ADMIN, can_post_messages=True)
     fake_bot.chats[CHANNEL] = SimpleNamespace(id=CHANNEL, title="Dump",
@@ -259,12 +261,15 @@ async def test_setdump_is_owner_only(db, bot):
     assert await db.get_dump_channel() is None
 
 
-async def test_the_dump_prompt_offers_a_share_sheet_button(db, bot):
+async def test_the_dump_prompt_offers_telegrams_channel_picker(db, bot):
     message = owner_message("/setdump")
     await main.setdump_handler(None, message)
-    urls = [b.url for row in message.shown_markup.inline_keyboard for b in row if b.url]
-    assert urls and urls[0].startswith("https://t.me/share/url?url=")
-    assert main.pending_action[OWNER] == "setdump"
+    markup = message.shown_markup
+    assert markup.__class__.__name__ == "ReplyKeyboardMarkup"
+    button = markup.keyboard[0][0]
+    assert button.request_chat.button_id == config.DUMP_PICKER_BUTTON_ID
+    assert button.request_chat.bot_administrator_rights.can_delete_messages is True
+    assert main.pending_action[OWNER] == "setdump_share"
 
 
 async def test_a_delivery_is_mirrored_then_deleted_after_the_ttl(db, bot, monkeypatch):
@@ -347,8 +352,10 @@ async def test_pin_a_replied_message_in_the_dump_channel(db, bot):
     message = owner_message("/pin")
     message.reply_to_message = FakeMessage(message_id=77, user=FakeUser(OWNER))
     await main.pin_handler(None, message)
-    assert bot.pinned[-1] == (CHANNEL, 77)
-    assert sc("Pinned in") in texts(message)
+    assert bot.pinned[-1][0] == CHANNEL
+    assert bot.pinned[-1][1] != 77, "the broadcast copy, not the source, is pinned"
+    assert sc("BROADCAST COMPLETE") in texts(message)
+    assert bot.deleted, "temporary dump stage is removed after fan-out"
 
 
 async def test_pin_accepts_a_message_link(db, bot):
@@ -564,17 +571,19 @@ async def test_the_panel_creates_a_giveaway_step_by_step(db, bot, press):
     assert any(data.startswith("grant_tier:") for data in panel.callback_data())
 
     await press(panel, "grant_tier:all")
-    assert sc("STEP 2/5") in texts(panel)
+    assert sc("STEP 2/6") in texts(panel)
 
     await press(panel, "grant_dur:all:month")
-    assert sc("STEP 3/5") in texts(panel)
+    assert sc("STEP 3/6") in texts(panel)
 
     benefit = FakeMessage(text="Full VIP for 30 days", user=FakeUser(OWNER))
     await main.text_handler(None, benefit)
-    assert sc("STEP 4/5") in texts(benefit)
+    assert sc("STEP 4/6") in texts(benefit)
+    await press(benefit, "gw:custom:skip")
+    assert sc("STEP 5/6") in texts(benefit)
 
     await press(benefit, "gw:end:3d")
-    assert sc("STEP 5/5") in texts(benefit)
+    assert sc("STEP 6/6") in texts(benefit)
 
     await press(benefit, "gw:channel:1")
     giveaway = await db.get_active_giveaway()
@@ -603,7 +612,7 @@ async def test_the_duration_step_can_take_a_custom_number_of_days(db, bot, press
 
     days = FakeMessage(text="45", user=FakeUser(OWNER))
     await main.text_handler(None, days)
-    assert sc("STEP 3/5") in texts(days)
+    assert sc("STEP 3/6") in texts(days)
     assert main.GIVEAWAY_WIZARD[OWNER]["days"] == 45
 
 
@@ -736,6 +745,8 @@ GW = {"token": "abc123", "prize_tier": "all", "prize_days": 30, "benefit": "VIP"
 NEW_KEYBOARDS = [
     ("setchat_share", lambda: ui.setchat_share_prompt_keyboard(LINK)),
     ("setdump_prompt", lambda: ui.setdump_prompt_keyboard(LINK)),
+    ("message_menu", ui.message_menu_keyboard),
+    ("giveaway_custom", ui.giveaway_step_custom_keyboard),
     ("dump_on", lambda: ui.dump_status_keyboard(True)),
     ("dump_off", lambda: ui.dump_status_keyboard(False)),
     ("pin_offer", ui.pin_offer_keyboard),
@@ -760,7 +771,14 @@ NEW_SCREENS = [
     ("setchat_share", ui.setchat_share_prompt_text),
     ("setchat_admin_ok_private", lambda: ui.setchat_admin_ok_text("Chan", private=True)),
     ("setdump_prompt", ui.setdump_prompt_text),
+    ("dump_requester_not_admin", lambda: ui.dump_admin_failed_text("requester_not_admin")),
     ("setdump_done", lambda: ui.setdump_done_text("Dump", CHANNEL)),
+    ("message_menu", ui.message_menu_text),
+    ("custom_message_prompt", ui.custom_message_prompt_text),
+    ("giveaway_custom", ui.giveaway_step_custom_text),
+    ("broadcast_complete", lambda: ui.broadcast_complete_text(
+        {"channels_total": 1, "channels_sent": 1, "users_total": 2,
+         "users_sent": 1, "blocked": 1}, pin=True)),
     ("setdump_removed", lambda: ui.setdump_removed_text("Dump")),
     ("dump_off", lambda: ui.dump_status_text(None)),
     ("dump_on", lambda: ui.dump_status_text(
@@ -853,7 +871,8 @@ async def test_new_commands_answer_a_stranger_with_a_refusal(db, bot, command):
     assert sc("only") in body
 
 
-@pytest.mark.parametrize("command", ["pin", "pinned", "dump", "native", "giveaway",
+@pytest.mark.parametrize("command", ["pin", "pinned", "unpin", "menu", "cmsg",
+                                     "botcast", "dump", "native", "giveaway",
                                      "participants", "endgiveaway", "setdump",
                                      "deldump", "post"])
 def test_the_new_commands_are_excluded_from_the_text_handler(command):
