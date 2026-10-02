@@ -39,7 +39,7 @@ import config
 import main
 import ui
 from conftest import (DEFAULT_USER_ID, FAKE_BOT_ID, FakeChat, FakeMessage,
-                      FakeUser, make_member, make_query, sc)
+                      FakeUser, make_member, make_query, sc, drain_background)
 from pyrogram.enums import ChatMemberStatus
 from pyrogram.errors import ChatAdminRequired, FloodWait
 
@@ -338,6 +338,7 @@ async def test_deldump_disconnects_and_cleans_pending_copies(db, bot):
     await main.DUMP_MIRROR.mirror(SECRET, 15)
     message = owner_message("/deldump")
     await main.deldump_handler(None, message)
+    await drain_background()
     assert await db.get_dump_channel() is None
     assert sc("Dump channel disconnected") in texts(message)
     assert bot.deleted, "the pending copy was deleted with the channel"
@@ -348,28 +349,34 @@ async def test_deldump_disconnects_and_cleans_pending_copies(db, bot):
 # --------------------------------------------------------------------------- #
 
 async def test_pin_a_replied_message_in_the_dump_channel(db, bot):
+    await db.add_user(USER, "Reader")
     await db.set_dump_channel(CHANNEL, "Dump", "dump", "channel")
     message = owner_message("/pin")
     message.reply_to_message = FakeMessage(message_id=77, user=FakeUser(OWNER))
     await main.pin_handler(None, message)
-    assert bot.pinned[-1][0] == CHANNEL
+    await drain_background()
+    assert bot.pinned[-1][0] == USER
     assert bot.pinned[-1][1] != 77, "the broadcast copy, not the source, is pinned"
     assert sc("BROADCAST COMPLETE") in texts(message)
     assert bot.deleted, "temporary dump stage is removed after fan-out"
 
 
 async def test_pin_accepts_a_message_link(db, bot):
+    await db.add_user(USER, "Reader")
     await db.set_dump_channel(CHANNEL, "Dump", "dump", "channel")
     message = owner_message("/pin https://t.me/dump/88")
     await main.pin_handler(None, message)
-    assert bot.pinned[-1] == (CHANNEL, 88)
+    await drain_background()
+    assert bot.pinned[-1][0] == USER
+    assert (CHANNEL, CHANNEL, 88) in bot.copies
 
 
 async def test_pin_without_a_target_explains_itself(db, bot):
     await db.set_dump_channel(CHANNEL, "Dump", "dump", "channel")
     message = owner_message("/pin")
     await main.pin_handler(None, message)
-    assert sc("Nothing to pin") in texts(message)
+    await drain_background()
+    assert sc("PIN FOR BOT USERS") in texts(message)
     assert bot.pinned == []
 
 
@@ -395,12 +402,14 @@ async def test_pinned_without_a_pin_says_so(db, bot):
 
 
 async def test_pin_reports_missing_rights_in_plain_english(db, bot):
+    await db.add_user(USER, "Reader")
     await db.set_dump_channel(CHANNEL, "Dump", "dump", "channel")
     bot.pin_chat_message = AsyncMock(side_effect=ChatAdminRequired())
     message = owner_message("/pin")
     message.reply_to_message = FakeMessage(message_id=5, user=FakeUser(OWNER))
     await main.pin_handler(None, message)
-    assert sc("Pin Messages") in texts(message)
+    await drain_background()
+    assert sc("refused") in texts(message)
 
 
 # --------------------------------------------------------------------------- #
@@ -498,6 +507,7 @@ async def test_a_broadcast_formats_every_copy_on_the_native_pool(db, bot, press)
     await db.add_user(2003, "Carol")
     message = owner_message("/broadcast Hello {name}!")
     await main.broadcast_handler(None, message)
+    await drain_background()
 
     #: Round 13 item 9 — a broadcast is not a direct user send, so the builder
     #: is never offered: no ADD INLINE BUTTONS screen, nothing to skip.
@@ -878,5 +888,5 @@ async def test_new_commands_answer_a_stranger_with_a_refusal(db, bot, command):
 def test_the_new_commands_are_excluded_from_the_text_handler(command):
     source = open("main.py", encoding="utf-8").read()
     block = source.split("async def text_handler")[0]
-    block = block.split("filters.command([")[-1].split("])")[0]
-    assert f'"{command}"' in block, command
+    assert "~filters.command(COMMAND_NAMES)" in block
+    assert command in main.COMMAND_NAMES, command

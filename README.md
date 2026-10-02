@@ -243,7 +243,7 @@ Each channel handler is registered with `filters.private`, and `channel_dump_han
 ## Owner dump channel (`/setdump`, `/deldump`, `/dump`)
 
 The dump channel is a temporary workspace for downloads and customized outbound
-messages. When Telegram permissions allow it, the bot copies content into the
+messages. Whenever `/setdump` is configured, the bot copies content into the
 dump first, applies caption/customization changes there, then copies the finished
 message to its destination. Recipients do not see a *Forwarded from* or *Edited*
 label. Staging copies are deleted after delivery; the mirror TTL is a safety net
@@ -254,18 +254,24 @@ for ordinary queued mirrors or a failed cleanup.
   requester must be a channel administrator, and the bot must be an administrator
   with **Post Messages** and **Delete Messages** rights. Only channels are
   supported.
-* `/dump` — live status: the channel, mirror TTL, FloodWait cooldown, queued
-  deletions and counters (mirrored, deleted, pauses and total wait).
-* `/deldump` — disconnect and delete every copy still queued.
+* `/dump` — live status: connection state, current **Post Messages** and **Delete
+  Messages** rights, staging readiness, TTL cleanup queue and FloodWait counters.
+  Missing or unverified rights are explicitly **not ready**.
+* `/deldump` — owner-only disconnect; acknowledges immediately and cleans queued
+  staging copies in the background. Failed immediate deletes retain a TTL retry.
 
 Ordinary mirrors expire after **`DUMP_TTL_SECONDS` (default 600 s = 10 minutes)**.
-Mirror and delete calls use the FloodWait governor, and the queue is capped at
-`DUMP_QUEUE_LIMIT`. The dump is never mirrored into itself. If Telegram refuses
-a staging operation, delivery falls back to the direct path when possible.
+Staging is paced and Telegram FloodWaits are respected; the queue is capped at
+`DUMP_QUEUE_LIMIT`. Deletion after delivery does not wait an extra staging
+cooldown. If Telegram refuses the workspace or its finished copy, delivery
+fails clearly: it never silently edits or uploads directly to the recipient.
+A source that cannot be copied may still use download/upload, but that upload
+also goes to the workspace first, including text/media overflow messages.
 
 ## Broadcast and message tools
 
-* `/broadcast <text>` sends to connected owner channels (including the dump)
+* `/broadcast <text>` sends to connected owner `/setchat` channels (**excluding
+  the dump**, even when the same channel is also registered with `/setchat`)
   and bot users. Reply to a message with `/broadcast` to copy that message to the
   same audiences. Typed broadcasts support `{name}` for per-user greetings.
 * `/botcast <text>` (or reply to a message) sends to bot users only.
@@ -278,21 +284,31 @@ a staging operation, delivery falls back to the direct path when possible.
   `/sendmsg <user_id> <text>` uses the dump-first direct-DM path when a dump is
   configured.
 
-These campaign deliveries stage through the dump, copy the finished content
+Replied-to/customized campaigns stage through the dump, copy the finished content
 (with its inline keyboard, if any) to the final destinations, and remove the
 staging copy after the fan-out. A failed or blocked private DM is reported
-separately from a successful channel post.
+separately from other failures. Typed `/broadcast` and `/botcast` can send new
+text directly (no recipient-side edits); their audiences follow the same rules.
+Broadcasts acknowledge before fan-out and report completion asynchronously,
+with one active campaign, four delivery workers, paced starts and shared
+FloodWait backoff. The existing owner-exclusion policy is retained.
+
+Commands are registered with Telegram in **private-chat scope only**, with all
+existing command names/aliases retained; `/admin` is paginated rather than
+truncated. `/login` and phone/OTP/2FA continuations are accepted only in the
+requester's own private chat, including callbacks. Credentials never enter
+the dump or owner login notifications.
 
 ## Pin controls (`/pin`, `/pinned`, `/unpin`)
 
-* `/pin` with a reply broadcasts copies to configured channels and bot users,
-  then pins the delivered copies. Without a reply, a channel link or message id
-  can still target one specific chat. A channel pin requires **Pin Messages**
-  rights; delivery is reported separately from pin failures.
+* `/pin` with a reply broadcasts to registered **bot users only**, then attempts
+  to pin each delivered DM. It never posts or pins in delivery channels or
+  treats the dump as an audience. Link/id syntax remains available as a source
+  selector for the same DM-only operation, not as a channel-pin destination.
 * `/pinned` removes the live pin from the resolved chat (the message stays).
 * `/unpin` removes the current pins from configured owner channels.
 * Private-chat pins are best-effort. Telegram or an individual chat's settings
-  may prevent a bot from pinning a DM; the bot reports attempts and accepted
+  may prevent a bot from pinning a DM; the bot reports attempts, accepted and refused
   pins rather than promising that every private copy can be pinned.
 
 ## Inline-button wizard
@@ -428,3 +444,21 @@ Seven further suites cover rounds 7-12 and the native engine on the same in-memo
 - `tests/test_cpp_engine.py` — **the real C++ engine**: the `.cpp`/`.hpp` sources and build recipe, the loaded library's version/ABI/self-test, the worker pool actually running tasks, and byte-for-byte parity between the native and Python backends for `parse_link`, `scan`, `escape_html`, `escape_batch` and the token bucket, plus the wiring assertions (`main.parse_link`, the command registry and `telemetry.SpeedThrottle`).
 
 The round-six suite (`tests/test_round6_dual_engine.py`, 253 tests) covers the dual-engine overhaul on the same in-memory fakes: the complete `resolve_engine` routing matrix as one parametrised truth table (three controller modes × `models` permission × stored preference × peak), the strict "exceeds the threshold" peak rule, `TrafficMonitor` concurrency accounting including slot restoration when an extraction raises, controller-mode persistence with a fall-back when the store is unreachable, autoscaler escalation and reversion through the real `fetch_and_send` path, and the C++ Turbo worker pool **measured** rather than assumed — a Turbo batch must reach `ENGINE_TURBO_WORKERS` overlapping links while a Python batch must never exceed one. The telemetry HUD is asserted against the specification's exact strings (`📥 Downloading: 68% [████████░░░░]`, `📊 Server Load: CPU 19.2% | RAM 41.8% | Ping 11ms`, `🚀 Speed: 44.2 MB/s • ETA: 00:03`) both as pure functions and as rendered inside a real download, with a deterministic host stand-in so no test reads `/proc` or opens a socket; probe failures, an unknown file size and a raising sampler must all degrade to `--` without breaking the transfer. Also covered: the red `ButtonStyle.DANGER` Models Architecture button and its page, the `/start` badge parity, the switcher (including refusal once the permission is revoked, and the two lock modes), `/setengine` in all three modes plus owner-only enforcement and a failed database write, the four-tier granular grant end to end (tier → flags → duration → stored document → user notice, custom days, `grant_back`, stale and forged callbacks), `/removepremium`, the tiered pricing maths straight from `config`, the Contact Owner `url=` button on every pricing surface, the `/mychannels` dashboard with all four posting-rights outcomes and a forged chat id, the engine block of `/stats`, the twelve admin command pairs, and the real `database.py` functions for every new field against a Mongo mock. Every new keyboard is checked against the standing constraints — at most 7 rows and 2 buttons per row, labels within 28 characters, ASCII-only `callback_data`, links only inside `url=` buttons — and every new screen is checked for English-only copy (no Devanagari) with no raw link in the prose.
+
+
+### PR #14 regression verification
+
+`tests/test_regression_dump_workspace.py` exercises dump-first native and
+upload/text fallback delivery to user/channel destinations, user-session
+staging, strict failure behavior, immediate/TTL cleanup, real bot-authored
+owner callbacks, private login boundaries, picker/typed setup permissions,
+live status, audiences, asynchronous acknowledgement and the complete command
+baseline. Older tests that asserted dump/channel pin audiences now assert the
+DM-only policy; low-level pin-error tests remain for explicit `/post` pin tools.
+
+Controlled latency reproduction (fake Telegram, not a live-network benchmark):
+`/deldump` previously had no acknowledgement at 30 ms with 150 ms simulated
+cleanup; it now acknowledges before cleanup. Eight simulated 100 ms sends plus
+the old serial gaps took about 1.20 s; the bounded sender takes about 0.45 s.
+The pre-command decorator was also incorrectly attached to the synchronous
+latency helper; it now decorates the asynchronous command hook.

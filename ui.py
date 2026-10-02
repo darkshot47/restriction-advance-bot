@@ -626,6 +626,10 @@ def help_text() -> str:
         "**🎁 Extra:**\n"
         "/refer /bookmark /bookmarks\n"
         "/favorite /favorites /share /feedback /premium /redeem\n\n"
+        "**🗄 Owner workspace:** /setdump /dump /deldump — temporary staging only.\n"
+        "**📣 Audiences:** /broadcast — bot users + /setchat channels, excluding /setdump.\n"
+        "/botcast — bot users only. /pin — bot users only, with best-effort DM pins.\n"
+        "**🛠 Message tools:** /menu /cmsg /unpin /pinned /post\n\n"
         "👑 Owner & admins: /admin or /admins. Commands and inline buttons both work."
     )
 
@@ -2696,7 +2700,7 @@ ADMIN_COMMAND_LABELS = {
     "addpremium": "Granular VIP Grant",
     "removepremium": "Revoke VIP",
     "stats": "Global & Engine Analytics",
-    "broadcast": "Broadcast to Channels & Users",
+    "broadcast": "Users + /setchat Channels (Not Dump)",
     "botcast": "Broadcast to Bot Users Only",
     "cmsg": "Customize a Message",
     "unpin": "Unpin Configured Channels",
@@ -2730,7 +2734,7 @@ ADMIN_COMMAND_LABELS = {
     "delchat": "Disconnect a Dump Channel",
     "redeem": "Redeem Points",
     # Owner tools (pinning, the dump channel, giveaways, the native engine).
-    "pin": "Pin Any Message",
+    "pin": "Broadcast & Pin Bot User DMs",
     "pinned": "Remove the Live Pin",
     "setdump": "Connect Dump Channel",
     "deldump": "Disconnect Dump Channel",
@@ -2899,15 +2903,14 @@ def payment_proof_saved_text() -> str:
 
 def pin_usage_text() -> str:
     return (
-        "📌 **PIN A MESSAGE**\n\n"
-        "Three ways to tell me what to pin, and where it lands:\n\n"
-        "• **Reply** to any message with /pin — it is pinned **right there**, "
-        "in the chat you are typing in.\n"
-        "• Send `/pin <message link>` — I open the chat the link names and pin "
-        "that exact message in it.\n"
-        "• Send `/pin <message id>` — pinned in the chat you are typing in, or "
-        "in your dump channel when you send it here in private.\n\n"
-        "Use /pinned to remove the live pin again."
+        "📌 **PIN FOR BOT USERS**\n\n"
+        "Reply to a message with /pin to copy it to registered bot users only, "
+        "then attempt to pin each user's DM. Never posts or pins in /setchat "
+        "channels or uses /setdump as a final audience.\n\n"
+        "Private-chat pins are best-effort: Telegram may refuse them. "
+        "The final report lists deliveries, pin attempts, accepted and refused pins.\n\n"
+        "Existing `/pin <message link>` and `/pin <message id>` select the source "
+        "for the same DM-only broadcast. /pinned and /unpin retain their unpin tools."
     )
 
 
@@ -3068,7 +3071,7 @@ def broadcast_complete_text(report: dict, *, users_only: bool = False,
         user_attempts = int(report.get("users_sent", 0))
         lines.append("ℹ️ Private-chat pins are best-effort: "
                      f"{int(report.get('pinned_users', 0))} accepted from "
-                     f"{user_attempts} attempts.")
+                     f"{user_attempts} attempts; {int(report.get('pin_failed_users', 0))} refused.")
         if int(report.get("pin_failed_users", 0)):
             lines.append("Telegram or the chat's pin settings refused some private pins; "
                          "they are not guaranteed.")
@@ -3079,7 +3082,7 @@ def broadcast_complete_text(report: dict, *, users_only: bool = False,
     if blocked:
         lines.append(f"🚫 Blocked / unavailable bot users: {blocked}")
     if not users_only and channels_total == 0:
-        lines.append("No channel is connected. Run /setchat, or /setdump to use the dump as the channel target.")
+        lines.append("No delivery channel is connected. Use /setchat. /setdump is staging only and is excluded from audiences.")
     return "\n".join(lines)
 
 
@@ -3160,7 +3163,7 @@ def setdump_removed_text(title: str | None = None) -> str:
             "Send /setdump to connect one again.")
 
 
-def dump_status_text(entry, stats: dict | None = None) -> str:
+def dump_status_text(entry, stats: dict | None = None, permissions: dict | None = None) -> str:
     from config import DUMP_TTL_SECONDS, DUMP_COOLDOWN_SECONDS
     stats = stats or {}
     if not entry:
@@ -3169,6 +3172,7 @@ def dump_status_text(entry, stats: dict | None = None) -> str:
                 "👉 Send /setdump to connect a temporary workspace. The bot stages "
                 "content there, then copies it to the final destination so "
                 "recipients do not see a *Forwarded* or *Edited* label.")
+    permissions = permissions or {"post": None, "delete": None, "ready": False, "reason": "error"}
     title = entry.get("title") or f"chat {entry.get('chat_id')}"
     username = entry.get("username")
     lines = [
@@ -3181,6 +3185,10 @@ def dump_status_text(entry, stats: dict | None = None) -> str:
         lines.append(f"🔗 @{username}")
     lines += [
         f"🧬 **Type:** {entry.get('kind') or 'channel'}",
+        "✅ Connected / ready for staging" if permissions["ready"] else "⚠️ Configured / NOT ready for staging",
+        "Post Messages: " + {True: "allowed", False: "missing", None: "unknown (check failed)"}[permissions["post"]],
+        "Delete Messages: " + {True: "allowed", False: "missing", None: "unknown (check failed)"}[permissions["delete"]],
+        "" if permissions["ready"] else dump_admin_failed_text(permissions["reason"]),
         "",
         f"⏳ **Mirror TTL:** {int(DUMP_TTL_SECONDS)} s "
         f"({max(1, int(DUMP_TTL_SECONDS) // 60)} min) then the copy deletes itself",
@@ -3821,7 +3829,7 @@ def dump_admin_failed_text(reason: str = "not_admin") -> str:
             "{detail}\n\n"
             "👉 Make me an administrator with **Post Messages** and **Delete "
             "Messages** (the mirror deletes its own copies) and send /setdump "
-            "again. Nothing is connected yet.")
+            "again. Staging is unavailable until these permissions are verified.")
     details = {
         "not_admin": "I am not an administrator in that chat.",
         "no_post_rights": "I am an admin there but **Post Messages** is disabled.",

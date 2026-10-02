@@ -829,9 +829,9 @@ def test_new_commands_are_excluded_from_the_text_handler():
     """A typed /fsublabel must run the command, never be treated as input."""
     source = Path(main.__file__).read_text()
     block = source.split("async def text_handler")[0]
-    block = block.split("filters.command([")[-1].split("])")[0]
+    assert "~filters.command(COMMAND_NAMES)" in block
     for command in ("setfsub", "fsublist", "delfsub", "fsublabel", "fsubcheck"):
-        assert f'"{command}"' in block, command
+        assert command in main.COMMAND_NAMES, command
 
 
 @pytest.mark.asyncio
