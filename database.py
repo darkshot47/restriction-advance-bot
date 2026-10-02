@@ -1252,7 +1252,8 @@ async def delete_dump_channel():
 GIVEAWAY_FIELDS = (
     "token", "status", "prize_tier", "prize_days", "benefit", "ends_at",
     "created_at", "created_by", "channel_id", "message_id", "last_post_at",
-    "winner", "winner_at", "ended_at", "participant_count",
+    "winner", "winner_at", "ended_at", "participant_count", "custom_message",
+    "rendered_count",
 )
 
 

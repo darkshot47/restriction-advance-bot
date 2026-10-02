@@ -96,7 +96,9 @@ def bot(fake_bot):
     """The fake bot with the memberships the picker and the pin need."""
     fake_bot.members[(PICKED, BOT_ID)] = make_member(ADMIN, can_post_messages=True)
     fake_bot.members[(PICKED, USER)] = make_member(ADMIN, can_post_messages=True)
-    fake_bot.members[(CHANNEL, BOT_ID)] = make_member(ADMIN, can_post_messages=True)
+    fake_bot.members[(CHANNEL, BOT_ID)] = make_member(
+        ADMIN, can_post_messages=True, can_delete_messages=True)
+    fake_bot.members[(CHANNEL, OWNER)] = make_member(ADMIN, can_post_messages=True)
     fake_bot.chats[PICKED] = SimpleNamespace(id=PICKED, title="Picked Channel",
                                              username=None, type="channel")
     fake_bot.chats[CHANNEL] = SimpleNamespace(id=CHANNEL, title="Dump",
@@ -139,6 +141,50 @@ def test_the_picker_button_opens_telegrams_own_chooser():
     #: the bot may be promoted to a posting admin.
     assert request.bot_administrator_rights.can_post_messages is True
     assert request.user_administrator_rights.can_post_messages is True
+
+
+def test_the_dump_picker_uses_its_own_channel_chooser_id():
+    markup = ui.setdump_picker_keyboard()
+    assert markup.__class__.__name__ == "ReplyKeyboardMarkup"
+    button = markup.keyboard[0][0]
+    request = button.request_chat
+    assert request.button_id == config.DUMP_PICKER_BUTTON_ID
+    assert request.button_id != config.CHANNEL_PICKER_BUTTON_ID
+    assert request.bot_administrator_rights.can_post_messages is True
+    assert request.bot_administrator_rights.can_delete_messages is True
+    assert request.user_administrator_rights.can_post_messages is True
+
+
+async def test_the_dump_picker_registers_only_after_admin_checks(db, bot):
+    message = FakeMessage(text="", user=FakeUser(OWNER))
+    message.chat_shared = ChatShared(
+        button_id=config.DUMP_PICKER_BUTTON_ID,
+        chat=SimpleNamespace(id=CHANNEL, title="Dump", username="dump", type="channel"),
+    )
+    main.pending_action[OWNER] = "setdump_share"
+
+    await main.chat_shared_handler(None, message)
+
+    entry = await db.get_dump_channel()
+    assert entry and entry["chat_id"] == CHANNEL and entry["username"] == "dump"
+    assert OWNER not in main.pending_action
+    assert sc("Dump channel connected") in texts(message)
+
+
+async def test_the_dump_picker_requires_the_bot_delete_right(db, bot):
+    bot.members[(CHANNEL, BOT_ID)] = make_member(ADMIN, can_post_messages=True,
+                                                  can_delete_messages=False)
+    message = FakeMessage(text="", user=FakeUser(OWNER))
+    message.chat_shared = ChatShared(
+        button_id=config.DUMP_PICKER_BUTTON_ID,
+        chat=SimpleNamespace(id=CHANNEL, title="Dump", username="dump", type="channel"),
+    )
+    main.pending_action[OWNER] = "setdump_share"
+
+    await main.chat_shared_handler(None, message)
+
+    assert await db.get_dump_channel() is None
+    assert sc("Delete Messages") in texts(message)
 
 
 def test_the_picker_button_respects_the_mobile_budget():
@@ -366,7 +412,8 @@ async def test_the_fan_out_delivers_to_every_user_except_the_owner(db, bot):
 
     report = await main.run_giveaway_broadcast(await db.get_active_giveaway())
 
-    assert report["total"] == 4 and report["sent"] == 3
+    assert report["total"] == 3 and report["sent"] == 3
+    assert report["pin_attempted"] == report["pin_succeeded"] == 3
     assert {sent["chat_id"] for sent in bot.sent} == {2001, 2002, 2003}
 
 
@@ -606,7 +653,7 @@ def test_the_echo_window_is_long_enough_for_a_slow_connection():
 #  4. /pin — three targets, and a distinct screen for every refusal
 # --------------------------------------------------------------------------- #
 
-async def test_a_reply_pins_in_the_chat_the_command_was_typed_in(db, bot):
+async def test_a_reply_is_broadcast_and_pinned_in_the_configured_channel(db, bot):
     await db.set_dump_channel(CHANNEL, "Dump", "dump", "channel")
     message = FakeMessage(text="/pin", user=FakeUser(OWNER))
     message.chat = FakeChat(PICKED, "channel", "Picked Channel")
@@ -614,8 +661,9 @@ async def test_a_reply_pins_in_the_chat_the_command_was_typed_in(db, bot):
 
     await main.pin_handler(None, message)
 
-    assert bot.pinned[-1] == (PICKED, 31)
-    assert sc("Pinned in Picked Channel") in texts(message)
+    assert bot.pinned[-1][0] == CHANNEL
+    assert bot.pinned[-1][1] != 31
+    assert sc("BROADCAST COMPLETE") in texts(message)
 
 
 async def test_a_link_pins_in_the_chat_the_link_names(db, bot):

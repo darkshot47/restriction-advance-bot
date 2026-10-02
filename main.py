@@ -45,7 +45,8 @@ from config import (BOT_USERNAME, FREE_DAILY_LIMIT, FREE_PRIVATE_LINKS, WATERMAR
                     GIVEAWAY_MAX_BENEFIT_CHARS, GIVEAWAY_MAX_DAYS,
                     GIVEAWAY_BENEFIT_SUGGESTIONS, CHANNEL_SHARE_TOKEN_TTL,
                     GIVEAWAY_BROADCAST_DELAY, GIVEAWAY_BROADCAST_FLOOD_RETRIES,
-                    CHANNEL_PICKER_BUTTON_ID, ECHO_SWALLOW_WINDOW_SECONDS,
+                    CHANNEL_PICKER_BUTTON_ID, DUMP_PICKER_BUTTON_ID,
+                    ECHO_SWALLOW_WINDOW_SECONDS,
                     ENGINE_MODE_AUTO, ENGINE_MODE_LOCK_CPP, ENGINE_MODE_LOCK_PYTHON,
                     DEFAULT_ENGINE_MODE, GRANT_TIERS, GRANT_TIER_KEYS, GRANT_DURATIONS,
                     GRANT_CUSTOM_DAYS_KEY, GRANT_MAX_DAYS, LEGACY_TIER_ALIASES,
@@ -99,6 +100,8 @@ user_clients = {}
 login_pending = {}
 pending_action = {}
 admin_pending = {}
+#: user_id -> source message descriptor behind the reply-scoped /menu.
+MESSAGE_MENU_PENDING = {}
 active_downloads = {}
 payment_pending = {}
 #: token -> {"future", "owner_id", "question_msg", "token"} for channel custom caption questions.
@@ -506,7 +509,7 @@ def attribution_text():
     return WATERMARK.format(bot_username=BOT_USERNAME)
 
 
-async def apply_copy_caption_and_attribution(message, fetch_client, copied, source, premium, user_id, *, use_custom_caption: bool = True):
+async def apply_copy_caption_and_attribution(message, fetch_client, copied, source, premium, user_id, *, use_custom_caption: bool = True, copied_chat_id=None, overflow_target_chat_id=None):
     """Apply caption and attribution to a copied message.
 
     Free extractions add attribution at the end. Premium and owner extractions
@@ -544,7 +547,8 @@ async def apply_copy_caption_and_attribution(message, fetch_client, copied, sour
                 if client_editor and copied_id is not None:
                     try:
                         await client_editor(
-                            chat_id=message.chat.id,
+                            chat_id=(copied_chat_id if copied_chat_id is not None
+                                     else message.chat.id),
                             message_id=copied_id,
                             caption=final_caption,
                             parse_mode=ParseMode.DISABLED,
@@ -570,14 +574,19 @@ async def apply_copy_caption_and_attribution(message, fetch_client, copied, sour
                         if client_editor and copied_id is not None:
                             try:
                                 await client_editor(
-                                    chat_id=message.chat.id,
+                                    chat_id=(copied_chat_id if copied_chat_id is not None
+                                             else message.chat.id),
                                     message_id=copied_id,
                                     caption=base_caption,
                                     parse_mode=ParseMode.DISABLED,
                                 )
                             except Exception:
                                 pass
-                await message.reply(credit, parse_mode=ParseMode.DISABLED)
+                if overflow_target_chat_id is not None:
+                    await bot.send_message(int(overflow_target_chat_id), credit,
+                                           parse_mode=ParseMode.DISABLED)
+                else:
+                    await message.reply(credit, parse_mode=ParseMode.DISABLED)
         return
 
     source_text = getattr(source, "text", None)
@@ -604,7 +613,8 @@ async def apply_copy_caption_and_attribution(message, fetch_client, copied, sour
                 if client_editor and copied_id is not None:
                     try:
                         await client_editor(
-                            chat_id=message.chat.id,
+                            chat_id=(copied_chat_id if copied_chat_id is not None
+                                     else message.chat.id),
                             message_id=copied_id,
                             text=final_text,
                             parse_mode=ParseMode.DISABLED,
@@ -616,12 +626,20 @@ async def apply_copy_caption_and_attribution(message, fetch_client, copied, sour
                         pass
 
             if not premium:
-                await message.reply(credit, parse_mode=ParseMode.DISABLED)
+                if overflow_target_chat_id is not None:
+                    await bot.send_message(int(overflow_target_chat_id), credit,
+                                           parse_mode=ParseMode.DISABLED)
+                else:
+                    await message.reply(credit, parse_mode=ParseMode.DISABLED)
         return
 
     # Stickers, video notes and non-caption media
     if not premium:
-        await message.reply(credit, parse_mode=ParseMode.DISABLED)
+        if overflow_target_chat_id is not None:
+            await bot.send_message(int(overflow_target_chat_id), credit,
+                                   parse_mode=ParseMode.DISABLED)
+        else:
+            await message.reply(credit, parse_mode=ParseMode.DISABLED)
 
 
 async def add_copy_attribution(message, fetch_client, copied, source):
@@ -830,6 +848,10 @@ def consume_echo_guard(user_id, message=None) -> bool:
     return True
 
 
+DUMP_STAGED_COPY = "dump_staged"
+DUMP_MIRRORED_COPY = "dump_mirrored"
+
+
 async def try_native_copy(message, fetch_client, chat_target, msg_id, *, use_custom_caption: bool = True):
     user_id = message.from_user.id
 
@@ -848,58 +870,110 @@ async def try_native_copy(message, fetch_client, chat_target, msg_id, *, use_cus
 
     try:
         premium = user_id == OWNER_ID or await is_premium(user_id)
-
         msg = await fetch_client.get_messages(chat_target, msg_id)
         if not msg or getattr(msg, "empty", False):
             return False
+        print(f"[COPY MESSAGE] chat={msg.chat.id}, msg_id={msg.id}", flush=True)
+    except FloodWait as error:
+        print(f"[COPY FLOODWAIT] {error}", flush=True)
+        raise FloodWaitPause(floodwait_seconds(error), error)
+    except Exception as error:
+        print(f"[COPY FAILED] {type(error).__name__}: {error}", flush=True)
+        return False
 
-        print(
-            f"[COPY MESSAGE] chat={msg.chat.id}, msg_id={msg.id}",
-            flush=True
-        )
+    dump_entry = await get_dump_channel()
+    dump_chat_id = int(dump_entry["chat_id"]) if dump_entry else None
+    can_stage = dump_chat_id is not None
 
+    #: Stage first when possible. Caption/prefix/suffix/attribution edits happen
+    #: only on the private workspace copy; the recipient receives a fresh copy
+    #: with no Telegram Edited label.
+    if can_stage:
+        stage_client = target.copy_client
+        staged = await DUMP_MIRROR.stage_copy(
+            stage_client, msg.chat.id, msg.id, label="extraction")
+        if staged is None and stage_client is not bot:
+            #: Public posts are often readable by the bot even when the user's
+            #: own session was selected for extraction. Remember who made the
+            #: stage: only that account can edit its temporary copy.
+            stage_client = bot
+            staged = await DUMP_MIRROR.stage_copy(
+                stage_client, msg.chat.id, msg.id, label="extraction")
+        if staged is not None and getattr(staged, "id", None) is not None:
+            try:
+                await apply_copy_caption_and_attribution(
+                    message, stage_client, staged, msg, premium, user_id,
+                    use_custom_caption=use_custom_caption,
+                    copied_chat_id=dump_chat_id,
+                    overflow_target_chat_id=(None if target.reason == "bot_dm_native_copy"
+                                             else target.chat_id),
+                )
+                #: Most deliveries use the bot, which can read the dump and has
+                #: channel posting rights. In the private-link safeguard route,
+                #: the user's session must send into the bot chat so its echo is
+                #: received and swallowed rather than trying to DM the bot as a bot.
+                delivery_client = (target.copy_client
+                                   if target.reason == "bot_dm_native_copy" else bot)
+                delivered_copy = await floodwait_guard(
+                    delivery_client.copy_message,
+                    chat_id=target.chat_id,
+                    from_chat_id=dump_chat_id,
+                    message_id=int(staged.id),
+                )
+            except FloodWait as error:
+                await DUMP_MIRROR.delete_now(dump_chat_id, staged.id)
+                raise FloodWaitPause(floodwait_seconds(error), error)
+            except Exception as error:
+                print(f"[DUMP STAGE DELIVERY FAILED] {type(error).__name__}: {error}",
+                      flush=True)
+                await DUMP_MIRROR.delete_now(dump_chat_id, staged.id)
+            else:
+                await DUMP_MIRROR.delete_now(dump_chat_id, staged.id)
+                if target.reason == "bot_dm_native_copy":
+                    arm_echo_guard(user_id, target.chat_id,
+                                   getattr(delivered_copy, "id", None))
+                print("[COPY SUCCESS] delivered from the temporary dump", flush=True)
+                return DUMP_STAGED_COPY
+
+    #: Safe compatibility fallback: when Telegram won't let the selected
+    #: account write to the dump or copy back from it, keep the existing
+    #: copy-first delivery path rather than forcing a download.
+    try:
         copied = await target.copy_client.copy_message(
             chat_id=target.chat_id,
             from_chat_id=msg.chat.id,
             message_id=msg.id
         )
-
-    except FloodWait as e:
-        # Telegram asked us to slow down: surface a pause instead of a failure.
-        print(f"[COPY FLOODWAIT] {e}", flush=True)
-        raise FloodWaitPause(floodwait_seconds(e), e)
-    except Exception as e:
-        print(
-            f"[COPY FAILED] {type(e).__name__}: {e}",
-            flush=True
-        )
+    except FloodWait as error:
+        print(f"[COPY FLOODWAIT] {error}", flush=True)
+        raise FloodWaitPause(floodwait_seconds(error), error)
+    except Exception as error:
+        print(f"[COPY FAILED] {type(error).__name__}: {error}", flush=True)
         return False
 
-    premium = user_id == OWNER_ID or await is_premium(user_id)
     try:
         await apply_copy_caption_and_attribution(
-            message, fetch_client, copied, msg, premium, user_id,
-            use_custom_caption=use_custom_caption
+            message, target.copy_client, copied, msg, premium, user_id,
+            use_custom_caption=use_custom_caption,
         )
-    except Exception as e:
-        # The copy has already been delivered.  Never download it a second
-        # time just because Telegram rejected an edit attempt.
-        print(
-            f"[COPY CAPTION FAILED] {type(e).__name__}: {e}",
-            flush=True
-        )
+    except Exception as error:
+        print(f"[COPY CAPTION FAILED] {type(error).__name__}: {error}", flush=True)
         if not premium:
             try:
                 await message.reply(attribution_text(), parse_mode=ParseMode.DISABLED)
             except Exception:
                 pass
 
-    #: Round 14 — when the user's own session made the copy straight into the
-    #: bot's chat, the bot receives that copy back as an ordinary message.  Arm
-    #: the guard now so the echo is swallowed once instead of being extracted
-    #: a second time.
     if target.reason == "bot_dm_native_copy":
         arm_echo_guard(user_id, target.chat_id, getattr(copied, "id", None))
+
+    #: Mirror the actual delivered message id (not the source id); a copy of a
+    #: copy carries neither a forwarding header nor an Edited marker.
+    if dump_entry:
+        if getattr(copied, "id", None) is not None and int(target.chat_id) != dump_chat_id:
+            await mirror_delivery(target.chat_id, copied.id, label="copy")
+        print("[COPY SUCCESS] delivered and mirrored to the dump", flush=True)
+        return DUMP_MIRRORED_COPY
 
     print("[COPY SUCCESS]", flush=True)
     return True
@@ -1002,10 +1076,11 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
 
         if copied:
             delivered = True
-            #: Owner mirror: the copy went to the destination, so the dump
-            #: channel gets its own copy (never a forward) with a TTL delete.
-            mirror_target = resolve_delivery_target(message, user_id, fetch_client)
-            await mirror_delivery(mirror_target.chat_id, msg_id, label="copy")
+            #: try_native_copy stages or mirrors itself when a dump is connected.
+            #: Its compatibility ``True`` means there was no dump mirror to do.
+            if copied is True:
+                mirror_target = resolve_delivery_target(message, user_id, fetch_client)
+                await mirror_delivery(mirror_target.chat_id, msg_id, label="copy")
             await status.delete()
             await add_download(user_id, f"msg_{msg_id}", "copied")
             return True
@@ -1026,12 +1101,36 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
                 premium = await is_premium(user_id) or user_id == OWNER_ID
                 credited = msg.text if premium else f"{msg.text}\n{attribution_text()}"
                 last_text_id = None
+                final_chat_id = int(getattr(message.chat, "id", user_id))
+                dump_entry = await get_dump_channel()
+                dump_chat_id = int(dump_entry["chat_id"]) if dump_entry else None
+                use_dump_stage = bool(dump_chat_id and dump_chat_id != final_chat_id)
                 for chunk in ui.split_text(credited, 4096):
-                    sent_chunk = await message.reply(chunk, parse_mode=ParseMode.DISABLED)
+                    if use_dump_stage:
+                        stage_message = await bot.send_message(
+                            dump_chat_id, chunk, parse_mode=ParseMode.DISABLED)
+                        stage_id = getattr(stage_message, "id", None)
+                        if stage_id is not None:
+                            DUMP_MIRROR.schedule_delete(dump_chat_id, stage_id)
+                            try:
+                                sent_chunk = await floodwait_guard(
+                                    bot.copy_message, chat_id=final_chat_id,
+                                    from_chat_id=dump_chat_id, message_id=int(stage_id))
+                            except Exception as exc:
+                                print(f"[DUMP TEXT DELIVERY FAILED] {exc}", flush=True)
+                                sent_chunk = await bot.send_message(
+                                    final_chat_id, chunk, parse_mode=ParseMode.DISABLED)
+                            finally:
+                                await DUMP_MIRROR.delete_now(dump_chat_id, stage_id)
+                        else:
+                            sent_chunk = await bot.send_message(
+                                final_chat_id, chunk, parse_mode=ParseMode.DISABLED)
+                    else:
+                        sent_chunk = await message.reply(chunk, parse_mode=ParseMode.DISABLED)
                     last_text_id = getattr(sent_chunk, "id", None) or last_text_id
                     delivered = True
-                if last_text_id is not None:
-                    await mirror_delivery(message.chat.id, last_text_id, label="text")
+                if last_text_id is not None and not use_dump_stage:
+                    await mirror_delivery(final_chat_id, last_text_id, label="text")
                 await add_download(user_id, f"msg_{msg_id}", "text")
                 await status.delete()
                 return True
@@ -1216,6 +1315,11 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
         delivery = resolve_delivery_target(message, user_id, fetch_client)
         chat_id = delivery.chat_id
         uploader = delivery.upload_client
+        if delivery.reason == "bot_dm_native_copy":
+            #: Native copies from a user session land in the bot's inbox. If
+            #: that fast path failed and bytes must be uploaded, send the
+            #: fallback back to the requesting user's actual private chat.
+            chat_id = int(getattr(message.chat, "id", user_id))
         overflow_caption = caption if ui.utf16_length(caption) > 1024 else None
         if overflow_caption:
             if not premium and ui.utf16_length(msg.caption or "") <= 1024:
@@ -1234,32 +1338,80 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
             except:
                 pass
 
-        if msg.photo:
-            uploaded = await uploader.send_photo(chat_id, file_path, caption=caption, parse_mode=ParseMode.DISABLED)
-        elif msg.video:
-            uploaded = await uploader.send_video(chat_id, file_path, caption=caption, thumb=thumb_path, parse_mode=ParseMode.DISABLED)
-        elif msg.document:
-            uploaded = await uploader.send_document(chat_id, file_path, caption=caption, thumb=thumb_path, parse_mode=ParseMode.DISABLED)
-        elif msg.audio:
-            uploaded = await uploader.send_audio(chat_id, file_path, caption=caption, parse_mode=ParseMode.DISABLED)
-        elif msg.voice:
-            uploaded = await uploader.send_voice(chat_id, file_path, caption=caption, parse_mode=ParseMode.DISABLED)
-        elif msg.video_note:
-            uploaded = await uploader.send_video_note(chat_id, file_path)
-        elif msg.sticker:
-            uploaded = await uploader.send_sticker(chat_id, file_path)
-        elif msg.animation:
-            uploaded = await uploader.send_animation(chat_id, file_path, caption=caption, parse_mode=ParseMode.DISABLED)
+        dump_entry = await get_dump_channel()
+        dump_chat_id = int(dump_entry["chat_id"]) if dump_entry else None
+        stage_upload = bool(dump_chat_id and dump_chat_id != int(chat_id)
+                            and uploader is bot)
+        upload_chat_id = dump_chat_id if stage_upload else chat_id
+
+        async def upload_media(destination):
+            if msg.photo:
+                return await uploader.send_photo(destination, file_path, caption=caption,
+                                                 parse_mode=ParseMode.DISABLED)
+            if msg.video:
+                return await uploader.send_video(destination, file_path, caption=caption,
+                                                 thumb=thumb_path, parse_mode=ParseMode.DISABLED)
+            if msg.document:
+                return await uploader.send_document(destination, file_path, caption=caption,
+                                                    thumb=thumb_path, parse_mode=ParseMode.DISABLED)
+            if msg.audio:
+                return await uploader.send_audio(destination, file_path, caption=caption,
+                                                 parse_mode=ParseMode.DISABLED)
+            if msg.voice:
+                return await uploader.send_voice(destination, file_path, caption=caption,
+                                                 parse_mode=ParseMode.DISABLED)
+            if msg.video_note:
+                return await uploader.send_video_note(destination, file_path)
+            if msg.sticker:
+                return await uploader.send_sticker(destination, file_path)
+            if msg.animation:
+                return await uploader.send_animation(destination, file_path, caption=caption,
+                                                     parse_mode=ParseMode.DISABLED)
+            return await uploader.send_document(destination, file_path, caption=caption,
+                                                parse_mode=ParseMode.DISABLED)
+
+        if stage_upload:
+            try:
+                uploaded = await upload_media(upload_chat_id)
+            except Exception as exc:
+                #: A dump permission or upload error must not strand an
+                #: otherwise deliverable file; keep the legacy direct route.
+                print(f"[DUMP MEDIA STAGE FAILED] {exc}; uploading directly", flush=True)
+                stage_upload = False
+                uploaded = await upload_media(chat_id)
         else:
-            uploaded = await uploader.send_document(chat_id, file_path, caption=caption, parse_mode=ParseMode.DISABLED)
-        last_sent_id = getattr(uploaded, "id", None)
+            uploaded = await upload_media(upload_chat_id)
+        staged_id = getattr(uploaded, "id", None)
+        if stage_upload and staged_id is not None:
+            DUMP_MIRROR.schedule_delete(dump_chat_id, staged_id)
+            try:
+                final_copy = await floodwait_guard(
+                    bot.copy_message, chat_id=chat_id,
+                    from_chat_id=dump_chat_id, message_id=int(staged_id))
+                last_sent_id = getattr(final_copy, "id", None)
+            except Exception as exc:
+                print(f"[DUMP MEDIA DELIVERY FAILED] {exc}; uploading directly", flush=True)
+                uploaded_direct = await upload_media(chat_id)
+                last_sent_id = getattr(uploaded_direct, "id", None)
+            finally:
+                await DUMP_MIRROR.delete_now(dump_chat_id, staged_id)
+        elif stage_upload:
+            #: A non-standard client may not return a message object. Avoid
+            #: falsely reporting success when we cannot copy the staged item.
+            uploaded_direct = await upload_media(chat_id)
+            last_sent_id = getattr(uploaded_direct, "id", None)
+        else:
+            last_sent_id = staged_id
 
         delivered = True
-        if last_sent_id is not None:
+        if last_sent_id is not None and not stage_upload:
             await mirror_delivery(chat_id, last_sent_id, label=media_type_guess(msg))
         if overflow_caption or msg.video_note or msg.sticker:
             for chunk in ui.split_text(overflow_caption or caption or "", 4096):
-                await message.reply(chunk, parse_mode=ParseMode.DISABLED)
+                if stage_upload:
+                    await bot.send_message(chat_id, chunk, parse_mode=ParseMode.DISABLED)
+                else:
+                    await message.reply(chunk, parse_mode=ParseMode.DISABLED)
         if dm_status:
             try:
                 await dm_status.delete()
@@ -2132,16 +2284,18 @@ async def handle_fsub_callback(client, query, data: str):
 
 #: Commands that arrived with the owner tools, pin control and giveaways.
 NEW_COMMAND_NAMES = [
-    "pin", "pinned", "setdump", "deldump", "dump", "post", "native",
+    "pin", "pinned", "unpin", "menu", "cmsg", "botcast",
+    "setdump", "deldump", "dump", "post", "native",
     "giveaway", "participants", "endgiveaway",
 ]
-COMMAND_NAMES = NEW_COMMAND_NAMES + ["start", "help", "login", "logout", "status", "cancel", "setcaption", "delcaption", "setthumb", "delthumb", "setprefix", "setsuffix", "mystats", "myinfo", "history", "settings", "language", "refer", "bookmark", "bookmarks", "favorite", "favorites", "share", "feedback", "premium", "stats", "users", "loggedusers", "activeusers", "newusers", "topusers", "broadcast", "ban", "unban", "banlist", "finduser", "userinfo", "addpremium", "removepremium", "premiumlist", "addadmin", "removeadmin", "adminlist", "setfsub", "fsublist", "delfsub", "fsublabel", "fsubcheck", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export", "adminhelp", "admin", "admins", "addqr", "delqr", "removeqr", "payments", "redeem", "setchat", "delchat", "models", "engine", "mychannels", "setengine"]
+COMMAND_NAMES = NEW_COMMAND_NAMES + ["start", "help", "login", "logout", "status", "cancel", "setcaption", "delcaption", "setthumb", "delthumb", "setprefix", "setsuffix", "mystats", "myinfo", "history", "settings", "language", "refer", "bookmark", "bookmarks", "favorite", "favorites", "share", "feedback", "premium", "stats", "users", "loggedusers", "activeusers", "newusers", "topusers", "broadcast", "botcast", "menu", "cmsg", "unpin", "ban", "unban", "banlist", "finduser", "userinfo", "addpremium", "removepremium", "premiumlist", "addadmin", "removeadmin", "adminlist", "setfsub", "fsublist", "delfsub", "fsublabel", "fsubcheck", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export", "adminhelp", "admin", "admins", "addqr", "delqr", "removeqr", "payments", "redeem", "setchat", "delchat", "models", "engine", "mychannels", "setengine"]
 ABORT_GROUP = -1
 
 
 async def clear_pending_inputs(uid):
     aborted = bool(payment_pending.pop(uid, None))
     aborted = bool(pending_action.pop(uid, None)) or aborted
+    aborted = bool(MESSAGE_MENU_PENDING.pop(uid, None)) or aborted
     aborted = bool(admin_pending.pop(uid, None)) or aborted
     aborted = bool(premium_tier_pending.pop(uid, None)) or aborted
     aborted = bool(setchat_pending.pop(uid, None)) or aborted
@@ -2575,54 +2729,114 @@ async def top_users_handler(client, message):
     await say(message, text)
 
 
+def campaign_payload_from_message(source_message):
+    """A broadcast/custom-message descriptor for one replied-to Telegram post."""
+    chat_id = getattr(getattr(source_message, "chat", None), "id", None)
+    message_id = getattr(source_message, "id", None)
+    if chat_id is None or message_id is None:
+        return None
+    body = (getattr(source_message, "text", None)
+            or getattr(source_message, "caption", None) or "")
+    preview = body.replace("\n", " ").strip()[:80]
+    if not preview:
+        preview = "a media message"
+    return {
+        "kind": WIZARD_KIND_CAMPAIGN,
+        "source_chat_id": int(chat_id),
+        "source_message_id": int(message_id),
+        "text": body,
+        "preview": preview,
+    }
+
+
+async def run_text_broadcast(text: str, *, users_only: bool = False) -> dict:
+    """Send a typed announcement to owner channels and/or every bot user."""
+    text = (text or "").strip()
+    channels = [] if users_only else await broadcast_channels()
+    users = await get_all_users()
+    recipients = []
+    for entry in users:
+        try:
+            uid = int(entry.get("user_id") or 0)
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if uid and uid != OWNER_ID:
+            recipients.append(entry)
+    bodies = native_engine.prepare_broadcast(
+        text, [entry.get("name") for entry in recipients])
+    channel_text = native_engine.escape_html(text.replace("{name}", "everyone"))
+    report = {"channels_total": len(channels), "channels_sent": 0,
+              "users_total": len(recipients), "users_sent": 0,
+              "pinned_channels": 0, "pinned_users": 0,
+              "pin_attempted": 0, "pin_succeeded": 0,
+              "failed": 0, "blocked": 0}
+    for entry in channels:
+        chat_id = int(entry["chat_id"])
+        try:
+            await floodwait_guard(bot.send_message, chat_id, channel_text,
+                                  parse_mode=ParseMode.HTML)
+            report["channels_sent"] += 1
+        except Exception as exc:
+            report["failed"] += 1
+            print(f"[BROADCAST CHANNEL FAILED] {chat_id}: {exc}", flush=True)
+        await asyncio.sleep(0.05)
+    for entry, body in zip(recipients, bodies):
+        uid = int(entry["user_id"])
+        try:
+            await floodwait_guard(bot.send_message, uid, body,
+                                  parse_mode=ParseMode.HTML)
+            report["users_sent"] += 1
+        except Exception as exc:
+            if type(exc).__name__ in BROADCAST_BLOCKED_ERRORS:
+                report["blocked"] += 1
+            else:
+                report["failed"] += 1
+            print(f"[BROADCAST USER FAILED] {uid}: {type(exc).__name__}: {exc}",
+                  flush=True)
+        await asyncio.sleep(0.05)
+    return report
+
+
 @bot.on_message(filters.command("broadcast") & filters.private)
 @admin_only
 async def broadcast_handler(client, message):
     args = (message.text or "").split(maxsplit=1)
     typed = args[1].strip() if len(args) > 1 else ""
-    if not message.reply_to_message and not typed:
+    reply = getattr(message, "reply_to_message", None)
+    if reply is None and not typed:
         await say(message, "📢 Reply to a message with /broadcast, or send "
                            "`/broadcast Your message` (use `{name}` to greet each user).")
         return
-    #: Round 13 item 9 — the inline-button builder is for a **direct user
-    #: send** only.  A broadcast is not one: it goes out exactly as it was
-    #: typed, with no colour step, no link step and no half-designed message
-    #: left sitting in the chat.  The C++ pool still personalises every copy.
-    if typed and not message.reply_to_message:
-        users = await get_all_users()
-        total = len(users)
-        status = await say(message, f"📢 Broadcasting to {total}...")
-        delivered = await run_button_broadcast(typed, [])
-        await say_edit(status,
-            f"✅ **Broadcast Complete!**\n\n"
-            f"Total: {total}\n✅ Sent: {len(delivered)}\n"
-            f"❌ Not delivered: {max(0, total - len(delivered))}"
-        )
+    status = await say(message, "📢 Preparing the broadcast…")
+    if reply is not None:
+        payload = campaign_payload_from_message(reply)
+        report = (await deliver_campaign_payload(payload) if payload else
+                  {"channels_total": 0, "channels_sent": 0, "users_total": 0,
+                   "users_sent": 0, "failed": 1})
+    else:
+        report = await run_text_broadcast(typed)
+    await say_edit(status, ui.broadcast_complete_text(report))
+
+
+@bot.on_message(filters.command("botcast") & filters.private)
+@owner_only
+async def botcast_handler(client, message):
+    args = (message.text or "").split(maxsplit=1)
+    typed = args[1].strip() if len(args) > 1 else ""
+    reply = getattr(message, "reply_to_message", None)
+    if reply is None and not typed:
+        await say(message, "🤖 Reply to a message with /botcast, or send "
+                           "`/botcast Your message` to reach bot users only.")
         return
-    users = await get_all_users()
-    total = len(users)
-    status = await say(message, f"📢 Broadcasting to {total}...")
-    success = failed = blocked = 0
-    for i, user in enumerate(users):
-        try:
-            await message.reply_to_message.copy(user["user_id"])
-            success += 1
-        except Exception as e:
-            err = str(e).lower()
-            if "blocked" in err or "deactivated" in err:
-                blocked += 1
-            else:
-                failed += 1
-        if i % 20 == 0:
-            try:
-                await say_edit(status, f"📢 {i}/{total}\n✅ {success} 🚫 {blocked} ❌ {failed}")
-            except:
-                pass
-        await asyncio.sleep(0.05)
-    await say_edit(status,
-        f"✅ **Broadcast Complete!**\n\n"
-        f"Total: {total}\n✅ Sent: {success}\n🚫 Blocked: {blocked}\n❌ Failed: {failed}"
-    )
+    status = await say(message, "🤖 Preparing the bot-user broadcast…")
+    if reply is not None:
+        payload = campaign_payload_from_message(reply)
+        report = (await deliver_campaign_payload(payload, users_only=True) if payload else
+                  {"channels_total": 0, "channels_sent": 0, "users_total": 0,
+                   "users_sent": 0, "failed": 1})
+    else:
+        report = await run_text_broadcast(typed, users_only=True)
+    await say_edit(status, ui.broadcast_complete_text(report, users_only=True))
 
 
 @bot.on_message(filters.command("ban") & filters.private)
@@ -3634,8 +3848,23 @@ async def cb_setchat_share(client, query):
               reply_markup=ui.setchat_picker_keyboard())
 
 
-#: The ``request_id`` Telegram must echo back for a pick to be ours.
-PICKER_BUTTON_IDS = frozenset({int(CHANNEL_PICKER_BUTTON_ID)})
+#: The ``button_id`` Telegram must echo back for a pick to be ours.
+PICKER_BUTTON_IDS = frozenset({int(CHANNEL_PICKER_BUTTON_ID),
+                               int(DUMP_PICKER_BUTTON_ID)})
+
+
+def shared_button_id(message):
+    """Return Telegram's chooser button id, supporting older field names."""
+    shared = getattr(message, "chat_shared", None)
+    if shared is None:
+        return None
+    value = getattr(shared, "button_id", None)
+    if value is None:
+        value = getattr(shared, "request_id", None)
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def shared_chat_of(message):
@@ -3648,11 +3877,12 @@ def shared_chat_of(message):
     shared = getattr(message, "chat_shared", None)
     if shared is None:
         return None
-    button_id = getattr(shared, "button_id", None)
-    if button_id is None:
-        button_id = getattr(shared, "request_id", None)
-    if button_id is not None and int(button_id) not in PICKER_BUTTON_IDS:
-        print(f"[PICKER] ignored a pick for button_id={button_id!r}", flush=True)
+    raw_button_id = getattr(shared, "button_id", None)
+    if raw_button_id is None:
+        raw_button_id = getattr(shared, "request_id", None)
+    button_id = shared_button_id(message)
+    if raw_button_id is not None and button_id not in PICKER_BUTTON_IDS:
+        print(f"[PICKER] ignored a pick for button_id={raw_button_id!r}", flush=True)
         return None
     chat = getattr(shared, "chat", None)
     if chat is not None and getattr(chat, "id", None) is not None:
@@ -3665,27 +3895,80 @@ def shared_chat_of(message):
 
 @bot.on_message(filters.chat_shared & filters.private)
 async def chat_shared_handler(client, message):
-    """Round 14 — the owner picked a channel in Telegram's own chooser.
-
-    The choice arrives here with the full chat attached, so the wizard can run
-    the exact same two verifications the link path runs — the picker
-    administers the channel, and the bot may post in it — and then store it.
-    No link, no forward, no message id and nothing posted in the channel.
-    """
+    """Route Telegram's native chat-picker result to /setchat or /setdump."""
     if getattr(message, "from_user", None) is None:
         return
     uid = message.from_user.id
-    chat = shared_chat_of(message)
-    if chat is None:
+    shared = shared_chat_of(message)
+    if shared is None:
         #: A pick we did not ask for (or an unreadable one) is simply not ours.
         return
-    if pending_action.get(uid) != "setchat_share" and uid not in setchat_pending:
-        #: The chooser can be opened from anywhere, so a stray pick is guided
-        #: rather than silently dropped.
+    button_id = shared_button_id(message)
+    action = pending_action.get(uid)
+    if button_id is not None:
+        if button_id == int(DUMP_PICKER_BUTTON_ID):
+            if uid != OWNER_ID:
+                await say(message, ui.setdump_owner_only_text(),
+                          reply_markup=ui.remove_keyboard())
+            elif action == "setdump_share":
+                await register_picked_dump(message, uid, shared)
+            else:
+                await say(message, ui.setdump_prompt_text(),
+                          reply_markup=ui.setdump_picker_keyboard())
+            return
+        if button_id == int(CHANNEL_PICKER_BUTTON_ID):
+            if action != "setchat_share" and uid not in setchat_pending:
+                await say(message, ui.setchat_picker_text(),
+                          reply_markup=ui.setchat_picker_keyboard())
+                return
+            await register_picked_channel(message, uid, shared)
+            return
+    #: Older clients may omit the button id. Use only the currently armed flow;
+    #: never infer a dump pick from the user's identity alone.
+    if action == "setdump_share":
+        if uid != OWNER_ID:
+            await say(message, ui.setdump_owner_only_text(),
+                      reply_markup=ui.remove_keyboard())
+            return
+        await register_picked_dump(message, uid, shared)
+    elif action == "setchat_share" or uid in setchat_pending:
+        await register_picked_channel(message, uid, shared)
+    else:
         await say(message, ui.setchat_picker_text(),
                   reply_markup=ui.setchat_picker_keyboard())
-        return
-    await register_picked_channel(message, uid, chat)
+
+
+async def register_picked_dump(message, uid, chat) -> bool:
+    """Verify the picker result and connect the owner-only dump workspace."""
+    if int(uid) != OWNER_ID:
+        await say(message, ui.setdump_owner_only_text(), reply_markup=ui.remove_keyboard())
+        return True
+    chat_id = int(getattr(chat, "id", 0) or 0)
+    kind = chat_type_value(chat)
+    if not chat_id or kind != "channel":
+        await say(message, ui.setchat_share_failed_text("not_a_channel"),
+                  reply_markup=ui.setdump_picker_keyboard())
+        return True
+    requester_ok, requester_reason = await describe_requester_admin(chat_id, uid)
+    if not requester_ok:
+        reason = "requester_not_admin" if requester_reason == "not_admin" else "error"
+        await say(message, ui.dump_admin_failed_text(reason),
+                  reply_markup=ui.setdump_picker_keyboard())
+        return True
+    ok, reason = await describe_channel_admin(chat_id, require_delete=True)
+    if not ok:
+        await say(message, ui.dump_admin_failed_text(reason),
+                  reply_markup=ui.setdump_picker_keyboard())
+        return True
+    title = chat_title(chat, chat_id)
+    username = getattr(chat, "username", None)
+    await set_dump_channel(chat_id, title, username, kind)
+    pending_action.pop(uid, None)
+    setchat_pending.pop(uid, None)
+    await say(message, ui.setdump_done_text(title, chat_id),
+              reply_markup=ui.dump_status_keyboard(True))
+    print(f"[DUMP] connected chat={chat_id} by the owner via picker", flush=True)
+    return True
 
 
 async def register_picked_channel(message, uid, chat) -> bool:
@@ -4535,7 +4818,7 @@ async def start_setchat_flow(source, ref=None, chat=None):
     return True
 
 
-async def describe_channel_admin(chat_id):
+async def describe_channel_admin(chat_id, *, require_delete: bool = False):
     """``(ok, reason)`` — the truthful admin state of the bot in *chat_id*.
 
     Kurigram keeps posting rights in ``ChatMember.privileges``
@@ -4555,22 +4838,29 @@ async def describe_channel_admin(chat_id):
     privileges = getattr(member, "privileges", None)
     can_post = getattr(privileges, "can_post_messages", None)
     can_manage = getattr(privileges, "can_manage_chat", None)
+    can_delete = getattr(privileges, "can_delete_messages", None)
     # Always log the raw values: this is what a deployment gets debugged from.
     print(f"[SETCHAT] admin check chat={chat_id} status={status!r} "
           f"privileges={'set' if privileges is not None else 'none'} "
-          f"can_post_messages={can_post!r} can_manage_chat={can_manage!r}", flush=True)
+          f"can_post_messages={can_post!r} can_delete_messages={can_delete!r} "
+          f"can_manage_chat={can_manage!r}", flush=True)
     if status in {"owner", "creator"}:
         return True, "ok"
     if status != "administrator":
         return False, "not_admin"
+    if can_post is False:
+        return False, "no_post_rights"
+    if require_delete and can_delete is not True:
+        return False, "no_delete_rights"
     # Channel and supergroup admins carry their rights in ``privileges``.
     rights = [can_post, can_manage]
     if all(right is None for right in rights):
         # Telegram reports no posting right for this chat type (basic group or
         # legacy parser): the sample message plus the first real send are the
-        # true proof, so the wizard is allowed to continue.
-        return True, "ok"
-    return (True, "ok") if rights[0] else (False, "no_post_rights")
+        # true proof, so the ordinary /setchat wizard may continue. Dump setup
+        # is stricter because an un-deletable stage would leak workspace copies.
+        return (False, "no_delete_rights") if require_delete else (True, "ok")
+    return (True, "ok") if can_post else (False, "no_post_rights")
 
 
 async def verify_channel_admin(chat_id) -> bool:
@@ -5389,10 +5679,15 @@ async def register_dump_from_ping(message, uid, chat) -> bool:
     chat_id = int(getattr(chat, "id", 0) or 0)
     kind = chat_type_value(chat)
     title = chat_title(chat, chat_id)
-    if not chat_id or kind not in {"channel", "supergroup", "group"}:
+    if not chat_id or kind != "channel":
         await dm_user(uid, ui.setchat_share_failed_text("not_a_channel"))
         return True
-    ok, reason = await describe_channel_admin(chat_id)
+    requester_ok, requester_reason = await describe_requester_admin(chat_id, uid)
+    if not requester_ok:
+        reason = "requester_not_admin" if requester_reason == "not_admin" else "error"
+        await dm_user(uid, ui.dump_admin_failed_text(reason))
+        return True
+    ok, reason = await describe_channel_admin(chat_id, require_delete=True)
     if not ok:
         await dm_user(uid, ui.dump_admin_failed_text(reason))
         return True
@@ -5437,8 +5732,9 @@ async def handle_share_deep_link(message) -> bool:
             pass
     else:
         try:
-            await say(message, ui.setdump_deep_link_private_text(),
-                      reply_markup=ui.setdump_prompt_keyboard(share_deep_link(uid, "setdump")))
+            pending_action[int(uid)] = "setdump_share"
+            await say(message, ui.setdump_prompt_text(),
+                      reply_markup=ui.setdump_picker_keyboard())
         except Exception:
             pass
     return True
@@ -5477,9 +5773,12 @@ async def setdump_deep_link_in_private(message, token) -> bool:
     entry = SHARE_TOKENS.get(token)
     if not entry or entry.get("kind") != "setdump":
         return False
-    await say(message, ui.setdump_deep_link_private_text(),
-              reply_markup=ui.setdump_prompt_keyboard(
-                  share_deep_link(message.from_user.id, "setdump")))
+    if int(message.from_user.id) != OWNER_ID:
+        await say(message, ui.setdump_owner_only_text())
+        return True
+    pending_action[int(message.from_user.id)] = "setdump_share"
+    await say(message, ui.setdump_prompt_text(),
+              reply_markup=ui.setdump_picker_keyboard())
     return True
 
 
@@ -5564,6 +5863,47 @@ class DumpMirror:
               flush=True)
         return copied
 
+    async def stage_copy(self, source_client, source_chat_id, message_id, *,
+                         label="staging", delete_after=True):
+        """Copy source content into the dump workspace before final delivery.
+
+        This is intentionally a *copy*, not a forward. The caller may edit the
+        temporary dump copy (for captions/attribution) and then copy that result
+        to a recipient; that last copy does not carry Telegram's Edited label.
+        """
+        entry = await get_dump_channel()
+        if not entry or message_id is None:
+            return None
+        try:
+            source_chat_id = int(source_chat_id)
+            dump_chat_id = int(entry["chat_id"])
+            message_id = int(message_id)
+        except (TypeError, ValueError):
+            return None
+        copied = None
+        for attempt in range(1, FLOODWAIT_MAX_RETRIES + 2):
+            try:
+                await self._pace(dump_chat_id)
+                copied = await source_client.copy_message(
+                    chat_id=dump_chat_id,
+                    from_chat_id=source_chat_id,
+                    message_id=message_id,
+                )
+                break
+            except FloodWait as error:
+                await self._note_flood(dump_chat_id, floodwait_seconds(error), attempt)
+            except Exception as exc:
+                print(f"[DUMP STAGE FAILED] {label}: {type(exc).__name__}: {exc}", flush=True)
+                return None
+        if copied is None:
+            return None
+        self.mirrored += 1
+        if delete_after:
+            self.schedule_delete(dump_chat_id, getattr(copied, "id", None))
+        print(f"[DUMP] staged {label} source={source_chat_id}:{message_id} "
+              f"dump={dump_chat_id}:{getattr(copied, 'id', None)}", flush=True)
+        return copied
+
     def schedule_delete(self, chat_id, message_id, *, delay=None) -> None:
         """Queue the TTL delete for one mirrored copy."""
         if message_id is None:
@@ -5584,6 +5924,20 @@ class DumpMirror:
     async def _delete_later(self, chat_id, message_id, delay=None) -> None:
         await asyncio.sleep(DUMP_TTL_SECONDS if delay is None else float(delay))
         await self._delete(chat_id, message_id)
+
+    async def delete_now(self, chat_id, message_id) -> bool:
+        """Cancel the TTL task and remove a staging copy after delivery."""
+        key = f"{chat_id}:{message_id}"
+        task = self.tasks.pop(key, None)
+        current = asyncio.current_task()
+        if task is not None and task is not current and not task.done():
+            task.cancel()
+        deleted = await self._delete(chat_id, message_id)
+        if not deleted:
+            #: Keep a delayed retry as a cleanup safety net if Telegram briefly
+            #: rejects the immediate post-delivery delete.
+            self.schedule_delete(chat_id, message_id)
+        return deleted
 
     async def _delete(self, chat_id, message_id) -> bool:
         key = f"{chat_id}:{message_id}"
@@ -5632,6 +5986,245 @@ async def mirror_delivery(source_chat_id, message_id, *, label="delivery"):
         return None
 
 
+async def broadcast_channels():
+    """Owner channels reached by /broadcast: registered channels plus /setdump."""
+    entries = []
+    try:
+        entries.extend(await get_user_channels(OWNER_ID))
+    except Exception as exc:
+        print(f"[BROADCAST CHANNELS FAILED] {exc}", flush=True)
+    try:
+        dump = await get_dump_channel()
+    except Exception as exc:
+        print(f"[BROADCAST DUMP LOOKUP FAILED] {exc}", flush=True)
+        dump = None
+    if dump:
+        entries.append(dump)
+    unique = {}
+    for entry in entries:
+        try:
+            chat_id = int(entry.get("chat_id"))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        unique.setdefault(chat_id, {**entry, "chat_id": chat_id})
+    return list(unique.values())
+
+
+async def copy_message_with_markup(chat_id, from_chat_id, message_id, *, reply_markup=None):
+    """Copy without a Forwarded header and attach a keyboard when supported.
+
+    Older Telegram-library builds do not expose ``reply_markup`` on
+    ``copy_message``. In that case the message is copied first, then only its
+    keyboard is edited (never its text or caption), so no Edited label is added.
+    """
+    kwargs = {"chat_id": int(chat_id), "from_chat_id": int(from_chat_id),
+              "message_id": int(message_id)}
+    if reply_markup is None:
+        return await floodwait_guard(bot.copy_message, **kwargs)
+    try:
+        return await floodwait_guard(bot.copy_message, reply_markup=reply_markup, **kwargs)
+    except TypeError:
+        copied = await floodwait_guard(bot.copy_message, **kwargs)
+        copied_id = getattr(copied, "id", None)
+        editor = getattr(bot, "edit_message_reply_markup", None)
+        if copied_id is not None and editor is not None:
+            try:
+                await floodwait_guard(editor, int(chat_id), int(copied_id),
+                                      reply_markup=reply_markup)
+            except Exception as exc:
+                print(f"[CAMPAIGN BUTTON ATTACH FAILED] chat={chat_id}: {exc}", flush=True)
+        return copied
+
+
+async def campaign_stage(payload, keyboard=None):
+    """Create one temporary dump copy for an outbound customized message."""
+    dump = await get_dump_channel()
+    if not dump:
+        return None
+    dump_id = int(dump["chat_id"])
+    source_chat = payload.get("source_chat_id")
+    source_message = payload.get("source_message_id")
+    if source_chat is not None and source_message is not None:
+        staged = await copy_message_with_markup(
+            dump_id, int(source_chat), int(source_message), reply_markup=keyboard)
+    else:
+        text = str(payload.get("text") or "")
+        if not text:
+            return None
+        staged = await floodwait_guard(
+            bot.send_message, dump_id, text, reply_markup=keyboard,
+            parse_mode=ParseMode.DISABLED)
+    message_id = getattr(staged, "id", None)
+    if message_id is None:
+        return None
+    DUMP_MIRROR.schedule_delete(dump_id, message_id)
+    return {"chat_id": dump_id, "message_id": int(message_id), "temporary": True}
+
+
+async def deliver_staged_text_to_chat(chat_id, text, *, reply_markup=None):
+    """Send one custom DM from the dump workspace, with a safe direct fallback."""
+    chat_id = int(chat_id)
+    payload = {"text": str(text or "")}
+    staged = None
+    try:
+        staged = await campaign_stage(payload, reply_markup)
+        if staged:
+            return await copy_message_with_markup(
+                chat_id, staged["chat_id"], staged["message_id"],
+                reply_markup=reply_markup)
+    except Exception as exc:
+        print(f"[DUMP DM DELIVERY FAILED] {type(exc).__name__}: {exc}", flush=True)
+    finally:
+        if staged and staged.get("temporary"):
+            await DUMP_MIRROR.delete_now(staged["chat_id"], staged["message_id"])
+    return await floodwait_guard(
+        bot.send_message, chat_id, str(text or ""), reply_markup=reply_markup,
+        parse_mode=ParseMode.DISABLED)
+
+
+async def best_effort_pin(chat_id, message_id) -> bool:
+    """Attempt a pin without making delivery depend on Telegram's pin policy."""
+    if message_id is None:
+        return False
+    try:
+        await bot.pin_chat_message(int(chat_id), int(message_id),
+                                   disable_notification=False)
+        return True
+    except FloodWait as error:
+        seconds = floodwait_seconds(error)
+        print(f"[PIN FLOODWAIT] chat={chat_id} msg={message_id} wait={seconds}s", flush=True)
+        await floodwait_sleep(seconds)
+    except Exception as exc:
+        print(f"[PIN BEST EFFORT FAILED] chat={chat_id} msg={message_id}: "
+              f"{type(exc).__name__}: {exc}", flush=True)
+    return False
+
+
+async def unpin_configured_channels():
+    """Remove the current pin from each configured owner channel, best effort."""
+    channels = await broadcast_channels()
+    report = {"channels_total": len(channels), "unpinned": 0, "failed": 0}
+    for entry in channels:
+        chat_id = int(entry["chat_id"])
+        try:
+            chat = await floodwait_guard(bot.get_chat, chat_id)
+            pinned = getattr(chat, "pinned_message", None)
+            if pinned is None or getattr(pinned, "id", None) is None:
+                continue
+            await floodwait_guard(bot.unpin_chat_message, chat_id, int(pinned.id))
+            report["unpinned"] += 1
+        except FloodWait as error:
+            await floodwait_sleep(floodwait_seconds(error))
+            report["failed"] += 1
+        except Exception as exc:
+            print(f"[UNPIN CHANNEL FAILED] chat={chat_id}: {exc}", flush=True)
+            report["failed"] += 1
+    return report
+
+
+async def deliver_campaign_payload(payload, buttons=(), *, users_only=False, pin=False):
+    """Send a supplied/replied-to custom message to channels and/or bot users.
+
+    A configured dump is the workspace: one copy is staged there with its
+    completed keyboard, then copied to every final destination and deleted.
+    Plain text is never edited after delivery, which avoids an Edited label.
+    """
+    payload = dict(payload or {})
+    keyboard = ui.custom_buttons_keyboard(buttons) if buttons else None
+    channels = [] if users_only else await broadcast_channels()
+    try:
+        user_rows = await get_all_users()
+    except Exception as exc:
+        print(f"[CAMPAIGN USERS FAILED] {exc}", flush=True)
+        user_rows = []
+    recipients = []
+    for row in user_rows:
+        try:
+            uid = int(row.get("user_id"))
+        except (AttributeError, TypeError, ValueError):
+            continue
+        if uid and uid != OWNER_ID:
+            recipients.append((uid, row))
+    report = {"channels_total": len(channels), "channels_sent": 0,
+              "users_total": len(recipients), "users_sent": 0,
+              "pinned_channels": 0, "pinned_users": 0,
+              "pin_attempted": 0, "pin_succeeded": 0,
+              "pin_failed_channels": 0, "pin_failed_users": 0,
+              "failed": 0, "blocked": 0}
+
+    staged = None
+    try:
+        try:
+            staged = await campaign_stage(payload, keyboard)
+        except Exception as exc:
+            print(f"[CAMPAIGN STAGE FAILED] {type(exc).__name__}: {exc}", flush=True)
+        source_chat = payload.get("source_chat_id")
+        source_message = payload.get("source_message_id")
+        is_text = source_chat is None or source_message is None
+        base_text = str(payload.get("text") or "")
+
+        async def deliver_to(destination, *, source_kind):
+            if not is_text:
+                if pin and not buttons and int(source_chat) == int(destination):
+                    #: /pin in the channel holding the reply pins the original;
+                    #: it must not duplicate itself into that same channel.
+                    return SimpleNamespace(id=int(source_message))
+                ref = staged or {"chat_id": int(source_chat),
+                                 "message_id": int(source_message), "temporary": False}
+                return await copy_message_with_markup(
+                    int(destination), int(ref["chat_id"]), int(ref["message_id"]),
+                    reply_markup=keyboard)
+            if staged:
+                return await copy_message_with_markup(
+                    int(destination), int(staged["chat_id"]), int(staged["message_id"]),
+                    reply_markup=keyboard)
+            return await floodwait_guard(
+                bot.send_message, int(destination), base_text,
+                reply_markup=keyboard, parse_mode=ParseMode.DISABLED)
+
+        for entry in channels:
+            chat_id = int(entry["chat_id"])
+            try:
+                delivered_message = await deliver_to(chat_id, source_kind="channel")
+                report["channels_sent"] += 1
+                if pin:
+                    report["pin_attempted"] += 1
+                    if await best_effort_pin(chat_id, getattr(delivered_message, "id", None)):
+                        report["pinned_channels"] += 1
+                        report["pin_succeeded"] += 1
+                    else:
+                        report["pin_failed_channels"] += 1
+            except Exception as exc:
+                report["failed"] += 1
+                print(f"[CAMPAIGN CHANNEL FAILED] chat={chat_id}: "
+                      f"{type(exc).__name__}: {exc}", flush=True)
+            await asyncio.sleep(0.05)
+
+        for uid, row in recipients:
+            try:
+                delivered_message = await deliver_to(uid, source_kind="user")
+                report["users_sent"] += 1
+                if pin:
+                    report["pin_attempted"] += 1
+                    if await best_effort_pin(uid, getattr(delivered_message, "id", None)):
+                        report["pinned_users"] += 1
+                        report["pin_succeeded"] += 1
+                    else:
+                        report["pin_failed_users"] += 1
+            except Exception as exc:
+                name = type(exc).__name__
+                if name in BROADCAST_BLOCKED_ERRORS:
+                    report["blocked"] += 1
+                else:
+                    report["failed"] += 1
+                print(f"[CAMPAIGN USER FAILED] user={uid}: {name}: {exc}", flush=True)
+            await asyncio.sleep(0.05)
+    finally:
+        if staged and staged.get("temporary"):
+            await DUMP_MIRROR.delete_now(staged["chat_id"], staged["message_id"])
+    return report
+
+
 # --------------------------------------------------------------------------- #
 #  /setdump, /deldump and /dump
 # --------------------------------------------------------------------------- #
@@ -5643,9 +6236,9 @@ async def setdump_handler(client, message):
     args = (message.text or "").split(maxsplit=1)
     ref = args[1].strip() if len(args) > 1 else ""
     if not ref:
-        pending_action[uid] = "setdump"
+        pending_action[uid] = "setdump_share"
         await say(message, ui.setdump_prompt_text(),
-                  reply_markup=ui.setdump_prompt_keyboard(share_deep_link(uid, "setdump")))
+                  reply_markup=ui.setdump_picker_keyboard())
         return
     await finish_setdump(message, ref)
 
@@ -5666,10 +6259,23 @@ async def finish_setdump(message, ref) -> bool:
         await say(message, ui.setchat_resolve_failed_text("unresolved") + "\n\n" +
                   ui.setdump_prompt_text(), reply_markup=ui.feedback_keyboard())
         return False
-    ok, reason = await describe_channel_admin(resolved["chat_id"])
+    if resolved.get("type") not in {None, "channel"}:
+        await say(message, ui.setchat_share_failed_text("not_a_channel"),
+                  reply_markup=ui.setdump_picker_keyboard())
+        return False
+    requester_ok, requester_reason = await describe_requester_admin(
+        resolved["chat_id"], uid)
+    if not requester_ok:
+        pending_action[uid] = "setdump_share"
+        reason = "requester_not_admin" if requester_reason == "not_admin" else "error"
+        await say(message, ui.dump_admin_failed_text(reason),
+                  reply_markup=ui.setdump_picker_keyboard())
+        return False
+    ok, reason = await describe_channel_admin(resolved["chat_id"], require_delete=True)
     if not ok:
-        pending_action[uid] = "setdump"
-        await say(message, ui.dump_admin_failed_text(reason), reply_markup=ui.feedback_keyboard())
+        pending_action[uid] = "setdump_share"
+        await say(message, ui.dump_admin_failed_text(reason),
+                  reply_markup=ui.setdump_picker_keyboard())
         return False
     await set_dump_channel(resolved["chat_id"], resolved.get("title"),
                            resolved.get("username"), resolved.get("type"))
@@ -5851,9 +6457,151 @@ async def pin_in_chat(chat_id, msg_id) -> tuple[bool, str]:
         return False, "not_found" if missing else "error"
 
 
+@bot.on_message(filters.command("menu") & filters.private)
+@owner_only
+async def message_menu_handler(client, message):
+    reply = getattr(message, "reply_to_message", None)
+    if reply is None:
+        await say(message, "🧰 Reply to the message you want to manage, then send /menu.")
+        return
+    payload = campaign_payload_from_message(reply)
+    if payload is None:
+        await say(message, "❌ I could not read that replied-to message.")
+        return
+    MESSAGE_MENU_PENDING[message.from_user.id] = payload
+    await say(message, ui.message_menu_text(), reply_markup=ui.message_menu_keyboard())
+
+
+@bot.on_message(filters.command(["cmsg", "cMSG"]) & filters.private)
+@owner_only
+async def cmsg_handler(client, message):
+    """Build a coloured-button message from text or a replied-to message."""
+    reply = getattr(message, "reply_to_message", None)
+    args = (message.text or "").split(maxsplit=1)
+    typed = args[1].strip() if len(args) > 1 else ""
+    if reply is not None:
+        payload = campaign_payload_from_message(reply)
+    elif typed:
+        payload = {"kind": WIZARD_KIND_CAMPAIGN, "text": typed,
+                   "preview": typed.replace("\\n", " ")[:80]}
+    else:
+        pending_action[message.from_user.id] = "cmsg_text"
+        await say(message, ui.custom_message_prompt_text(),
+                  reply_markup=ui.feedback_keyboard())
+        return
+    if payload is None:
+        await say(message, "❌ I could not read that replied-to message.")
+        return
+    payload["kind"] = WIZARD_KIND_CAMPAIGN
+    await start_button_wizard(message, payload)
+
+
+@callback_action("msgmenu:pin")
+async def cb_msgmenu_pin(client, query):
+    uid = query.from_user.id
+    if uid != OWNER_ID:
+        await query.answer(ui_text("🚫 Admin access only."), show_alert=True)
+        return
+    payload = MESSAGE_MENU_PENDING.get(uid)
+    if not payload:
+        await query.answer(ui_text("This message menu expired."), show_alert=True)
+        return
+    await query.answer(ui_text("📣 Broadcasting and pinning…"))
+    report = await deliver_campaign_payload(payload, pin=True)
+    MESSAGE_MENU_PENDING.pop(uid, None)
+    await render(query, ui.broadcast_complete_text(report, pin=True), ui.admin_back_keyboard())
+
+
+@callback_action("msgmenu:broadcast")
+async def cb_msgmenu_broadcast(client, query):
+    uid = query.from_user.id
+    if uid != OWNER_ID:
+        await query.answer(ui_text("🚫 Admin access only."), show_alert=True)
+        return
+    payload = MESSAGE_MENU_PENDING.get(uid)
+    if not payload:
+        await query.answer(ui_text("This message menu expired."), show_alert=True)
+        return
+    await query.answer(ui_text("📣 Broadcasting…"))
+    report = await deliver_campaign_payload(payload)
+    MESSAGE_MENU_PENDING.pop(uid, None)
+    await render(query, ui.broadcast_complete_text(report), ui.admin_back_keyboard())
+
+
+@callback_action("msgmenu:botcast")
+async def cb_msgmenu_botcast(client, query):
+    uid = query.from_user.id
+    if uid != OWNER_ID:
+        await query.answer(ui_text("🚫 Admin access only."), show_alert=True)
+        return
+    payload = MESSAGE_MENU_PENDING.get(uid)
+    if not payload:
+        await query.answer(ui_text("This message menu expired."), show_alert=True)
+        return
+    await query.answer(ui_text("🤖 Sending to bot users…"))
+    report = await deliver_campaign_payload(payload, users_only=True)
+    MESSAGE_MENU_PENDING.pop(uid, None)
+    await render(query, ui.broadcast_complete_text(report, users_only=True),
+                 ui.admin_back_keyboard())
+
+
+@callback_action("msgmenu:cmsg")
+async def cb_msgmenu_cmsg(client, query):
+    uid = query.from_user.id
+    if uid != OWNER_ID:
+        await query.answer(ui_text("🚫 Admin access only."), show_alert=True)
+        return
+    payload = MESSAGE_MENU_PENDING.pop(uid, None)
+    if not payload:
+        await query.answer(ui_text("This message menu expired."), show_alert=True)
+        return
+    payload["kind"] = WIZARD_KIND_CAMPAIGN
+    await query.answer(ui_text("🎨 Opening the custom-message builder…"))
+    await start_button_wizard(query, payload)
+
+
+@callback_action("msgmenu:unpin")
+async def cb_msgmenu_unpin(client, query):
+    uid = query.from_user.id
+    if uid != OWNER_ID:
+        await query.answer(ui_text("🚫 Admin access only."), show_alert=True)
+        return
+    await query.answer(ui_text("📍 Removing configured-channel pins…"))
+    report = await unpin_configured_channels()
+    MESSAGE_MENU_PENDING.pop(uid, None)
+    await render(query, ui.unpin_complete_text(report), ui.admin_back_keyboard())
+
+
+@callback_action("msgmenu:close")
+async def cb_msgmenu_close(client, query):
+    MESSAGE_MENU_PENDING.pop(query.from_user.id, None)
+    await query.answer(ui_text("Menu closed."))
+    try:
+        await query.message.delete()
+    except Exception:
+        pass
+
+
+@bot.on_message(filters.command("unpin") & (filters.private | filters.channel | filters.group))
+@owner_only
+async def unpin_handler(client, message):
+    report = await unpin_configured_channels()
+    await say(message, ui.unpin_complete_text(report), reply_markup=ui.back_keyboard())
+
+
 @bot.on_message(filters.command("pin") & (filters.private | filters.channel | filters.group))
 @admin_only
 async def pin_handler(client, message):
+    reply = getattr(message, "reply_to_message", None)
+    if reply is not None:
+        payload = campaign_payload_from_message(reply)
+        if payload is None:
+            await say(message, "❌ I could not read that replied-to message.")
+            return
+        report = await deliver_campaign_payload(payload, pin=True)
+        await say(message, ui.broadcast_complete_text(report, pin=True),
+                  reply_markup=ui.back_keyboard())
+        return
     chat_id, title, msg_id = await resolve_pin_scope(message)
     if chat_id is None:
         if title == "no_target":
@@ -5962,6 +6710,7 @@ WIZARD_KIND_DM = "dm"
 WIZARD_KIND_BROADCAST = "broadcast"
 WIZARD_KIND_CHANNEL = "channel"
 WIZARD_KIND_PIN = "pin"
+WIZARD_KIND_CAMPAIGN = "campaign"
 
 
 def normalize_button_url(value: str) -> str | None:
@@ -6002,13 +6751,11 @@ async def deliver_wizard_payload(wizard, uid):
     kind = payload.get("kind")
     sent = []
     if kind == WIZARD_KIND_DM:
-        sent.append(await bot.send_message(payload["chat_id"], payload.get("text") or "",
-                                           reply_markup=keyboard,
-                                           parse_mode=ParseMode.DISABLED))
+        sent.append(await deliver_staged_text_to_chat(
+            payload["chat_id"], payload.get("text") or "", reply_markup=keyboard))
     elif kind == WIZARD_KIND_CHANNEL:
-        message = await bot.send_message(payload["chat_id"], payload.get("text") or "",
-                                         reply_markup=keyboard,
-                                         parse_mode=ParseMode.DISABLED)
+        message = await deliver_staged_text_to_chat(
+            payload["chat_id"], payload.get("text") or "", reply_markup=keyboard)
         sent.append(message)
         message_id = getattr(message, "id", None)
         wizard["payload"]["message_id"] = message_id
@@ -6028,18 +6775,20 @@ async def deliver_wizard_payload(wizard, uid):
                               reply_markup=ui.pin_offer_keyboard())
     elif kind == WIZARD_KIND_BROADCAST:
         sent = await run_button_broadcast(payload.get("text") or "", buttons)
+    elif kind == WIZARD_KIND_CAMPAIGN:
+        return await deliver_campaign_payload(payload, buttons)
     elif kind == WIZARD_KIND_PIN:
         message_id = payload.get("message_id")
         if buttons and message_id:
-            #: Telegram cannot add a keyboard to an existing message, so the
-            #: pinned message is re-sent with the buttons and pinned again.
+            #: Telegram cannot add a keyboard to an existing message, so
+            #: re-send the content with its finished keyboard, staging through
+            #: the dump first when it is configured.
             try:
-                refreshed = await bot.send_message(
-                    payload["chat_id"], payload.get("text") or "📌", reply_markup=keyboard,
-                    parse_mode=ParseMode.DISABLED)
+                refreshed = await deliver_staged_text_to_chat(
+                    payload["chat_id"], payload.get("text") or "📌",
+                    reply_markup=keyboard)
                 sent.append(refreshed)
-                await floodwait_guard(bot.pin_chat_message, payload["chat_id"],
-                                      getattr(refreshed, "id", 0))
+                await best_effort_pin(payload["chat_id"], getattr(refreshed, "id", None))
             except Exception as exc:
                 print(f"[PIN BUTTONS FAILED] {exc}", flush=True)
     return sent
@@ -6086,11 +6835,14 @@ async def cb_btnwiz_skip(client, query):
         return
     await query.answer(ui_text("📤 Sending without buttons…"))
     try:
-        await deliver_wizard_payload(wizard, query.from_user.id)
+        result = await deliver_wizard_payload(wizard, query.from_user.id)
     except Exception as exc:
         await render(query, f"❌ **Sending failed**\n\n{exc}", ui.admin_back_keyboard())
         return
-    await render(query, ui.message_sent_text(), ui.admin_back_keyboard())
+    if (wizard.get("payload") or {}).get("kind") == WIZARD_KIND_CAMPAIGN:
+        await render(query, ui.broadcast_complete_text(result or {}), ui.admin_back_keyboard())
+    else:
+        await render(query, ui.message_sent_text(), ui.admin_back_keyboard())
 
 
 @callback_action("btnwiz:cancel")
@@ -6141,14 +6893,17 @@ async def handle_button_wizard_callback(client, query, data: str):
         BUTTON_DRAFT.pop(uid, None)
         await query.answer(ui_text("📤 Sending…"))
         try:
-            await deliver_wizard_payload(wizard, uid)
+            result = await deliver_wizard_payload(wizard, uid)
         except Exception as exc:
             await render(query, f"❌ **Sending failed**\n\n{exc}", ui.admin_back_keyboard())
             return
-        await render(query, ui.message_sent_text() +
-                     ("\n\n" + ui.buttons_preview_text(wizard["buttons"])
-                      if wizard.get("buttons") else ""),
-                     ui.admin_back_keyboard())
+        if (wizard.get("payload") or {}).get("kind") == WIZARD_KIND_CAMPAIGN:
+            text = ui.broadcast_complete_text(result or {})
+        else:
+            text = ui.message_sent_text() + (
+                "\n\n" + ui.buttons_preview_text(wizard["buttons"])
+                if wizard.get("buttons") else "")
+        await render(query, text, ui.admin_back_keyboard())
         return
     await query.answer(ui_text("⚠️ Unknown action."), show_alert=True)
 
@@ -6368,20 +7123,21 @@ async def post_giveaway_message(gw, count, *, repost=False):
     channel = gw.get("channel_id")
     now = datetime.utcnow()
     GIVEAWAY_GOVERNOR.pause_ms(f"gw:{channel or 'dm'}", time.monotonic())
+    parse_mode = ParseMode.DISABLED if gw.get("custom_message") else ParseMode.HTML
     if not channel:
-        await dm_user(OWNER_ID, text, keyboard)
+        await dm_user(OWNER_ID, text, keyboard, parse_mode=parse_mode)
         await update_giveaway({"last_post_at": now, "rendered_count": int(count)})
         return None
     try:
         message = await bot.send_message(channel, text, reply_markup=keyboard,
-                                         parse_mode=ParseMode.HTML)
+                                         parse_mode=parse_mode)
     except FloodWait as error:
         GIVEAWAY_STATS["pauses"] += 1
         GIVEAWAY_GOVERNOR.penalize(f"gw:{channel}", floodwait_seconds(error))
         await floodwait_sleep(floodwait_seconds(error))
         try:
             message = await bot.send_message(channel, text, reply_markup=keyboard,
-                                             parse_mode=ParseMode.HTML)
+                                             parse_mode=parse_mode)
         except Exception as exc:
             print(f"[GIVEAWAY POST FAILED] {exc}", flush=True)
             return None
@@ -6406,9 +7162,10 @@ async def refresh_giveaway_count(gw, count):
         return False
     text = ui.giveaway_public_text(gw, count, ends_label=giveaway_ends_label(gw))
     keyboard = ui.giveaway_public_keyboard(giveaway_link(gw.get("token") or ""))
+    parse_mode = ParseMode.DISABLED if gw.get("custom_message") else ParseMode.HTML
     try:
         await floodwait_guard(bot.edit_message_text, channel, int(message_id), text,
-                              reply_markup=keyboard, parse_mode=ParseMode.HTML)
+                              reply_markup=keyboard, parse_mode=parse_mode)
         GIVEAWAY_STATS["refreshes"] += 1
         await update_giveaway({"rendered_count": int(count)})
         return True
@@ -6476,8 +7233,9 @@ async def giveaway_loop():
 #  delivery report when the last message has landed.
 # --------------------------------------------------------------------------- #
 
-async def giveaway_broadcast_dm(uid, text, keyboard, report) -> str:
-    """Deliver one giveaway DM.  Returns ``sent`` / ``blocked`` / ``paused``.
+async def giveaway_broadcast_dm(uid, text, keyboard, report, *,
+                                raw_text: bool = False, parse_mode=None) -> str:
+    """Deliver one giveaway DM and best-effort pin it. Returns its send outcome.
 
     A FloodWait is never an error here: it is slept out and retried up to
     :data:`config.GIVEAWAY_BROADCAST_FLOOD_RETRIES` times, and only a user who
@@ -6486,7 +7244,33 @@ async def giveaway_broadcast_dm(uid, text, keyboard, report) -> str:
     """
     for attempt in range(1, GIVEAWAY_BROADCAST_FLOOD_RETRIES + 2):
         try:
-            await say_message(bot, int(uid), text, reply_markup=keyboard)
+            if raw_text:
+                sent_message = await bot.send_message(
+                    int(uid), text, reply_markup=keyboard,
+                    parse_mode=parse_mode or ParseMode.DISABLED)
+            else:
+                kwargs = {"reply_markup": keyboard}
+                if parse_mode is not None:
+                    kwargs["parse_mode"] = parse_mode
+                sent_message = await say_message(bot, int(uid), text, **kwargs)
+            message_id = getattr(sent_message, "id", None)
+            if message_id is not None:
+                report["pin_attempted"] = int(report.get("pin_attempted", 0)) + 1
+                try:
+                    await bot.pin_chat_message(int(uid), int(message_id),
+                                               disable_notification=False)
+                    report["pin_succeeded"] = int(report.get("pin_succeeded", 0)) + 1
+                except FloodWait as pin_error:
+                    seconds = floodwait_seconds(pin_error)
+                    report["pauses"] += 1
+                    report["wait_seconds"] += float(seconds)
+                    report["pin_failed"] = int(report.get("pin_failed", 0)) + 1
+                    print(f"[GIVEAWAY DM PIN FLOODWAIT] user={uid}: {seconds}s", flush=True)
+                    await floodwait_sleep(seconds)
+                except Exception as pin_error:
+                    report["pin_failed"] = int(report.get("pin_failed", 0)) + 1
+                    print(f"[GIVEAWAY DM PIN FAILED] user={uid}: "
+                          f"{type(pin_error).__name__}: {pin_error}", flush=True)
             return "sent"
         except FloodWait as error:
             seconds = floodwait_seconds(error)
@@ -6506,17 +7290,27 @@ async def giveaway_broadcast_dm(uid, text, keyboard, report) -> str:
 
 
 async def run_giveaway_broadcast(gw) -> dict:
-    """Send the announcement to every user and return the delivery report."""
-    text = ui.giveaway_broadcast_text(gw)
+    """Send the announcement to every bot user and return delivery + pin counts."""
+    custom = bool(gw.get("custom_message"))
+    if custom:
+        count = await count_giveaway_participants(gw.get("_id") or "active")
+        text = ui.giveaway_public_text(gw, count,
+                                       ends_label=giveaway_ends_label(gw))
+        parse_mode = ParseMode.DISABLED
+    else:
+        text = ui.giveaway_broadcast_text(gw)
+        parse_mode = None
     keyboard = ui.giveaway_broadcast_keyboard(giveaway_link(gw.get("token") or ""))
     report = {"total": 0, "sent": 0, "failed": 0, "blocked": 0, "paused": 0,
-              "pauses": 0, "wait_seconds": 0.0}
+              "pauses": 0, "wait_seconds": 0.0,
+              "pin_attempted": 0, "pin_succeeded": 0, "pin_failed": 0}
     users = await get_all_users()
-    report["total"] = len(users)
     recipients = [int(entry.get("user_id") or 0) for entry in users]
     recipients = [uid for uid in recipients if uid and uid != OWNER_ID]
+    report["total"] = len(recipients)
     for index, uid in enumerate(recipients):
-        outcome = await giveaway_broadcast_dm(uid, text, keyboard, report)
+        outcome = await giveaway_broadcast_dm(
+            uid, text, keyboard, report, raw_text=custom, parse_mode=parse_mode)
         report[outcome] = int(report.get(outcome, 0)) + 1
         if index + 1 < len(recipients):
             await broadcast_gap()      # between two sends, never after the last
@@ -6683,6 +7477,12 @@ async def handle_giveaway_callback(client, query, data: str):
         await query.answer(ui_text("This giveaway wizard expired — run /giveaway again."),
                            show_alert=True)
         return
+    if rest == "cancel":
+        GIVEAWAY_WIZARD.pop(uid, None)
+        pending_action.pop(uid, None)
+        await query.answer(ui_text("Giveaway setup cancelled."))
+        await render(query, ui.action_cancelled_text(), ui.admin_back_keyboard())
+        return
     if rest.startswith("benefit"):
         _, _, index = rest.partition(":")
         try:
@@ -6691,11 +7491,22 @@ async def handle_giveaway_callback(client, query, data: str):
             await query.answer(ui_text("⚠️ Unknown suggestion."), show_alert=True)
             return
         wizard["benefit"] = benefit
+        wizard["step"] = "custom"
+        pending_action[uid] = "gw_custom_message"
+        await query.answer(ui_text("💡 Suggestion saved."))
+        await render(query, ui.giveaway_step_custom_text(),
+                     ui.giveaway_step_custom_keyboard())
+        return
+    if rest.startswith("custom"):
+        _, _, action = rest.partition(":")
+        if action != "skip":
+            await query.answer(ui_text("⚠️ Unknown custom-message action."), show_alert=True)
+            return
+        wizard["custom_message"] = None
         wizard["step"] = "ends"
         pending_action.pop(uid, None)
-        await query.answer(ui_text("💡 Suggestion saved."))
-        await render(query, ui.giveaway_step_end_text() + f"\n\n✨ **Benefit:** {benefit}",
-                     ui.giveaway_step_end_keyboard())
+        await query.answer(ui_text("⏭ Using the standard announcement."))
+        await render(query, ui.giveaway_step_end_text(), ui.giveaway_step_end_keyboard())
         return
     if rest.startswith("end"):
         _, _, value = rest.partition(":")
@@ -6789,6 +7600,8 @@ async def create_giveaway_from_wizard(uid, wizard, channel_id, channel_title):
         "created_by": int(uid),
         "channel_id": channel_id,
         "participant_count": 0,
+        "rendered_count": 0,
+        "custom_message": wizard.get("custom_message") or None,
     }
     if not await create_giveaway(doc):
         return None
@@ -6805,7 +7618,8 @@ async def create_giveaway_from_wizard(uid, wizard, channel_id, channel_title):
     #: background task, so the wizard is never blocked by a long user list.
     if gw:
         try:
-            audience = len(await get_all_users())
+            audience = sum(1 for row in await get_all_users()
+                           if int(row.get("user_id") or 0) != OWNER_ID)
         except Exception:
             audience = 0
         start_giveaway_broadcast(gw)
@@ -6940,8 +7754,17 @@ async def giveaway_wizard_text(message, uid, text) -> bool:
     if step == "benefit":
         benefit = str(text).strip()[:GIVEAWAY_MAX_BENEFIT_CHARS]
         wizard["benefit"] = benefit
+        wizard["step"] = "custom"
+        pending_action[uid] = "gw_custom_message"
+        await say(message, ui.giveaway_step_custom_text(),
+                  reply_markup=ui.giveaway_step_custom_keyboard())
+        return True
+    if step == "custom":
+        custom = str(text or "").strip()[:4096]
+        wizard["custom_message"] = custom or None
         wizard["step"] = "ends"
-        await say(message, ui.giveaway_step_end_text() + f"\n\n✨ **Benefit:** {benefit}",
+        pending_action.pop(uid, None)
+        await say(message, ui.giveaway_step_end_text(),
                   reply_markup=ui.giveaway_step_end_keyboard())
         return True
     return False
@@ -6962,7 +7785,8 @@ ADMIN_PAGES = [
     ("🧠 Engine & Channels",
      ["setengine", "setchat", "delchat"]),
     ("📢 Community",
-     ["broadcast", "sendmsg", "ban", "unban", "banlist", "feedbacks"]),
+     ["broadcast", "botcast", "cmsg", "menu", "unpin", "sendmsg", "ban", "unban",
+      "banlist", "feedbacks"]),
     ("📢 Force Sub",
      ["setfsub", "fsublist", "delfsub", "fsublabel", "fsubcheck"]),
     ("⚙️ Administration",
@@ -6979,6 +7803,7 @@ ADMIN_PANEL_COMMANDS = tuple(cmd for _, commands in ADMIN_PAGES for cmd in comma
 #: Commands that need a value typed in the next message.
 ADMIN_VALUE_EXAMPLES = {
     "broadcast": "Your announcement text",
+    "botcast": "Your message for bot users",
     "sendmsg": "123456789 Your message",
     "ban": "123456789",
     "unban": "123456789",
@@ -7004,7 +7829,8 @@ ADMIN_OWNER_COMMANDS = {
     "addqr", "delqr", "removeqr", "clearlogs",
     # Owner tools: pin control, the dump channel, channel posts, the native
     # engine diagnostics and the giveaway control panel.
-    "pin", "pinned", "setdump", "deldump", "dump", "post", "native",
+    "pin", "pinned", "unpin", "menu", "cmsg", "botcast",
+    "setdump", "deldump", "dump", "post", "native",
     "giveaway", "participants", "endgiveaway",
 }
 
@@ -7020,6 +7846,10 @@ ADMIN_OWNER_COMMANDS = {
 COMMAND_HANDLERS = {
     "pin": pin_handler,
     "pinned": pinned_handler,
+    "unpin": unpin_handler,
+    "menu": message_menu_handler,
+    "cmsg": cmsg_handler,
+    "botcast": botcast_handler,
     "setdump": setdump_handler,
     "deldump": deldump_handler,
     "dump": dump_status_handler,
@@ -7201,6 +8031,10 @@ def admin_panel_text(page=0):
 ADMIN_INLINE_HANDLERS = {
     "pin": pin_handler,
     "pinned": pinned_handler,
+    "unpin": unpin_handler,
+    "menu": message_menu_handler,
+    "cmsg": cmsg_handler,
+    "botcast": botcast_handler,
     "setdump": setdump_handler,
     "deldump": deldump_handler,
     "dump": dump_status_handler,
@@ -7458,7 +8292,7 @@ async def callback_handler(client, query):
     "settings", "language", "refer", "bookmark", "bookmarks",
     "favorite", "favorites", "share", "feedback", "premium",
     "stats", "users", "loggedusers", "activeusers", "newusers", "topusers",
-    "broadcast", "ban", "unban", "banlist", "finduser",
+    "broadcast", "botcast", "menu", "cmsg", "unpin", "ban", "unban", "banlist", "finduser",
     "userinfo", "addpremium", "removepremium", "premiumlist",
     "addadmin", "removeadmin", "adminlist", "setfsub", "fsublist", "delfsub",
     "fsublabel", "fsubcheck", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export",
@@ -7499,16 +8333,10 @@ async def text_handler(client, message):
             return
         action = admin_pending.pop(user_id)
         handlers = {"sendmsg": sendmsg_handler, "ban": ban_handler, "unban": unban_handler, "finduser": finduser_handler, "userinfo": userinfo_handler, "addpremium": addpremium_handler, "removepremium": removepremium_handler, "addadmin": addadmin_handler, "removeadmin": removeadmin_handler, "setfsub": setfsub_handler, "fsublist": fsublist_handler, "delfsub": delfsub_handler, "fsublabel": fsublabel_handler, "fsubcheck": fsubcheck_handler, "maintenance": maintenance_handler, "setchat": setchat_handler, "delchat": delchat_handler}
-        if action == "broadcast":
-            users = await get_all_users()
-            sent = 0
-            for entry in users:
-                try:
-                    await say_message(bot, entry["user_id"], text)
-                    sent += 1
-                except Exception:
-                    pass
-            await say(message, f"Broadcast complete: sent to {sent} users.")
+        if action in {"broadcast", "botcast"}:
+            report = await run_text_broadcast(text, users_only=(action == "botcast"))
+            await say(message, ui.broadcast_complete_text(
+                report, users_only=(action == "botcast")))
             return
         handler = handlers.get(action)
         if handler:
@@ -7564,6 +8392,12 @@ async def text_handler(client, message):
             del pending_action[user_id]
             await say(message, ui.feedback_saved_text(), reply_markup=ui.back_keyboard())
             return
+        elif action == "cmsg_text":
+            pending_action.pop(user_id, None)
+            payload = {"kind": WIZARD_KIND_CAMPAIGN, "text": text,
+                       "preview": text.replace("\\n", " ")[:80]}
+            await start_button_wizard(message, payload)
+            return
         elif action == "setchat":
             del pending_action[user_id]
             await start_setchat_flow(message, text)
@@ -7574,20 +8408,29 @@ async def text_handler(client, message):
             #: ends when it succeeds or the user sends /cancel.
             await register_shared_channel(message, user_id)
             return
-        elif action == "setdump":
-            #: The owner types the dump channel reference (link/@name/id); the
-            #: share-sheet button is the other way in.
-            del pending_action[user_id]
+        elif action in {"setdump", "setdump_share"}:
+            #: The picker is the primary flow; a typed link/@username/id remains
+            #: a convenient fallback.
+            pending_action.pop(user_id, None)
             await finish_setdump(message, text)
             return
         elif action == "gw_benefit":
             benefit = text.strip()[:GIVEAWAY_MAX_BENEFIT_CHARS]
-            del pending_action[user_id]
             wizard = GIVEAWAY_WIZARD.get(user_id) or {}
             wizard["benefit"] = benefit
-            wizard["step"] = "ends"
+            wizard["step"] = "custom"
             GIVEAWAY_WIZARD[user_id] = wizard
-            await say(message, ui.giveaway_step_end_text() + f"\n\n✨ **Benefit:** {benefit}",
+            pending_action[user_id] = "gw_custom_message"
+            await say(message, ui.giveaway_step_custom_text(),
+                      reply_markup=ui.giveaway_step_custom_keyboard())
+            return
+        elif action == "gw_custom_message":
+            wizard = GIVEAWAY_WIZARD.get(user_id) or {}
+            wizard["custom_message"] = text.strip()[:4096] or None
+            wizard["step"] = "ends"
+            pending_action.pop(user_id, None)
+            GIVEAWAY_WIZARD[user_id] = wizard
+            await say(message, ui.giveaway_step_end_text(),
                       reply_markup=ui.giveaway_step_end_keyboard())
             return
         elif action == "gw_days":
