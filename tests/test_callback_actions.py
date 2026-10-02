@@ -81,11 +81,8 @@ async def test_login_button_starts_login_flow(db, press):
 
 
 @pytest.mark.asyncio
-async def test_login_button_with_existing_session(db, press, monkeypatch):
-    async def fake_client(user_id):
-        return object()
-
-    monkeypatch.setattr(main, "get_user_client", fake_client)
+async def test_login_button_with_existing_session(db, press):
+    main.user_clients[1001] = object()
     message = FakeMessage()
     await press(message, "cmd_login")
     assert sc("Already logged in") in message.shown_text

@@ -7,6 +7,7 @@ in-memory fake — the tests never touch MongoDB or Telegram.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as _dt
 import os
 import sys
@@ -905,6 +906,11 @@ def fake_host(monkeypatch) -> FakeHost:
 @pytest.fixture(autouse=True)
 def clean_state(monkeypatch):
     """Make sure no test leaks in-memory bot state into the next one."""
+    monkeypatch.setattr(main, "PROFILE_REFRESH_TASKS", {})
+    monkeypatch.setattr(main, "BACKGROUND_TASKS", set())
+    monkeypatch.setattr(main, "CAMPAIGN_LOCK", asyncio.Lock())
+    monkeypatch.setattr(main, "BROADCAST_PAUSED_UNTIL", 0.0)
+    monkeypatch.setattr(main, "COMMAND_REGISTRATION_TASK", None)
     monkeypatch.setattr(main, "user_clients", {})
     monkeypatch.setattr(main, "login_pending", {})
     monkeypatch.setattr(main, "pending_action", {})
@@ -1004,7 +1010,16 @@ class FakeBot:
         self.deleted: list = []
         self.pinned: list = []
         self.unpinned: list = []
+        self.registered_commands = []
+        self.command_scopes = []
         self.edited: list = []
+
+    async def delete_bot_commands(self, **kwargs):
+        self.registered_commands.clear()
+
+    async def set_bot_commands(self, commands, **kwargs):
+        self.registered_commands = commands
+        self.command_scopes.append(kwargs.get("scope"))
 
     async def send_message(self, chat_id, text, **kwargs):
         msg = FakeMessage(text=text, message_id=len(self.sent) + 1000)
@@ -1200,3 +1215,9 @@ def press():
         return query
 
     return _press
+
+
+async def drain_background():
+    """Wait for finite command jobs, not TTL/giveaway schedulers."""
+    while main.BACKGROUND_TASKS:
+        await asyncio.gather(*list(main.BACKGROUND_TASKS))

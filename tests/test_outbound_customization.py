@@ -8,11 +8,18 @@ import pytest
 
 import main
 import ui
-from conftest import DEFAULT_USER_ID, FakeChat, FakeMessage, FakeUser, sc
+from conftest import DEFAULT_USER_ID, FAKE_BOT_ID, FakeChat, FakeMessage, FakeUser, sc, make_member, drain_background
+from pyrogram.enums import ChatMemberStatus
 
 OWNER = main.OWNER_ID
 USER = DEFAULT_USER_ID
 CHANNEL = -100777
+
+
+@pytest.fixture(autouse=True)
+def staging_permissions(fake_bot):
+    fake_bot.members[(CHANNEL, FAKE_BOT_ID)] = make_member(
+        ChatMemberStatus.ADMINISTRATOR, can_post_messages=True, can_delete_messages=True)
 
 
 def texts(message):
@@ -39,11 +46,12 @@ async def test_broadcast_replies_are_staged_then_copied_to_channel_and_users(
     request.reply_to_message = source_message()
 
     await main.broadcast_handler(None, request)
+    await drain_background()
 
     assert {item[0] for item in fake_bot.copies} == {CHANNEL, USER}
     assert (CHANNEL, OWNER, 77) in fake_bot.copies
     stage_id = 5000  # FakeBot assigns this ID to the temporary staged copy.
-    assert (CHANNEL, CHANNEL, stage_id) in fake_bot.copies
+    assert (CHANNEL, CHANNEL, stage_id) not in fake_bot.copies
     assert (USER, CHANNEL, stage_id) in fake_bot.copies
     assert (CHANNEL, stage_id) in fake_bot.deleted
     assert sc("BROADCAST COMPLETE") in texts(request)
@@ -56,6 +64,7 @@ async def test_botcast_sends_only_to_bot_users(db, fake_bot):
     request = owner_message("/botcast Hello bot users")
 
     await main.botcast_handler(None, request)
+    await drain_background()
 
     destinations = {entry["chat_id"] for entry in fake_bot.sent}
     assert USER in destinations
@@ -70,10 +79,11 @@ async def test_broadcast_posts_typed_text_to_channel_and_bot_users(db, fake_bot)
     request = owner_message("/broadcast New release")
 
     await main.broadcast_handler(None, request)
+    await drain_background()
 
     destinations = {entry["chat_id"] for entry in fake_bot.sent}
-    assert {CHANNEL, USER} <= destinations
-    assert sc("Channels: 1/1") in texts(request)
+    assert destinations == {USER}
+    assert sc("Channels: 0/0") in texts(request)
     assert sc("Bot users: 1/1") in texts(request)
 
 
@@ -90,8 +100,9 @@ async def test_menu_offers_reply_actions_and_pin_broadcasts_then_pins(
     assert {"msgmenu:pin", "msgmenu:unpin", "msgmenu:broadcast",
             "msgmenu:botcast", "msgmenu:cmsg"} <= set(request.callback_data())
     await press(request, "msgmenu:pin")
+    await drain_background()
 
-    assert {CHANNEL, USER} <= {chat_id for chat_id, _message_id in fake_bot.pinned}
+    assert {USER} == {chat_id for chat_id, _message_id in fake_bot.pinned}
     assert sc("Private-chat pins are best-effort") in texts(request)
     stage_id = 5000  # FakeBot assigns this ID to the temporary staged copy.
     assert (CHANNEL, stage_id) in fake_bot.deleted
@@ -109,8 +120,9 @@ async def test_cmsg_stages_a_custom_message_with_coloured_buttons(db, fake_bot, 
     await main.text_handler(None, FakeMessage(text="Join now", user=FakeUser(OWNER)))
     await main.text_handler(None, FakeMessage(text="example.com", user=FakeUser(OWNER)))
     await press(request, "btnwiz:send")
+    await drain_background()
 
-    assert {CHANNEL, USER} <= {chat_id for chat_id, _from_chat, _message in fake_bot.copies}
+    assert {USER} == {chat_id for chat_id, _from_chat, _message in fake_bot.copies}
     staged = fake_bot.sent[0]
     assert staged["chat_id"] == CHANNEL and staged["text"] == "Join the launch"
     assert staged["reply_markup"].inline_keyboard[0][0].style is ui.BUTTON_SUCCESS

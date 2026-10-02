@@ -35,6 +35,7 @@ import pytest
 
 import config
 import main
+from conftest import drain_background
 import ui
 from conftest import (DEFAULT_USER_ID, FAKE_BOT_ID, FakeChat, FakeMessage,
                       FakeUser, make_member, make_query, sc)
@@ -653,21 +654,24 @@ def test_the_echo_window_is_long_enough_for_a_slow_connection():
 #  4. /pin — three targets, and a distinct screen for every refusal
 # --------------------------------------------------------------------------- #
 
-async def test_a_reply_is_broadcast_and_pinned_in_the_configured_channel(db, bot):
+async def test_a_reply_is_broadcast_and_pinned_only_in_user_dms(db, bot):
+    await db.add_user(USER, "Reader")
     await db.set_dump_channel(CHANNEL, "Dump", "dump", "channel")
     message = FakeMessage(text="/pin", user=FakeUser(OWNER))
     message.chat = FakeChat(PICKED, "channel", "Picked Channel")
     message.reply_to_message = FakeMessage(message_id=31, user=FakeUser(OWNER))
 
     await main.pin_handler(None, message)
+    await drain_background()
 
-    assert bot.pinned[-1][0] == CHANNEL
+    assert bot.pinned[-1][0] == USER
     assert bot.pinned[-1][1] != 31
     assert sc("BROADCAST COMPLETE") in texts(message)
 
 
-async def test_a_link_pins_in_the_chat_the_link_names(db, bot):
-    """A link is a destination: it must not be re-pointed at the dump channel."""
+async def test_a_link_selects_source_for_dm_pin_broadcast(db, bot):
+    """A link selects the source; only registered user DMs receive pins."""
+    await db.add_user(USER, "Reader")
     await db.set_dump_channel(CHANNEL, "Dump", "dump", "channel")
     bot.chats[PICKED] = SimpleNamespace(id=PICKED, title="Picked Channel",
                                         username="picked", type="channel")
@@ -675,26 +679,34 @@ async def test_a_link_pins_in_the_chat_the_link_names(db, bot):
                           user=FakeUser(OWNER))
 
     await main.pin_handler(None, message)
+    await drain_background()
 
-    assert bot.pinned[-1] == (PICKED, 44), "the link's own chat, not the dump"
+    assert bot.pinned[-1][0] == USER
+    assert (CHANNEL, PICKED, 44) in bot.copies, "link selects the source only"
 
 
-async def test_a_bare_id_pins_in_the_dump_channel(db, bot):
+async def test_a_bare_id_selects_dump_source_for_dm_pin_broadcast(db, bot):
+    await db.add_user(USER, "Reader")
     await db.set_dump_channel(CHANNEL, "Dump", "dump", "channel")
     message = FakeMessage(text="/pin 77", user=FakeUser(OWNER))
 
     await main.pin_handler(None, message)
+    await drain_background()
 
-    assert bot.pinned[-1] == (CHANNEL, 77)
+    assert bot.pinned[-1][0] == USER
+    assert (CHANNEL, CHANNEL, 77) in bot.copies
 
 
-async def test_a_bare_id_without_a_dump_channel_pins_in_this_chat(db, bot):
+async def test_a_bare_id_without_dump_selects_private_source(db, bot):
+    await db.add_user(USER, "Reader")
     message = FakeMessage(text="/pin 77", user=FakeUser(OWNER))
     message.chat = FakeChat(OWNER)
 
     await main.pin_handler(None, message)
+    await drain_background()
 
-    assert bot.pinned[-1] == (OWNER, 77)
+    assert bot.pinned[-1][0] == USER
+    assert (USER, OWNER, 77) in bot.copies
 
 
 async def test_an_already_pinned_message_is_reported_as_such(db, bot):
@@ -704,7 +716,9 @@ async def test_an_already_pinned_message_is_reported_as_such(db, bot):
                                          pinned_message=SimpleNamespace(id=77))
     message = FakeMessage(text="/pin 77", user=FakeUser(OWNER))
 
-    await main.pin_handler(None, message)
+    ok, reason = await main.pin_in_chat(CHANNEL, 77)
+    assert not ok
+    await main.say(message, ui.pin_failed_text(reason))
 
     assert sc("Already pinned") in texts(message)
     assert bot.pinned == [], "nothing was pinned a second time"
@@ -715,7 +729,9 @@ async def test_missing_pin_rights_are_reported(db, bot):
     bot.pin_chat_message = AsyncMock(side_effect=ChatAdminRequired())
     message = FakeMessage(text="/pin 77", user=FakeUser(OWNER))
 
-    await main.pin_handler(None, message)
+    ok, reason = await main.pin_in_chat(CHANNEL, 77)
+    assert not ok
+    await main.say(message, ui.pin_failed_text(reason))
 
     assert sc("I cannot pin here") in texts(message)
     assert sc("Pin Messages") in texts(message)
@@ -726,7 +742,9 @@ async def test_no_access_to_the_chat_is_reported(db, bot):
     bot.get_chat = AsyncMock(side_effect=ChannelPrivate())
     message = FakeMessage(text="/pin 77", user=FakeUser(OWNER))
 
-    await main.pin_handler(None, message)
+    ok, reason = await main.pin_in_chat(CHANNEL, 77)
+    assert not ok
+    await main.say(message, ui.pin_failed_text(reason))
 
     assert sc("I cannot reach that chat") in texts(message)
     assert bot.pinned == []
@@ -738,7 +756,9 @@ async def test_a_floodwait_pause_is_reported(db, bot, monkeypatch):
     bot.get_chat = AsyncMock(side_effect=FloodWait(value=33))
     message = FakeMessage(text="/pin 77", user=FakeUser(OWNER))
 
-    await main.pin_handler(None, message)
+    ok, reason = await main.pin_in_chat(CHANNEL, 77)
+    assert not ok
+    await main.say(message, ui.pin_failed_text(reason))
 
     assert sc("Telegram asked me to slow down") in texts(message)
     assert bot.pinned == []
@@ -749,7 +769,9 @@ async def test_a_missing_message_is_reported(db, bot):
     bot.pin_chat_message = AsyncMock(side_effect=RuntimeError("MESSAGE_ID_INVALID"))
     message = FakeMessage(text="/pin 77", user=FakeUser(OWNER))
 
-    await main.pin_handler(None, message)
+    ok, reason = await main.pin_in_chat(CHANNEL, 77)
+    assert not ok
+    await main.say(message, ui.pin_failed_text(reason))
 
     assert sc("I could not find that message") in texts(message)
 
@@ -760,6 +782,7 @@ async def test_a_link_to_a_chat_that_cannot_be_resolved_is_explained(db, bot):
     bot.get_chat = AsyncMock(side_effect=ChannelPrivate())
 
     await main.pin_handler(None, message)
+    await drain_background()
 
     assert sc("I cannot reach that chat") in texts(message)
     assert bot.pinned == []
@@ -793,5 +816,5 @@ def test_every_pin_reason_renders_its_own_screen():
 def test_the_pin_usage_screen_names_all_three_targets():
     text = ui.pin_usage_text()
     assert "Reply" in text and "message link" in text and "message id" in text
-    assert "dump channel" in text
+    assert "/setdump" in text and "DM" in text
     assert "t.me/" not in text, "no raw link in body copy"
