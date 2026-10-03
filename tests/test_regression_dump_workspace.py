@@ -140,6 +140,7 @@ async def test_fallback_upload_or_text_still_uses_workspace(db, fake_bot, tmp_pa
 @pytest.mark.parametrize('failure', ['permission', 'edit', 'final_copy'])
 async def test_workspace_failures_never_edit_or_send_direct(db, fake_bot, failure):
     await connect_workspace(fake_bot)
+    await main.set_suffix(1001, 'Suffix')  # a custom caption is what routes via the dump
     source = SimpleNamespace(id=77, chat=FakeChat(-100123), text='Body', empty=False)
     fake_bot.messages[77] = source
     if failure == 'permission':
@@ -226,7 +227,8 @@ async def test_setdump_real_bot_authored_button_opens_picker(db, fake_bot):
 
 
 @pytest.mark.parametrize('mode', ['broadcast', 'botcast', 'pin'])
-async def test_campaign_audience_with_dump_also_registered_as_setchat(db, fake_bot, monkeypatch, mode):
+async def test_campaign_audience_with_dump_also_registered_as_setchat(
+        db, fake_bot, monkeypatch, mode, staged_campaigns):
     await connect_workspace(fake_bot)
     monkeypatch.setattr(main, 'get_user_channels', AsyncMock(return_value=[{'chat_id': DUMP}, {'chat_id': DESTINATION}]))
     fake_bot.pin_chat_message = AsyncMock(side_effect=ChatAdminRequired())
@@ -311,8 +313,11 @@ async def test_every_baseline_command_registered_and_reachable(db, fake_bot, nam
     assert name in main.COMMAND_NAMES
     assert callable(main.COMMAND_HANDLERS[name])
     await main.register_telegram_commands()
-    assert name in {command.command for command in fake_bot.registered_commands}
-    assert fake_bot.command_scopes[-1].__class__.__name__ == 'BotCommandScopeAllPrivateChats'
+    #: The owner's own chat carries every command; everybody else gets the
+    #: user commands in the all-private-chats menu (see test_round15_*).
+    owner_menu = fake_bot.menu_for('BotCommandScopeChat', main.OWNER_ID)
+    assert name in {command.command for command in owner_menu}
+    assert fake_bot.menu_for('BotCommandScopeAllPrivateChats') is not None
     if name in main.ADMIN_INLINE_HANDLERS:
         assert name in {n for _, names in main.ADMIN_PAGES for n in names}
         assert '/' + name in main.admin_help_text()
@@ -394,6 +399,7 @@ async def test_oversized_custom_content_stages_every_chunk(db, fake_bot, media):
 
 async def test_upload_failure_does_not_send_to_destination(db, fake_bot, tmp_path):
     await connect_workspace(fake_bot)
+    await main.set_caption(1001, 'Custom')  # a custom caption is what routes via the dump
     source = SimpleNamespace(id=77, empty=False, chat=FakeChat(-100123), text=None,
         caption='body', media=True, photo=True, video=None, document=None, audio=None,
         voice=None, video_note=None, sticker=None, animation=None)
@@ -411,7 +417,7 @@ async def test_upload_failure_does_not_send_to_destination(db, fake_bot, tmp_pat
     assert not file.exists()
 
 
-async def test_failed_campaign_stage_never_uses_source_directly(db, fake_bot):
+async def test_failed_campaign_stage_never_uses_source_directly(db, fake_bot, staged_campaigns):
     await connect_workspace(fake_bot)
     fake_bot.copy_message = AsyncMock(side_effect=ChatAdminRequired())
     with pytest.raises(ChatAdminRequired):

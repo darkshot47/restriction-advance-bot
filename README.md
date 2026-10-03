@@ -22,7 +22,7 @@ Access is stored as three independent flags on the user document — `is_premium
 - A private/restricted link shows the **🔒 Private Channel Access (Premium Only)** pitch with one row: **[ 💎 Buy Premium ] [ 🎁 Earn Points ]**. The same screen is shown for single links, bulk lists and ranges, in private chat and inside a dump channel.
 - Free daily slots are reserved atomically before extraction, including concurrent requests, and refunded on failure/cancellation. The quota resets at **00:00 UTC** (`database.utcnow()`), and hitting it shows the reason plus the same **[ 💎 Buy Premium ] [ 🎁 Earn Points ]** row.
 - `/addpremium USER_ID [DAYS]` never grants immediately: the owner picks one of the **four feature tiers** first, then the **duration**, and only then are the flags written and the user notified. See [Granular VIP grant](#granular-vip-grant-addpremium).
-- Free extractions preserve the source message; with a dump channel configured, caption/attribution edits are applied to a temporary staging copy before the final copy is sent, so recipients do not see an “Edited” label. Premium custom-caption commands remain available; free extractions do not replace the source caption. If Telegram's 1,024-character caption limit leaves no room, the original stays on the media and attribution follows in a separate message. Sticker/video-note attribution is also sent separately because these media cannot have captions. Long text is split without truncation.
+- Free extractions preserve the source message. When the owner has connected a dump channel **and the user has a custom caption in play** (`/setcaption`, `/setprefix` or `/setsuffix`), the content is downloaded into the dump first, the caption/attribution is applied to that temporary copy, and the finished copy is then copied from the dump to the user, so the recipient sees neither a “Forwarded from” header nor an “Edited” label. Every other link is delivered directly and never touches the dump (a free user's attribution on such a link is added the legacy way, by editing the copy). Premium custom-caption commands remain available; free extractions without a custom caption do not replace the source caption. If Telegram's 1,024-character caption limit leaves no room, the original stays on the media and attribution follows in a separate message. Sticker/video-note attribution is also sent separately because these media cannot have captions. Long text is split without truncation.
 
 ## Premium purchase flow
 
@@ -201,6 +201,8 @@ Legacy single-channel documents need no migration script: `database.channels_fro
 
 **Registering a private channel with Telegram's picker.** A private channel has no public link to paste, so `/setchat` offers **📡 Share the channel**; tap it, then tap **📡 Pick my channel** on the reply keyboard. Telegram opens the native channel chooser and sends the selected channel directly to the bot — nothing is posted inside the channel. The owner can instead type a message link, `@username` or numeric id. The bot then verifies requester-admin status, its own posting rights and (where required) that it can read the sample post. The old share-sheet deep links remain recognized for compatibility, but they no longer register a channel by posting a link into it.
 
+**The picker keyboard is temporary.** *📡 Pick my channel* (and *🗄 Pick my dump* for `/setdump`) lives on a Telegram **reply keyboard**, and a reply keyboard stays on the screen until the bot removes it — `one_time_keyboard` only collapses it. So the bot takes it away on **every** way out of the flow: a finished setup (picked, typed, or refused), `/cancel` and the inline **Cancel**, any other command, and any other button. A confirmation that has to carry an inline menu cannot also carry the removal, so in that case the bot sends a one-character silent message with `ReplyKeyboardRemove` and deletes it again at once. A failed attempt that leaves the flow open (the bot is not an admin yet, a bad link) keeps the keyboard for the retry. Tapping a leftover keyboard answers that the chooser is closed, saves nothing and removes it. The first time the bot sees a user after this fix it also clears a keyboard an older version left behind, once, recorded as `reply_keyboard_cleared` on the user document (new accounts are born with it set). If Telegram ever refuses the keyboard itself, the prompt is still sent with an inline **Cancel** and the typed link / `@username` / id keeps working.
+
 For an approval-only chat (invite requests instead of instant joins) the bot sends a join request, asks the owner of that chat to approve it, stores nothing and keeps the wizard alive so **🔍 Check Admin Status** can be pressed again after the approval.
 
 After that, any Telegram link posted in that channel is extracted straight into the channel, following the same public/premium-private rules as private chat. Extraction resolves the owner from the **posting chat id**, so a post in channel 2 uses channel 2's settings and increments channel 2's counter. Requests are serialised per channel with a **3 s cooldown** and every Telegram `FloodWait` becomes a safe pause instead of a crash. In channel mode a "Message not found" notice deletes itself after **5 seconds** (`config.CHANNEL_CLEANUP_SECONDS`), and the bot ignores its own posts so it can never loop on its own status messages.
@@ -242,31 +244,43 @@ Each channel handler is registered with `filters.private`, and `channel_dump_han
 
 ## Owner dump channel (`/setdump`, `/deldump`, `/dump`)
 
-The dump channel is a temporary workspace for downloads and customized outbound
-messages. Whenever `/setdump` is configured, the bot copies content into the
-dump first, applies caption/customization changes there, then copies the finished
-message to its destination. Recipients do not see a *Forwarded from* or *Edited*
-label. Staging copies are deleted after delivery; the mirror TTL is a safety net
-for ordinary queued mirrors or a failed cleanup.
+The dump channel is a temporary workspace for **users' downloads and messages** —
+and only for a user who has a custom caption in play (`/setcaption`,
+`/setprefix` or `/setsuffix`; in a channel batch, the *use my caption* answer must
+also be yes). For such a link the bot downloads the content into the dump first,
+applies the caption there, then copies the finished message from the dump to the
+user. Recipients do not see a *Forwarded from* or *Edited* label (the bot always
+*copies*, it never forwards). The staging copy is deleted right after delivery;
+the TTL is a safety net for a delete Telegram refused.
+
+Everything else never touches the dump: links from users without a custom
+caption, and the owner's own campaigns (`/broadcast`, `/botcast`, `/cMSG`,
+`/sendmsg`, `/pin`) are delivered directly. Nothing is mirrored into the dump
+any more, so the channel only ever shows the staged copies of users' downloads.
+`DUMP_STAGE_CAMPAIGNS=1` puts the campaigns back through the workspace.
 
 * `/setdump` — tap **🗄 Pick my dump** to choose a channel with Telegram's native
   channel picker, or send a channel link, `@username` or numeric id. The
   requester must be a channel administrator, and the bot must be an administrator
   with **Post Messages** and **Delete Messages** rights. Only channels are
-  supported.
+  supported. The chooser asks for the same rights on the user side as on the bot
+  side — Telegram requires the bot's rights to be a subset of the user's, and a
+  button that breaks that rule is rejected as a whole, which used to make
+  `/setdump` answer with nothing. The keyboard disappears again when the setup is
+  done or abandoned (see *The picker keyboard is temporary* above).
 * `/dump` — live status: connection state, current **Post Messages** and **Delete
   Messages** rights, staging readiness, TTL cleanup queue and FloodWait counters.
   Missing or unverified rights are explicitly **not ready**.
 * `/deldump` — owner-only disconnect; acknowledges immediately and cleans queued
   staging copies in the background. Failed immediate deletes retain a TTL retry.
 
-Ordinary mirrors expire after **`DUMP_TTL_SECONDS` (default 600 s = 10 minutes)**.
-Staging is paced and Telegram FloodWaits are respected; the queue is capped at
-`DUMP_QUEUE_LIMIT`. Deletion after delivery does not wait an extra staging
-cooldown. If Telegram refuses the workspace or its finished copy, delivery
-fails clearly: it never silently edits or uploads directly to the recipient.
-A source that cannot be copied may still use download/upload, but that upload
-also goes to the workspace first, including text/media overflow messages.
+A leftover staged copy expires after **`DUMP_TTL_SECONDS` (default 600 s = 10
+minutes)**. Staging is paced and Telegram FloodWaits are respected; the queue is
+capped at `DUMP_QUEUE_LIMIT`. Deletion after delivery does not wait an extra
+staging cooldown. If Telegram refuses the workspace or its finished copy, delivery
+fails clearly: it never silently edits or uploads directly to the recipient. A
+source that cannot be copied may still use download/upload, but that upload also
+goes to the workspace first, including text/media overflow messages.
 
 ## Broadcast and message tools
 
@@ -281,23 +295,39 @@ also goes to the workspace first, including text/media overflow messages.
 * `/cMSG <text>` starts the custom-message builder; reply to a message with
   `/cMSG` to customize that content instead. Add up to three blue, green or red
   inline buttons, then deliver copies to connected channels and bot users.
-  `/sendmsg <user_id> <text>` uses the dump-first direct-DM path when a dump is
-  configured.
+  `/sendmsg <user_id> <text>` sends the DM directly.
 
-Replied-to/customized campaigns stage through the dump, copy the finished content
-(with its inline keyboard, if any) to the final destinations, and remove the
-staging copy after the fan-out. A failed or blocked private DM is reported
-separately from other failures. Typed `/broadcast` and `/botcast` can send new
-text directly (no recipient-side edits); their audiences follow the same rules.
+Replied-to/customized campaigns copy the source message (or send the typed text)
+to each destination with its inline keyboard, if any, attached to the copy itself,
+so nothing is edited afterwards and there is no *Edited* label; the dump channel
+is not involved unless `DUMP_STAGE_CAMPAIGNS=1`. A failed or blocked private DM is
+reported separately from other failures. Typed `/broadcast` and `/botcast` can send
+new text directly (no recipient-side edits); their audiences follow the same rules.
 Broadcasts acknowledge before fan-out and report completion asynchronously,
 with one active campaign, four delivery workers, paced starts and shared
 FloodWait backoff. The existing owner-exclusion policy is retained.
 
-Commands are registered with Telegram in **private-chat scope only**, with all
-existing command names/aliases retained; `/admin` is paginated rather than
-truncated. `/login` and phone/OTP/2FA continuations are accepted only in the
-requester's own private chat, including callbacks. Credentials never enter
-the dump or owner login notifications.
+**The Telegram command menu** (the *Menu* button next to the message box) is
+published by the bot itself with `setMyCommands` — nothing is typed into
+BotFather — as soon as the client starts (the first update is only a fallback).
+Every description is an **emoji followed by what the command does**, `/start`
+comes first, and every command name/alias is retained:
+
+| Who | Where | Commands |
+| --- | --- | --- |
+| everybody | all private chats | `/start` and the 31 user commands (e.g. `🚀 Start the bot and open the main menu`, `📖 Learn how to use the bot`, `🔐 Log in to your Telegram account` …) |
+| admins | their own chat | the user commands plus the admin commands |
+| the owner | their own chat | every command |
+
+Regular users therefore never see the admin or owner commands in the menu (the
+handlers still check who is calling). The default list is cleared first, so the old
+everything-for-everybody menu cannot leak into channels. `/addadmin` and
+`/removeadmin` update that person's own menu at once, an admin's `/start`
+refreshes it, and each scope stays under Telegram's 100-command limit without
+truncation (`/admin` is paginated). The list lives in `ui.USER_MENU` /
+`main.telegram_commands()`. `/login` and phone/OTP/2FA continuations are accepted
+only in the requester's own private chat, including callbacks. Credentials never
+enter the dump or owner login notifications.
 
 ## Pin controls (`/pin`, `/pinned`, `/unpin`)
 
@@ -317,7 +347,8 @@ Direct messages such as `/sendmsg`, channel posts, and `/cMSG` campaigns can use
 the inline-button builder: choose a color (blue / green / red), label and link,
 then send. Up to three buttons are supported; **Cancel** is available at each
 step. Telegram cannot add buttons to a sent message without editing it, so the
-bot attaches the keyboard to the staged copy before it is copied to recipients.
+bot attaches the keyboard to the copy it makes (`copy_message(reply_markup=…)`),
+never to a message it has already delivered.
 Typed `/broadcast` and `/botcast` send their text as supplied; use `/cMSG` or
 `/menu` when a campaign needs custom inline buttons. For `{name}` broadcasts the
 per-recipient text is prepared with `native_engine.prepare_broadcast`, so a
@@ -404,6 +435,8 @@ Set `API_ID`, `API_HASH`, `BOT_TOKEN`, `OWNER_ID`, `BOT_USERNAME` (without `@`),
 | `ENGINE_PYTHON_SPEED_LIMIT_MBPS` | `3.0` | ⚙️ Python Standard download cap; 🚀 C++ Turbo is never capped. `0` disables the cap |
 | `ENGINE_PYTHON_SPEED_BURST_SECONDS` | `0` | burst credit the token bucket starts with (`0` = a transfer of N bytes takes exactly N/rate) |
 | `MAX_USER_CHANNELS` | `2` | dump channels one account may keep connected at once |
+| `DUMP_STAGE_CAMPAIGNS` | `0` | `1` stages the owner's campaigns (`/broadcast`, `/cMSG`, `/pin` …) through the dump channel again; by default the dump only carries users' custom-caption downloads |
+| `DUMP_TTL_SECONDS` | `600` | safety-net expiry of a staged copy whose immediate delete was refused |
 | `RANGE_PREFLIGHT_BATCH` | `100` | message ids requested per `get_messages` call during a range pre-flight scan |
 | `TELEMETRY` | `auto` | `off` renders the HUD without the server-load line |
 | `TELEMETRY_EDIT_INTERVAL` | `2` | minimum seconds between two Telegram edits of the same progress message |
@@ -441,6 +474,7 @@ Seven further suites cover rounds 7-12 and the native engine on the same in-memo
 - `tests/test_round11_presentation_constraints.py` — **the standing presentation constraints** re-checked over every keyboard and screen added in these rounds: the 7-row / 2-button / 28-character mobile budget, ASCII-only `callback_data` that is mutually exclusive with `url`, English-only copy with no Devanagari, and no raw link anywhere in body copy.
 
 - `tests/test_round12_owner_tools_and_giveaways.py` — **the owner tools**: copy-before-download (and the Saved Messages guard), the share-URL deep link (minting, expiry, forgery, registration from inside the channel), the dump channel (/setdump, TTL deletion, queue, FloodWait pause, /deldump), `/pin` and `/pinned` in every form, the inline-button wizard end to end (cancel/skip/over-long label/bad link, broadcast formatting through the C++ pool, channel post + pin offer), and the giveaway engine (step wizard, single active giveaway, deep-link join once, live count, daily re-post, random winner granted, deadline draw) — plus the presentation budget re-checked over every new keyboard and screen.
+- `tests/test_round15_picker_dump_and_menu.py` — **the temporary picker keyboard, `/setdump`, the dump rule and the Telegram menu**: the bot rights of both choosers proved a subset of the user rights (as objects and on the MTProto wire), `/setdump` answering even when Telegram refuses the keyboard and a failed typed reference keeping the picker armed; the keyboard removed on every exit (finished setup by picker/typed/refused, `/cancel`, inline Cancel, another command, another button, a full channel list), kept for a retry, never pulled from a live flow, and a leftover from an older build swept exactly once; the dump used only for a user with a caption, prefix or suffix (text, media and native-copy paths, and never when the batch declined the caption), nothing mirrored, owner campaigns direct by default and staged behind `DUMP_STAGE_CAMPAIGNS`; and the menu — emoji-first descriptions, `/start` first, user vs admin vs owner lists inside Telegram's limits, per-chat scopes kept in sync by `/addadmin`, `/removeadmin` and `/start`, and publication at client start.
 - `tests/test_cpp_engine.py` — **the real C++ engine**: the `.cpp`/`.hpp` sources and build recipe, the loaded library's version/ABI/self-test, the worker pool actually running tasks, and byte-for-byte parity between the native and Python backends for `parse_link`, `scan`, `escape_html`, `escape_batch` and the token bucket, plus the wiring assertions (`main.parse_link`, the command registry and `telemetry.SpeedThrottle`).
 
 The round-six suite (`tests/test_round6_dual_engine.py`, 253 tests) covers the dual-engine overhaul on the same in-memory fakes: the complete `resolve_engine` routing matrix as one parametrised truth table (three controller modes × `models` permission × stored preference × peak), the strict "exceeds the threshold" peak rule, `TrafficMonitor` concurrency accounting including slot restoration when an extraction raises, controller-mode persistence with a fall-back when the store is unreachable, autoscaler escalation and reversion through the real `fetch_and_send` path, and the C++ Turbo worker pool **measured** rather than assumed — a Turbo batch must reach `ENGINE_TURBO_WORKERS` overlapping links while a Python batch must never exceed one. The telemetry HUD is asserted against the specification's exact strings (`📥 Downloading: 68% [████████░░░░]`, `📊 Server Load: CPU 19.2% | RAM 41.8% | Ping 11ms`, `🚀 Speed: 44.2 MB/s • ETA: 00:03`) both as pure functions and as rendered inside a real download, with a deterministic host stand-in so no test reads `/proc` or opens a socket; probe failures, an unknown file size and a raising sampler must all degrade to `--` without breaking the transfer. Also covered: the red `ButtonStyle.DANGER` Models Architecture button and its page, the `/start` badge parity, the switcher (including refusal once the permission is revoked, and the two lock modes), `/setengine` in all three modes plus owner-only enforcement and a failed database write, the four-tier granular grant end to end (tier → flags → duration → stored document → user notice, custom days, `grant_back`, stale and forged callbacks), `/removepremium`, the tiered pricing maths straight from `config`, the Contact Owner `url=` button on every pricing surface, the `/mychannels` dashboard with all four posting-rights outcomes and a forged chat id, the engine block of `/stats`, the twelve admin command pairs, and the real `database.py` functions for every new field against a Mongo mock. Every new keyboard is checked against the standing constraints — at most 7 rows and 2 buttons per row, labels within 28 characters, ASCII-only `callback_data`, links only inside `url=` buttons — and every new screen is checked for English-only copy (no Devanagari) with no raw link in the prose.

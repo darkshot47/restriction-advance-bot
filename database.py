@@ -20,6 +20,12 @@ feedback_col = db["feedback"]
 config_col = db["config"]
 
 
+#: User-document flag: "no picker reply keyboard from an older build can still be
+#: on this user's screen".  New users are born with it set; for everybody else
+#: the bot clears the keyboard once and sets it (see ``main.sweep_stale_picker_keyboard``).
+PICKER_SWEEP_FIELD = "reply_keyboard_cleared"
+
+
 def utcnow():
     """Naive UTC clock — the free daily quota resets at midnight UTC.
 
@@ -73,6 +79,8 @@ async def add_user(user_id, name, username=None):
             "channel_title": None,
             "channel_username": None,
             "channel_type": None,
+            # A brand-new chat can never carry a leftover picker keyboard.
+            PICKER_SWEEP_FIELD: True,
         }
         try:
             await users_col.insert_one(user_data)

@@ -682,7 +682,8 @@ async def test_a_link_selects_source_for_dm_pin_broadcast(db, bot):
     await drain_background()
 
     assert bot.pinned[-1][0] == USER
-    assert (CHANNEL, PICKED, 44) in bot.copies, "link selects the source only"
+    assert (USER, PICKED, 44) in bot.copies, "link selects the source only"
+    assert (CHANNEL, PICKED, 44) not in bot.copies, "the dump is not a delivery step"
 
 
 async def test_a_bare_id_selects_dump_source_for_dm_pin_broadcast(db, bot):
@@ -694,7 +695,8 @@ async def test_a_bare_id_selects_dump_source_for_dm_pin_broadcast(db, bot):
     await drain_background()
 
     assert bot.pinned[-1][0] == USER
-    assert (CHANNEL, CHANNEL, 77) in bot.copies
+    assert (USER, CHANNEL, 77) in bot.copies
+    assert (CHANNEL, CHANNEL, 77) not in bot.copies, "nothing is staged in the dump"
 
 
 async def test_a_bare_id_without_dump_selects_private_source(db, bot):
