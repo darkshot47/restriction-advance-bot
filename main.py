@@ -13,7 +13,10 @@ from flask import Flask
 from threading import Thread
 from datetime import datetime, timedelta
 from pyrogram import Client, filters, raw, utils
-from pyrogram.types import CallbackQuery, BotCommand, BotCommandScopeAllPrivateChats
+from pyrogram.types import (
+    CallbackQuery, BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeChat,
+    ReplyKeyboardMarkup, ReplyKeyboardRemove,
+)
 from pyrogram.enums import ParseMode
 from pyrogram.errors import (
     SessionPasswordNeeded, PhoneCodeInvalid, PhoneNumberInvalid,
@@ -39,6 +42,7 @@ from config import (BOT_USERNAME, FREE_DAILY_LIMIT, FREE_PRIVATE_LINKS, WATERMAR
                     ENGINE_ZERO_COPY_MAX_BYTES, ENGINE_START_GAP_SECONDS,
                     ENGINE_PYTHON_SPEED_LIMIT_MBPS, ENGINE_PYTHON_SPEED_BURST_SECONDS,
                     DUMP_TTL_SECONDS, DUMP_QUEUE_LIMIT, DUMP_COOLDOWN_SECONDS,
+                    DUMP_STAGE_CAMPAIGNS,
                     MAX_MESSAGE_BUTTONS, MAX_BUTTON_LABEL, BUTTON_COLORS,
                     GIVEAWAY_SINGLE_ACTIVE, GIVEAWAY_LIVE_REFRESH_SECONDS,
                     GIVEAWAY_DAILY_INTERVAL_SECONDS, GIVEAWAY_PARTICIPANTS_PER_PAGE,
@@ -52,7 +56,7 @@ from config import (BOT_USERNAME, FREE_DAILY_LIMIT, FREE_PRIVATE_LINKS, WATERMAR
                     GRANT_CUSTOM_DAYS_KEY, GRANT_MAX_DAYS, LEGACY_TIER_ALIASES,
                     TELEMETRY_EDIT_INTERVAL)  # noqa: F401
 from database import (
-    add_user, get_user, is_premium, is_banned, check_daily_limit,
+    add_user, get_user, update_user, is_premium, is_banned, check_daily_limit,
     increment_daily, save_session, get_session, delete_session,
     set_caption, get_caption, del_caption, set_thumbnail, get_thumbnail,
     del_thumbnail, set_prefix, get_prefix, set_suffix, get_suffix,
@@ -86,7 +90,7 @@ from database import (
     finish_giveaway, add_giveaway_participant, count_giveaway_participants,
     is_giveaway_participant, list_giveaway_participants,
     all_giveaway_participants, clear_giveaway_participants,
-    ensure_giveaway_indexes,
+    ensure_giveaway_indexes, PICKER_SWEEP_FIELD,
 )  # noqa: F401
 
 API_ID = int(os.environ.get("API_ID"))
@@ -134,7 +138,9 @@ def ui_text(text):
 
 async def say(target, text, **kwargs):
     """Reply with small-caps UI copy (raw payload sends use ``target.reply``)."""
-    return await target.reply(ui_text(text), **kwargs)
+    sent = await target.reply(ui_text(text), **kwargs)
+    track_reply_keyboard(reply_chat_id(target), kwargs.get("reply_markup"))
+    return sent
 
 
 async def say_edit(target, text, **kwargs):
@@ -143,7 +149,9 @@ async def say_edit(target, text, **kwargs):
 
 
 async def say_message(client, chat_id, text, **kwargs):
-    return await client.send_message(chat_id, ui_text(text), **kwargs)
+    sent = await client.send_message(chat_id, ui_text(text), **kwargs)
+    track_reply_keyboard(chat_id, kwargs.get("reply_markup"))
+    return sent
 
 
 async def refresh_profile(user) -> None:
@@ -226,6 +234,161 @@ def schedule_cleanup(message, delay=None):
         return asyncio.get_running_loop().create_task(cleanup_message_later(message, delay))
     except RuntimeError:  # pragma: no cover - no running loop (sync callers)
         return None
+
+
+# --------------------------------------------------------------------------- #
+#  The picker keyboard is temporary
+#
+#  /setchat and /setdump hand Telegram's native chat chooser over through a
+#  *reply* keyboard (a ``request_chat`` button).  A reply keyboard is chat
+#  state, not message state: it stays on the screen until the bot sends a
+#  message whose reply_markup is ``ReplyKeyboardRemove`` — deleting or editing
+#  the message that carried it does nothing and ``one_time_keyboard`` merely
+#  collapses it, leaving the button one tap away forever.
+#
+#  So the bot (1) remembers every chat it put a picker keyboard in, because
+#  ``say`` / ``say_message`` watch the reply_markup of everything they send,
+#  and (2) takes the keyboard off again on **every** way out of the flow — a
+#  finished setup, /cancel, any other command, any other button.  A reply that
+#  already carries ``ReplyKeyboardRemove`` clears the record by itself; a reply
+#  that has to carry an inline menu instead (one message, one reply_markup)
+#  gets a tiny silent message with the removal, deleted again at once.
+# --------------------------------------------------------------------------- #
+
+#: ``pending_action`` values for which a picker keyboard is what the bot awaits.
+PICKER_ACTIONS = frozenset({"setchat_share", "setdump_share"})
+#: Buttons that continue a picker flow instead of leaving it.
+PICKER_FLOW_CALLBACKS = frozenset({"setchat:share", "setchat:check"})
+#: Private chats (chat id == user id) that may still show a picker keyboard.
+PICKER_KEYBOARD_SHOWN: set = set()
+#: The one character of the throw-away message that carries the removal.
+PICKER_DISMISS_TEXT = "⌨️"
+#: Users already checked for a picker keyboard that an older build left behind.
+PICKER_SWEPT: set = set()
+
+
+def reply_chat_id(target):
+    """Chat a reply goes to — in a private chat that is the user's own id."""
+    chat_id = getattr(getattr(target, "chat", None), "id", None)
+    if chat_id is None:
+        chat_id = getattr(getattr(target, "from_user", None), "id", None)
+    return chat_id
+
+
+def track_reply_keyboard(chat_id, markup) -> None:
+    """Note whether *chat_id* now shows, or no longer shows, a reply keyboard.
+
+    Pure bookkeeping on the way out of ``say`` — it must never be the reason a
+    reply fails, so an odd chat id is simply ignored.
+    """
+    if not isinstance(markup, (ReplyKeyboardMarkup, ReplyKeyboardRemove)):
+        return
+    try:
+        chat_id = int(chat_id)
+    except (TypeError, ValueError):
+        return
+    if isinstance(markup, ReplyKeyboardMarkup):
+        PICKER_KEYBOARD_SHOWN.add(chat_id)
+    else:
+        PICKER_KEYBOARD_SHOWN.discard(chat_id)
+
+
+def picker_flow_active(uid) -> bool:
+    """True while a picker keyboard is what this user's flow is waiting on."""
+    return pending_action.get(uid) in PICKER_ACTIONS or uid in setchat_pending
+
+
+async def dismiss_picker_keyboard(chat_id, *, force: bool = False) -> bool:
+    """Take a picker keyboard off *chat_id*'s screen; ``True`` when it was sent.
+
+    Does nothing unless the chat is recorded as showing one (``force`` skips
+    that check — used for keyboards an older build left behind).  The removal
+    is a silent one-character message whose only job is to carry
+    ``ReplyKeyboardRemove``; it is deleted again straight away.  Cosmetic by
+    nature, so it never retries a FloodWait and never raises.
+    """
+    if chat_id is None:
+        return False
+    chat_id = int(chat_id)
+    if not force and chat_id not in PICKER_KEYBOARD_SHOWN:
+        return False
+    #: Claim the record first: two exits in the same instant send one removal.
+    was_recorded = chat_id in PICKER_KEYBOARD_SHOWN
+    PICKER_KEYBOARD_SHOWN.discard(chat_id)
+    try:
+        sent = await floodwait_guard(
+            bot.send_message, chat_id, PICKER_DISMISS_TEXT,
+            reply_markup=ReplyKeyboardRemove(), disable_notification=True, attempts=0)
+    except Exception as exc:
+        if was_recorded:
+            PICKER_KEYBOARD_SHOWN.add(chat_id)     # still there: the next exit retries
+        print(f"[PICKER] could not remove the keyboard in chat={chat_id}: "
+              f"{type(exc).__name__}: {exc}", flush=True)
+        return False
+    message_id = getattr(sent, "id", None)
+    if message_id is not None:
+        try:
+            await floodwait_guard(bot.delete_messages, chat_id, message_id, attempts=0)
+        except Exception as exc:
+            print(f"[PICKER] left the one-character message in chat={chat_id}: "
+                  f"{type(exc).__name__}: {exc}", flush=True)
+    return True
+
+
+async def say_with_picker(target, text, keyboard, *, fallback=None):
+    """Send a picker prompt; if Telegram refuses the keyboard, send it without.
+
+    A picker button is a ``request_chat`` reply keyboard.  Should Telegram ever
+    reject that markup, the person must not be left with a silent bot: the
+    prompt still goes out (with *fallback*, normally the inline Cancel button)
+    and the typed link / @username / id keeps working.
+    """
+    try:
+        return await say(target, text, reply_markup=keyboard)
+    except FloodWait:
+        raise
+    except Exception as exc:
+        print(f"[PICKER] keyboard refused ({type(exc).__name__}: {exc}); "
+              "sending the prompt without it", flush=True)
+        return await say(target, text, reply_markup=fallback)
+
+
+async def sweep_stale_picker_keyboard(uid) -> bool:
+    """Once per user: clear a picker keyboard an older build left on the screen.
+
+    Earlier builds never removed the keyboard after a typed link, ``/cancel``,
+    another command or ``/setdump`` — it stayed pinned under the chat for good.
+    Nothing remembers who has one, so the first time a user is seen after this
+    fix the bot sends the silent removal once and stores that fact in the user
+    document (``PICKER_SWEEP_FIELD``).  Users created after the fix are born
+    with the flag set, so the check costs them nothing.
+    """
+    try:
+        uid = int(uid)
+    except (TypeError, ValueError):
+        return False
+    if uid in PICKER_SWEPT:
+        return False
+    PICKER_SWEPT.add(uid)
+    try:
+        row = await get_user(uid)
+        if not row or row.get(PICKER_SWEEP_FIELD):
+            return False
+        if picker_flow_active(uid) or uid in PICKER_KEYBOARD_SHOWN:
+            #: A live picker owns its keyboard; the flow's own exits remove it.
+            sent, done = False, True
+        else:
+            sent = await dismiss_picker_keyboard(uid, force=True)
+            done = sent
+        if done:
+            await update_user(uid, {PICKER_SWEEP_FIELD: True})
+        else:
+            PICKER_SWEPT.discard(uid)      # Telegram refused: try again next time
+        return sent
+    except Exception as exc:
+        PICKER_SWEPT.discard(uid)
+        print(f"[PICKER] sweep failed for user={uid}: {type(exc).__name__}: {exc}", flush=True)
+        return False
 
 
 def parse_link(link):
@@ -879,6 +1042,39 @@ async def require_dump_workspace(entry):
                                  ui.dump_admin_failed_text(permissions["reason"]))
 
 
+async def custom_caption_in_use(user_id) -> bool:
+    """True when the user has a custom caption, prefix or suffix stored.
+
+    This is the whole definition of "this user is using a custom caption":
+    :func:`apply_custom_caption` has nothing to change without one of the three.
+    """
+    return bool(await get_caption(user_id) or await get_prefix(user_id)
+                or await get_suffix(user_id))
+
+
+async def staging_entry_for(user_id, *, use_custom_caption: bool = True):
+    """The owner's dump entry — but only when *this* user's link belongs in it.
+
+    The dump channel carries users' downloads and messages, and only those of a
+    user whose custom caption is in play: content is downloaded into the dump,
+    captioned there and copied from there to the user.  Everything else is
+    delivered directly, so this returns ``None`` when
+
+    * no dump channel is connected,
+    * the caller already decided against the custom caption for this link
+      (``use_custom_caption=False`` — the channel flow asks per batch), or
+    * the user has no caption, prefix or suffix stored.
+    """
+    if not use_custom_caption:
+        return None
+    entry = await get_dump_channel()
+    if not entry:
+        return None
+    if not await custom_caption_in_use(user_id):
+        return None
+    return entry
+
+
 async def workspace_text(dump_id, text):
     try:
         staged = await floodwait_guard(bot.send_message, int(dump_id), text,
@@ -976,7 +1172,9 @@ async def try_native_copy(message, fetch_client, chat_target, msg_id, *, use_cus
         print(f"[COPY FAILED] {type(error).__name__}: {error}", flush=True)
         return False
 
-    dump_entry = await get_dump_channel()
+    #: Only a user whose custom caption is in play is staged through the dump;
+    #: every other link is copied straight to its destination.
+    dump_entry = await staging_entry_for(user_id, use_custom_caption=use_custom_caption)
     dump_chat_id = int(dump_entry["chat_id"]) if dump_entry else None
     can_stage = dump_chat_id is not None
 
@@ -1006,7 +1204,7 @@ async def try_native_copy(message, fetch_client, chat_target, msg_id, *, use_cus
             await finish_workspace_copy(dump_chat_id, extra, final_chat_id)
         return DUMP_STAGED_COPY
 
-    # Legacy direct delivery is only available when no dump is configured.
+    # Direct delivery: no dump is connected, or this user has no custom caption.
     try:
         copied = await target.copy_client.copy_message(
             chat_id=target.chat_id,
@@ -1137,10 +1335,8 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
 
         if copied:
             delivered = True
-            #: Configured dumps are staged and cleaned inside try_native_copy.
-            if copied is True:
-                mirror_target = resolve_delivery_target(message, user_id, fetch_client)
-                await mirror_delivery(mirror_target.chat_id, msg_id, label="copy")
+            #: A staged copy is cleaned inside try_native_copy; a direct copy is
+            #: left exactly as delivered — nothing is mirrored into the dump.
             await status.delete()
             await add_download(user_id, f"msg_{msg_id}", "copied")
             return True
@@ -1159,7 +1355,8 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
         if not msg.media:
             if msg.text:
                 premium = await is_premium(user_id) or user_id == OWNER_ID
-                dump_entry = await get_dump_channel()
+                dump_entry = await staging_entry_for(
+                    user_id, use_custom_caption=use_custom_caption)
                 credited = (await apply_custom_caption(user_id, msg.text)
                             if dump_entry and use_custom_caption else msg.text)
                 if not premium:
@@ -1347,7 +1544,8 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
         await say_edit(status, uploading, reply_markup=None)
 
         premium = user_id == OWNER_ID or await is_premium(user_id)
-        dump_entry = await get_dump_channel()
+        #: Staged through the dump only for a user whose custom caption is in play.
+        dump_entry = await staging_entry_for(user_id, use_custom_caption=use_custom_caption)
         if use_custom_caption:
             caption = (await apply_custom_caption(user_id, msg.caption)
                        if premium or dump_entry else (msg.caption or ""))
@@ -1375,7 +1573,6 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
             else:
                 caption = None
 
-        last_sent_id = None
         thumb_id = await get_thumbnail(user_id)
         if thumb_id and (msg.video or msg.document):
             try:
@@ -1383,7 +1580,6 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
             except:
                 pass
 
-        dump_entry = await get_dump_channel()
         dump_chat_id = int(dump_entry["chat_id"]) if dump_entry else None
         stage_upload = dump_entry is not None
         if stage_upload:
@@ -1429,14 +1625,9 @@ async def _fetch_and_send(message, status, fetch_client, chat_target, msg_id, *,
             if staged_id is None:
                 raise DumpWorkspaceError("Dump upload returned no message id; delivery stopped.")
             DUMP_MIRROR.schedule_delete(dump_chat_id, staged_id)
-            final_copy = await finish_workspace_copy(dump_chat_id, uploaded, chat_id)
-            last_sent_id = getattr(final_copy, "id", None)
-        else:
-            last_sent_id = staged_id
+            await finish_workspace_copy(dump_chat_id, uploaded, chat_id)
 
         delivered = True
-        if last_sent_id is not None and not stage_upload:
-            await mirror_delivery(chat_id, last_sent_id, label=media_type_guess(msg))
         if overflow_caption or msg.video_note or msg.sticker:
             for chunk in ui.split_text(overflow_caption or caption or "", 4096):
                 if stage_upload:
@@ -2336,6 +2527,8 @@ NEW_COMMAND_NAMES = [
 ]
 COMMAND_NAMES = NEW_COMMAND_NAMES + ["start", "help", "login", "logout", "status", "cancel", "setcaption", "delcaption", "setthumb", "delthumb", "setprefix", "setsuffix", "mystats", "myinfo", "history", "settings", "language", "refer", "bookmark", "bookmarks", "favorite", "favorites", "share", "feedback", "invite", "premium", "stats", "users", "loggedusers", "activeusers", "newusers", "topusers", "broadcast", "botcast", "menu", "cmsg", "unpin", "ban", "unban", "banlist", "finduser", "userinfo", "addpremium", "removepremium", "premiumlist", "addadmin", "removeadmin", "adminlist", "setfsub", "fsublist", "delfsub", "fsublabel", "fsubcheck", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export", "adminhelp", "admin", "admins", "addqr", "delqr", "removeqr", "payments", "redeem", "setchat", "delchat", "models", "engine", "mychannels", "setengine"]
 ABORT_GROUP = -1
+#: Runs before everything else: the one-time clean-up of a leftover picker keyboard.
+SWEEP_GROUP = -3
 
 
 async def clear_pending_inputs(uid):
@@ -2358,6 +2551,8 @@ async def clear_pending_inputs(uid):
             except Exception:
                 pass
         aborted = True
+    #: Whatever was aborted (or abandoned earlier), its picker keyboard goes too.
+    await dismiss_picker_keyboard(uid)
     return aborted
 
 
@@ -2384,6 +2579,20 @@ def log_latency(message, where: str) -> None:
         return
     command = command_name_of(message) or "text"
     print(f"[LATENCY] {where} cmd={command} update_lag={lag}ms", flush=True)
+
+
+@bot.on_message(filters.private, group=SWEEP_GROUP)
+async def sweep_picker_keyboard_on_message(client, message):
+    """First sight of a user after the fix: clear a picker keyboard left on screen."""
+    user = getattr(message, "from_user", None)
+    if user is not None:
+        await sweep_stale_picker_keyboard(user.id)
+
+
+@bot.on_callback_query(group=SWEEP_GROUP)
+async def sweep_picker_keyboard_on_callback(client, query):
+    if reply_chat_id(getattr(query, "message", None)) == query.from_user.id:
+        await sweep_stale_picker_keyboard(query.from_user.id)
 
 
 @bot.on_message(filters.regex(r"^/[A-Za-z][A-Za-z0-9_]*(?:@[A-Za-z0-9_]+)?(?:\s|$)") & filters.private, group=ABORT_GROUP)
@@ -2435,6 +2644,11 @@ async def start_handler(client, message):
     await render(message, ui.start_text(user.first_name, premium,
                                         ui.engine_status_line(decision)),
                  ui.start_keyboard(show_admin))
+    if show_admin:
+        #: After the reply, so /start stays instant.  Covers an admin who was
+        #: added before ever talking to the bot, or while it was offline: their
+        #: own chat gets the longer menu now.
+        await sync_staff_commands(user.id, "owner" if user.id == OWNER_ID else "admin")
 
 
 @bot.on_message(filters.command("help") & filters.private)
@@ -3346,6 +3560,8 @@ async def addadmin_handler(client, message):
         target = int(args[1])
         await add_admin(target)
         await say(message, f"👑 `{target}` is now admin!")
+        #: The new admin's own menu grows the admin commands right away.
+        await sync_staff_commands(target, "owner" if target == OWNER_ID else "admin")
         try:
             await say_message(bot, target, "👑 You are now a bot admin!")
         except:
@@ -3365,6 +3581,8 @@ async def removeadmin_handler(client, message):
         target = int(args[1])
         await remove_admin(target)
         await say(message, f"✅ Admin removed from `{target}`")
+        #: ...and a revoked admin's menu shrinks back to the user commands.
+        await sync_staff_commands(target, "owner" if target == OWNER_ID else "user")
     except:
         await say(message, "❌ Invalid")
 
@@ -3974,8 +4192,10 @@ async def cb_setchat_share(client, query):
     pending_action[uid] = "setchat_share"
     #: A reply keyboard cannot be attached to an existing message, so the picker
     #: is a fresh send rather than an edit of the message the button came from.
-    await say(query.message, ui.setchat_picker_text(),
-              reply_markup=ui.setchat_picker_keyboard())
+    #: It stays only as long as this flow does: every way out removes it again.
+    await say_with_picker(query.message, ui.setchat_picker_text(),
+                          ui.setchat_picker_keyboard(),
+                          fallback=ui.setchat_share_prompt_keyboard(None))
 
 
 #: The ``button_id`` Telegram must echo back for a pick to be ours.
@@ -4043,13 +4263,16 @@ async def chat_shared_handler(client, message):
             elif action == "setdump_share":
                 await register_picked_dump(message, uid, shared)
             else:
-                await say(message, ui.setdump_prompt_text(),
-                          reply_markup=ui.setdump_picker_keyboard())
+                #: Nobody is waiting for a dump pick: the keyboard is a leftover.
+                await say(message, ui.picker_stale_text("setdump"),
+                          reply_markup=ui.remove_keyboard())
             return
         if button_id == int(CHANNEL_PICKER_BUTTON_ID):
             if action != "setchat_share" and uid not in setchat_pending:
-                await say(message, ui.setchat_picker_text(),
-                          reply_markup=ui.setchat_picker_keyboard())
+                #: A stray pick is explained — and the keyboard is taken away
+                #: instead of being offered again.
+                await say(message, ui.picker_stale_text("setchat"),
+                          reply_markup=ui.remove_keyboard())
                 return
             await register_picked_channel(message, uid, shared)
             return
@@ -4064,8 +4287,8 @@ async def chat_shared_handler(client, message):
     elif action == "setchat_share" or uid in setchat_pending:
         await register_picked_channel(message, uid, shared)
     else:
-        await say(message, ui.setchat_picker_text(),
-                  reply_markup=ui.setchat_picker_keyboard())
+        await say(message, ui.picker_stale_text("setchat"),
+                  reply_markup=ui.remove_keyboard())
 
 
 async def register_picked_dump(message, uid, chat) -> bool:
@@ -4097,6 +4320,9 @@ async def register_picked_dump(message, uid, chat) -> bool:
     setchat_pending.pop(uid, None)
     await say(message, ui.setdump_done_text(title, chat_id),
               reply_markup=ui.dump_status_keyboard(True))
+    #: The confirmation carries the inline dashboard, so the keyboard is
+    #: removed by the silent message instead.
+    await dismiss_picker_keyboard(uid)
     print(f"[DUMP] connected chat={chat_id} by the owner via picker", flush=True)
     return True
 
@@ -4123,6 +4349,7 @@ async def register_picked_channel(message, uid, chat) -> bool:
         pending_action.pop(uid, None)
         await say(message, ui.channel_slots_full_text(entries),
                   reply_markup=ui.mychannels_keyboard(entries))
+        await dismiss_picker_keyboard(uid)
         return True
 
     await say(message, ui.setchat_share_resolved_text(title))
@@ -4218,6 +4445,7 @@ async def register_shared_channel(message, uid) -> bool:
         pending_action.pop(uid, None)
         await say(message, ui.channel_slots_full_text(entries),
                   reply_markup=ui.mychannels_keyboard(entries))
+        await dismiss_picker_keyboard(uid)
         return True
 
     await say(message, ui.setchat_share_resolved_text(title))
@@ -4226,7 +4454,9 @@ async def register_shared_channel(message, uid) -> bool:
     person_ok, person_reason = await describe_requester_admin(chat_id, uid)
     if not person_ok:
         setchat_pending.pop(uid, None)
+        pending_action.pop(uid, None)       # "Setup cancelled": the flow is over
         await say(message, ui.setchat_requester_failed_text(person_reason, title))
+        await dismiss_picker_keyboard(uid)
         return True
 
     #: Verification 2: the bot must be an admin with Post Messages.
@@ -4261,6 +4491,9 @@ async def register_shared_channel(message, uid) -> bool:
             entries = await get_user_channels(uid)
             await say(message, ui.channel_slots_full_text(entries),
                       reply_markup=ui.mychannels_keyboard(entries))
+            pending_action.pop(uid, None)
+            setchat_pending.pop(uid, None)
+            await dismiss_picker_keyboard(uid)
         else:
             await say(message, ui.setchat_share_failed_text("cannot_see"),
                       reply_markup=ui.feedback_keyboard())
@@ -4268,6 +4501,8 @@ async def register_shared_channel(message, uid) -> bool:
     setchat_pending.pop(uid, None)
     pending_action.pop(uid, None)
     await say(message, ui.setchat_done_text(title, chat_id), reply_markup=ui.back_keyboard())
+    #: Typing the link instead of using the picker must not leave it behind.
+    await dismiss_picker_keyboard(uid)
     print(f"[SETCHAT] message link registered chat={chat_id} for user={uid}", flush=True)
     return True
 
@@ -4292,6 +4527,7 @@ async def finish_channel_registration(message, uid, *, chat_id, title, username,
         pending_action.pop(uid, None)
         await say(message, ui.setchat_requester_failed_text(person_reason, title),
                   reply_markup=done_keyboard or ui.back_keyboard())
+        await dismiss_picker_keyboard(uid)
         return True
 
     #: Verification 2: the bot must be an admin with Post Messages.
@@ -4312,6 +4548,9 @@ async def finish_channel_registration(message, uid, *, chat_id, title, username,
             entries = await get_user_channels(uid)
             await say(message, ui.channel_slots_full_text(entries),
                       reply_markup=ui.mychannels_keyboard(entries))
+            setchat_pending.pop(uid, None)
+            pending_action.pop(uid, None)
+            await dismiss_picker_keyboard(uid)
         else:
             await say(message, ui.setchat_share_failed_text("cannot_see"),
                       reply_markup=ui.feedback_keyboard())
@@ -4320,6 +4559,8 @@ async def finish_channel_registration(message, uid, *, chat_id, title, username,
     pending_action.pop(uid, None)
     await say(message, ui.setchat_done_text(title, chat_id),
               reply_markup=done_keyboard or ui.back_keyboard())
+    #: No-op when the reply already carried the removal (the picker path).
+    await dismiss_picker_keyboard(uid)
     print(f"[SETCHAT] registered chat={chat_id} for user={uid}", flush=True)
     return True
 
@@ -4367,6 +4608,7 @@ async def cb_setchat_check(client, query):
         await render(query,
                      ui.setchat_requester_failed_text(person_reason, pending.get("title")),
                      ui.back_keyboard())
+        await dismiss_picker_keyboard(uid)
         return
     #: The bot's own admin + Post Messages check stays a separate step: both
     #: must pass before the channel can be registered.
@@ -5075,6 +5317,7 @@ async def complete_setchat(message, uid, pending) -> bool:
         ui.setchat_done_text(pending.get("title") or str(chat_id), chat_id),
         reply_markup=ui.back_keyboard(),
     )
+    await dismiss_picker_keyboard(uid)
     return True
 
 
@@ -5807,6 +6050,12 @@ async def dm_user(uid, text, keyboard=None, **kwargs):
         return await say_message(bot, int(uid), text, reply_markup=keyboard, **kwargs)
     except Exception as exc:
         print(f"[DM FAILED] user={uid}: {type(exc).__name__}: {exc}", flush=True)
+        if isinstance(keyboard, ReplyKeyboardMarkup):
+            #: A refused picker must not swallow the explanation with it.
+            try:
+                return await say_message(bot, int(uid), text, **kwargs)
+            except Exception:
+                pass
         return None
 
 
@@ -5832,7 +6081,9 @@ async def register_dump_from_ping(message, uid, chat) -> bool:
         await dm_user(uid, ui.dump_admin_failed_text(reason))
         return True
     await set_dump_channel(chat_id, title, getattr(chat, "username", None), kind)
+    pending_action.pop(int(uid), None)
     await dm_user(uid, ui.setdump_done_text(title, chat_id), ui.dump_status_keyboard(True))
+    await dismiss_picker_keyboard(uid)
     print(f"[DUMP] connected chat={chat_id} by the owner", flush=True)
     return True
 
@@ -5866,15 +6117,19 @@ async def handle_share_deep_link(message) -> bool:
             #: Arm the typed fallback too, so a link, @username or id works from
             #: this screen exactly as it does from /setchat.
             pending_action[int(uid)] = "setchat_share"
-            await say(message, ui.setchat_deep_link_private_text(),
-                      reply_markup=ui.setchat_share_prompt_keyboard(None))
+            #: The copy points at "the keyboard below", so it must really be there
+            #: (it used to be a leftover from an earlier session).
+            await say_with_picker(message, ui.setchat_deep_link_private_text(),
+                                  ui.setchat_picker_keyboard(),
+                                  fallback=ui.setchat_share_prompt_keyboard(None))
         except Exception:
             pass
     else:
         try:
             pending_action[int(uid)] = "setdump_share"
-            await say(message, ui.setdump_prompt_text(),
-                      reply_markup=ui.setdump_picker_keyboard())
+            await say_with_picker(message, ui.setdump_prompt_text(),
+                                  ui.setdump_picker_keyboard(),
+                                  fallback=ui.setdump_prompt_keyboard())
         except Exception:
             pass
     return True
@@ -5904,8 +6159,9 @@ async def setchat_deep_link_in_private(message, token) -> bool:
     if not entry or entry.get("kind") != "setchat":
         return False
     pending_action[int(message.from_user.id)] = "setchat_share"
-    await say(message, ui.setchat_picker_text(),
-              reply_markup=ui.setchat_picker_keyboard())
+    await say_with_picker(message, ui.setchat_picker_text(),
+                          ui.setchat_picker_keyboard(),
+                          fallback=ui.setchat_share_prompt_keyboard(None))
     return True
 
 
@@ -5917,24 +6173,30 @@ async def setdump_deep_link_in_private(message, token) -> bool:
         await say(message, ui.setdump_owner_only_text())
         return True
     pending_action[int(message.from_user.id)] = "setdump_share"
-    await say(message, ui.setdump_prompt_text(),
-              reply_markup=ui.setdump_picker_keyboard())
+    await say_with_picker(message, ui.setdump_prompt_text(),
+                          ui.setdump_picker_keyboard(),
+                          fallback=ui.setdump_prompt_keyboard())
     return True
 
 
 # --------------------------------------------------------------------------- #
-#  Owner dump channel — the mirror (copy, never forward; TTL deletes it)
+#  Owner dump channel — the workspace (copy, never forward; staged copies are deleted)
 # --------------------------------------------------------------------------- #
 
 class DumpMirror:
-    """Copies every delivered message into the owner's dump channel.
+    """Copy / delete engine of the owner's dump channel.
 
-    * the copy is made with ``copy_message`` — **never** ``forward`` — so the
-      mirror (and anything re-shared from it) carries no *Forwarded from*
-      header and no *edited* tag;
-    * each copy is deleted again after ``config.DUMP_TTL_SECONDS``;
-    * every mirror/delete call passes the native FloodWait governor, so a busy
-      hour pauses the queue instead of getting the bot restricted.
+    * every copy is made with ``copy_message`` — **never** ``forward`` — so
+      nothing carries a *Forwarded from* header, and a copy made *from* the
+      dump to a user carries no *edited* tag either;
+    * ``stage_copy`` / ``schedule_delete`` / ``delete_now`` carry the workspace
+      flow of a user with a custom caption: copy into the dump, caption it
+      there, copy it on, delete the staged copy — with a ``DUMP_TTL_SECONDS``
+      safety-net delete if Telegram refused the immediate one;
+    * ``mirror`` (copy a *delivered* message into the dump) is no longer wired
+      into any delivery path: the dump carries only those staged copies;
+    * every dump call passes the native FloodWait governor, so a busy hour
+      pauses the queue instead of getting the bot restricted.
     """
 
     def __init__(self):
@@ -6156,7 +6418,9 @@ async def copy_message_with_markup(chat_id, from_chat_id, message_id, *, reply_m
         return await floodwait_guard(bot.copy_message, reply_markup=reply_markup, **kwargs)
     except TypeError:
         dump = await get_dump_channel()
-        if dump and int(chat_id) != int(dump["chat_id"]):
+        if dump and int(from_chat_id) == int(dump["chat_id"]) and int(chat_id) != int(dump["chat_id"]):
+            #: Copying *out of the workspace*: editing the recipient afterwards
+            #: would defeat the point, so refuse instead of sending an edited copy.
             raise DumpWorkspaceError("Telegram client cannot copy this keyboard without editing the recipient. "
                                      "Upgrade the client; no destination copy was sent.")
         copied = await floodwait_guard(bot.copy_message, **kwargs)
@@ -6172,7 +6436,14 @@ async def copy_message_with_markup(chat_id, from_chat_id, message_id, *, reply_m
 
 
 async def campaign_stage(payload, keyboard=None):
-    """Create one temporary dump copy for an outbound customized message."""
+    """Create one temporary dump copy for an outbound customized message.
+
+    The owner's own campaigns (/broadcast, /botcast, /cMSG, /sendmsg, /pin) are
+    not users' downloads, so unless ``config.DUMP_STAGE_CAMPAIGNS`` is switched
+    on they are delivered directly and never touch the dump channel.
+    """
+    if not DUMP_STAGE_CAMPAIGNS:
+        return None
     dump = await get_dump_channel()
     if not dump:
         return None
@@ -6198,7 +6469,7 @@ async def campaign_stage(payload, keyboard=None):
 
 
 async def deliver_staged_text_to_chat(chat_id, text, *, reply_markup=None):
-    """Send one custom DM from the dump workspace, with direct sending only when no dump is configured."""
+    """Send one custom DM — directly, or from the dump workspace when campaigns are staged."""
     chat_id = int(chat_id)
     payload = {"text": str(text or "")}
     staged = None
@@ -6265,9 +6536,10 @@ async def unpin_configured_channels():
 async def deliver_campaign_payload(payload, buttons=(), *, users_only=False, pin=False):
     """Send a supplied/replied-to custom message to channels and/or bot users.
 
-    A configured dump is the workspace: one copy is staged there with its
-    completed keyboard, then copied to every final destination and deleted.
-    Plain text is never edited after delivery, which avoids an Edited label.
+    Delivered directly by default: the source message is copied (or the typed
+    text sent) to each destination with its keyboard attached, never edited
+    afterwards, so there is no Edited label.  With ``DUMP_STAGE_CAMPAIGNS`` on,
+    one copy is staged in the dump workspace first and copied from there.
     """
     payload = dict(payload or {})
     keyboard = ui.custom_buttons_keyboard(buttons) if buttons else None
@@ -6370,15 +6642,25 @@ async def setdump_handler(client, message):
     ref = args[1].strip() if len(args) > 1 else ""
     if not ref:
         pending_action[uid] = "setdump_share"
-        await say(message, ui.setdump_prompt_text(),
-                  reply_markup=ui.setdump_picker_keyboard())
+        #: The picker keyboard lives exactly as long as this flow: it is taken
+        #: off the screen again on success, /cancel, any other command or button.
+        await say_with_picker(message, ui.setdump_prompt_text(),
+                              ui.setdump_picker_keyboard(),
+                              fallback=ui.setdump_prompt_keyboard())
         return
     await say(message, "🗄 Checking channel and staging permissions…")
     await finish_setdump(message, ref)
 
 
 async def finish_setdump(message, ref) -> bool:
-    """Shared by /setdump <link> and the typed prompt."""
+    """Shared by /setdump <link> and the typed prompt.
+
+    Whatever goes wrong with the *reference* (unresolvable, not a channel, not
+    an admin) keeps the flow armed: the owner may type another one or use the
+    picker.  The typed-prompt path disarms the flow before it gets here, so the
+    recoverable failures arm it again — otherwise the picker would answer the
+    next pick with nothing.
+    """
     uid = message.from_user.id
     if uid != OWNER_ID:
         await say(message, ui.setdump_owner_only_text())
@@ -6387,16 +6669,20 @@ async def finish_setdump(message, ref) -> bool:
         resolved = await resolve_chat_target(ref)
     except InviteRequestSent:
         await say(message, ui.setdump_join_request_text(), reply_markup=ui.feedback_keyboard())
+        await dismiss_picker_keyboard(uid)
         return False
     except InviteLinkError as exc:
+        pending_action[uid] = "setdump_share"
         await say(message, ui.setchat_resolve_failed_text(exc.reason) + "\n\n" +
-                  ui.setdump_prompt_text(), reply_markup=ui.feedback_keyboard())
+                  ui.setdump_prompt_text(), reply_markup=ui.setdump_picker_keyboard())
         return False
     if not resolved or not resolved.get("chat_id"):
+        pending_action[uid] = "setdump_share"
         await say(message, ui.setchat_resolve_failed_text("unresolved") + "\n\n" +
-                  ui.setdump_prompt_text(), reply_markup=ui.feedback_keyboard())
+                  ui.setdump_prompt_text(), reply_markup=ui.setdump_picker_keyboard())
         return False
     if resolved.get("type") not in {None, "channel"}:
+        pending_action[uid] = "setdump_share"
         await say(message, ui.setchat_share_failed_text("not_a_channel"),
                   reply_markup=ui.setdump_picker_keyboard())
         return False
@@ -6421,6 +6707,7 @@ async def finish_setdump(message, ref) -> bool:
     await say(message, ui.setdump_done_text(resolved.get("title") or resolved["chat_id"],
                                             resolved["chat_id"]),
               reply_markup=ui.dump_status_keyboard(True))
+    await dismiss_picker_keyboard(uid)
     return True
 
 
@@ -8094,23 +8381,92 @@ CHANNEL_BLOCKED_COMMANDS = frozenset(COMMAND_HANDLERS) - CHANNEL_ALLOWED_COMMAND
 
 COMMAND_REGISTRATION_TASK = None
 
+#: Commands that only the owner may run, as far as the Telegram menu goes.
+MENU_OWNER_ONLY = frozenset(ADMIN_OWNER_COMMANDS) | {"giveawaystatus"}
+MENU_ROLES = ("user", "admin", "owner")
 
-def telegram_commands():
-    # Telegram allows 100 commands. Keep aliases and existing handlers rather
-    # than truncating menus; admin UI remains paginated independently.
-    names = list(dict.fromkeys(COMMAND_NAMES))
-    if len(names) > 100:
+
+def telegram_commands(role: str = "user"):
+    """The command menu Telegram shows for one audience (``setMyCommands``).
+
+    * ``user`` — ``/start`` first, then every command a normal user may run.
+      This is what everybody sees in the menu of a private chat.
+    * ``admin`` — those plus the admin commands (not the owner-only ones).
+    * ``owner`` — every command the bot has.
+
+    Each description is an emoji followed by what the command does.  Telegram
+    allows 100 commands per scope: the lists are split by audience, never
+    truncated, and a name can only ever appear once.
+    """
+    if role not in MENU_ROLES:
+        raise ValueError(f"unknown menu role: {role!r}")
+    entries = list(ui.user_menu_commands())
+    if role != "user":
+        shown = {name for name, _description in entries}
+        for name in dict.fromkeys(COMMAND_NAMES):
+            if name in shown:
+                continue
+            if role == "admin" and name in MENU_OWNER_ONLY:
+                continue
+            entries.append((name, ui.staff_menu_description(name)))
+    if len(entries) > 100:
         raise ValueError("Command list exceeds Telegram's limit; split scopes, do not truncate")
-    return [BotCommand(name, ui.ADMIN_COMMAND_LABELS.get(name, name.replace('_', ' ').title())[:256])
-            for name in names]
+    return [BotCommand(name, description[:256]) for name, description in entries]
+
+
+async def sync_staff_commands(uid, role=None) -> bool:
+    """Give the owner / an admin the longer menu in their own chat.
+
+    A ``BotCommandScopeChat`` beats the all-private-chats list for that one
+    chat, so staff see the admin commands and nobody else does.  ``role``
+    ``"user"`` removes the override again (a revoked admin falls back to the
+    ordinary menu).  Best effort: Telegram refuses a chat the bot has never
+    talked to, which is fine — the next ``/start`` of that person tries again.
+    """
+    try:
+        uid = int(uid)
+        if role is None:
+            role = ("owner" if uid == OWNER_ID else
+                    "admin" if await is_admin(uid) else "user")
+        scope = BotCommandScopeChat(chat_id=uid)
+        if role == "user":
+            await floodwait_guard(bot.delete_bot_commands, scope=scope)
+        else:
+            await floodwait_guard(bot.set_bot_commands, telegram_commands(role), scope=scope)
+        return True
+    except Exception as exc:
+        print(f"[MENU] could not update the command menu of chat={uid}: "
+              f"{type(exc).__name__}: {exc}", flush=True)
+        return False
+
+
+async def register_staff_commands() -> int:
+    """Publish the longer menu for the owner and every stored admin."""
+    staff = {int(OWNER_ID): "owner"} if OWNER_ID else {}
+    try:
+        for row in await get_admins_list() or []:
+            admin_id = row.get("user_id") if isinstance(row, dict) else row
+            staff.setdefault(int(admin_id), "admin")
+    except Exception as exc:
+        print(f"[MENU] could not read the admin list: {type(exc).__name__}: {exc}", flush=True)
+    done = 0
+    for uid, role in staff.items():
+        done += bool(await sync_staff_commands(uid, role))
+    return done
 
 
 async def register_telegram_commands():
-    # Clear legacy default commands (including /login in channels), then set
-    # the full command list only for private chats. Authorization is unchanged.
+    """Publish the official Telegram command menu — nothing is set by hand.
+
+    Clears the legacy default list (it used to leak into channels), then sets
+    the user menu for private chats only and the longer staff menus for the
+    owner's and the admins' own chats.  Authorization is unchanged: the menu
+    only *shows* commands, every handler still checks who is calling.
+    """
     await floodwait_guard(bot.delete_bot_commands)
-    await floodwait_guard(bot.set_bot_commands, telegram_commands(),
+    await floodwait_guard(bot.set_bot_commands, telegram_commands("user"),
                           scope=BotCommandScopeAllPrivateChats())
+    await register_staff_commands()
 
 
 def ensure_command_registration():
@@ -8118,6 +8474,17 @@ def ensure_command_registration():
     if COMMAND_REGISTRATION_TASK is None or (COMMAND_REGISTRATION_TASK.done()
                                              and COMMAND_REGISTRATION_TASK.exception()):
         COMMAND_REGISTRATION_TASK = spawn_background(register_telegram_commands())
+
+
+@bot.on_start()
+async def publish_menu_on_start(client):
+    """Publish the command menu as soon as the client is connected.
+
+    The first update of the process also triggers it (``touch_scheduler``), but
+    waiting for somebody to write first meant a freshly deployed menu stayed
+    stale until then.
+    """
+    ensure_command_registration()
 
 
 def command_name_of(message) -> str | None:
@@ -8295,6 +8662,10 @@ async def callback_handler(client, query):
             and not data.startswith("cap_") \
             and not data.startswith(("btnwiz:", "gw:", "pin_offer:", "dump:", "native:")) \
             and data not in {"cancel_login", "cancel_action"}:
+        #: Leaving a picker flow through any other button takes its keyboard
+        #: away; only presses made in the user's own private chat count.
+        if data not in PICKER_FLOW_CALLBACKS and reply_chat_id(query.message) == uid:
+            await dismiss_picker_keyboard(uid)
         pending_action.pop(uid, None)
         admin_pending.pop(uid, None)
         pending = login_pending.pop(uid, {})
@@ -8906,9 +9277,10 @@ if __name__ == "__main__":
           f"{ENGINE_PEAK_THRESHOLD} concurrent).")
     print(f"📊 Telemetry HUD: {'on' if ui.telemetry_enabled() else 'off'}")
     print("✅ Bot starting...")
-    #: The mirror and the giveaway pump need the connected client, so both are
-    #: started from the first update (see ``touch_scheduler``): ``Client.run()``
-    #: takes no startup coroutine on this library version.
+    #: The command menu is published from the ``@bot.on_start()`` hook
+    #: (``publish_menu_on_start``).  The mirror and the giveaway pump need the
+    #: connected client too and are started from the first update (see
+    #: ``touch_scheduler``): ``Client.run()`` takes no startup coroutine.
     bot.run()
     
 

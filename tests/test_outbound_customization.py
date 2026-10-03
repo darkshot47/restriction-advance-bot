@@ -38,7 +38,7 @@ def source_message(text="Reusable announcement", *, message_id=77, chat_id=None)
 
 
 async def test_broadcast_replies_are_staged_then_copied_to_channel_and_users(
-        db, fake_bot, press):
+        db, fake_bot, press, staged_campaigns):
     await db.add_user(OWNER, "Owner")
     await db.add_user(USER, "Reader")
     await db.set_dump_channel(CHANNEL, "Dump", "dump", "channel")
@@ -88,7 +88,7 @@ async def test_broadcast_posts_typed_text_to_channel_and_bot_users(db, fake_bot)
 
 
 async def test_menu_offers_reply_actions_and_pin_broadcasts_then_pins(
-        db, fake_bot, press):
+        db, fake_bot, press, staged_campaigns):
     await db.add_user(OWNER, "Owner")
     await db.add_user(USER, "Reader")
     await db.set_dump_channel(CHANNEL, "Dump", "dump", "channel")
@@ -108,7 +108,8 @@ async def test_menu_offers_reply_actions_and_pin_broadcasts_then_pins(
     assert (CHANNEL, stage_id) in fake_bot.deleted
 
 
-async def test_cmsg_stages_a_custom_message_with_coloured_buttons(db, fake_bot, press):
+async def test_cmsg_stages_a_custom_message_with_coloured_buttons(
+        db, fake_bot, press, staged_campaigns):
     await db.add_user(OWNER, "Owner")
     await db.add_user(USER, "Reader")
     await db.set_dump_channel(CHANNEL, "Dump", "dump", "channel")
@@ -138,6 +139,8 @@ async def test_media_download_is_uploaded_to_dump_copied_to_user_and_cleaned(
     source_chat = -100888
     await db.add_user(USER, "Reader")
     await db.set_dump_channel(CHANNEL, "Dump", "dump", "channel")
+    #: The dump only carries the download of a user whose custom caption is in play.
+    await db.set_caption(USER, "My custom caption")
     local_file = tmp_path / "staged-video.mp4"
     local_file.write_bytes(b"video")
     message = FakeMessage(text="t.me/example/77", user=FakeUser(USER))
@@ -182,7 +185,8 @@ async def test_media_download_is_uploaded_to_dump_copied_to_user_and_cleaned(
     assert not local_file.exists(), "the downloaded file is cleaned after delivery"
 
 
-async def test_direct_sendmsg_custom_message_uses_dump_before_the_dm(db, fake_bot, press):
+async def test_direct_sendmsg_custom_message_uses_dump_before_the_dm(
+        db, fake_bot, press, staged_campaigns):
     target = 24680
     await db.set_dump_channel(CHANNEL, "Dump", "dump", "channel")
     request = owner_message(f"/sendmsg {target} Your custom note")

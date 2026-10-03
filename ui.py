@@ -647,7 +647,7 @@ def help_text() -> str:
         "**🎁 Extra:**\n"
         "/refer /bookmark /bookmarks\n"
         "/favorite /favorites /share /feedback /premium /redeem\n\n"
-        "**🗄 Owner workspace:** /setdump /dump /deldump — temporary staging only.\n"
+        "**🗄 Owner workspace:** /setdump /dump /deldump — temporary staging for users with a custom caption.\n"
         "**📣 Audiences:** /broadcast — bot users + /setchat channels, excluding /setdump.\n"
         "/botcast — bot users only. /pin — bot users only, with best-effort DM pins.\n"
         "**🛠 Message tools:** /menu /cmsg /unpin /pinned /post\n\n"
@@ -1256,8 +1256,23 @@ def setchat_requester_failed_text(reason: str = "not_admin", title: str | None =
 #:  Round 7 — registering a private channel by sharing it into the bot
 #: ------------------------------------------------------------------------ #:
 
+def channel_picker_rights() -> "ChatAdministratorRights":
+    """The one right a connected channel needs: Post Messages.
+
+    Both sides of the chooser button are built from this object because
+    Telegram requires ``bot_administrator_rights`` to be a subset of
+    ``user_administrator_rights`` (see :func:`dump_picker_rights`).
+    """
+    return ChatAdministratorRights(is_anonymous=False, can_post_messages=True)
+
+
 def setchat_picker_keyboard() -> "ReplyKeyboardMarkup":
     """Telegram's **own** channel chooser, opened by one reply-keyboard tap.
+
+    The keyboard is **temporary**: it belongs to the picker flow and the bot
+    removes it again (``ReplyKeyboardRemove``) the moment that flow ends —
+    success, ``/cancel``, any other command or button.  ``one_time_keyboard``
+    alone only collapses it; the button would stay one tap away for good.
 
     The button carries ``request_chat``; Telegram then shows the account's
     channel list and hands the chosen chat straight back to the bot in
@@ -1283,10 +1298,8 @@ def setchat_picker_keyboard() -> "ReplyKeyboardMarkup":
             request_username=True,
             request_photo=True,
             max_quantity=1,
-            user_administrator_rights=ChatAdministratorRights(
-                is_anonymous=False, can_post_messages=True),
-            bot_administrator_rights=ChatAdministratorRights(
-                is_anonymous=False, can_post_messages=True),
+            user_administrator_rights=channel_picker_rights(),
+            bot_administrator_rights=channel_picker_rights(),
         ),
     )
     return ReplyKeyboardMarkup(
@@ -1356,6 +1369,26 @@ def setchat_picker_text() -> str:
         "channel and no link is ever pasted.\n\n"
         "Prefer typing? Send me a message link, an `@username` or the numeric "
         "channel id instead. Use /cancel to stop."
+    )
+
+
+def picker_stale_text(kind: str = "setchat") -> str:
+    """A tap on a picker button whose flow is over — the keyboard is taken away.
+
+    The picker keyboard is temporary now, so this only reaches somebody whose
+    screen still carries one from an older session.  Nothing is saved.
+    """
+    if kind == "setdump":
+        return (
+            "🗄 **PICK THE DUMP CHANNEL**\n\n"
+            "That chooser is no longer open, so I took it off your screen and "
+            "nothing was connected. Send /setdump to start again."
+        )
+    return (
+        "📡 **PICK YOUR CHANNEL**\n\n"
+        "That chooser is no longer open, so I took it off your screen and "
+        "nothing was saved. Send /setchat and tap **Share the channel** to "
+        "start again."
     )
 
 
@@ -2800,6 +2833,81 @@ def admin_command_lines(commands) -> str:
     return "\n".join(admin_command_line(command) for command in commands)
 
 
+# --------------------------------------------------------------------------- #
+#  Telegram's official command menu (setMyCommands)
+# --------------------------------------------------------------------------- #
+
+#: Every command a normal user may run: ``(command, emoji, what it does)``.
+#: ``/start`` comes first.  The bot publishes exactly this list as the menu of
+#: every private chat, so the description Telegram shows is the emoji, a space
+#: and then what the command does — never a bare command name.
+USER_MENU = (
+    ("start", "🚀", "Start the bot and open the main menu"),
+    ("help", "📖", "Learn how to use the bot"),
+    ("login", "🔐", "Log in to your Telegram account"),
+    ("logout", "🚪", "Log out of your Telegram account"),
+    ("status", "🔎", "Check your login status"),
+    ("cancel", "❌", "Cancel what you are doing right now"),
+    ("setcaption", "✏️", "Set a custom caption for your downloads"),
+    ("delcaption", "🧽", "Remove your custom caption"),
+    ("setprefix", "🔤", "Add a prefix to every caption"),
+    ("setsuffix", "🔡", "Add a suffix to every caption"),
+    ("setthumb", "🖼️", "Set a custom thumbnail"),
+    ("delthumb", "🗑️", "Remove your custom thumbnail"),
+    ("setchat", "📡", "Connect a channel to extract links in"),
+    ("delchat", "🔌", "Disconnect a connected channel"),
+    ("mychannels", "📺", "Manage your connected channels"),
+    ("models", "🧠", "Choose your download engine"),
+    ("engine", "🚀", "Switch between Python and C++ Turbo"),
+    ("mystats", "📊", "See your download statistics"),
+    ("myinfo", "👤", "View your profile and plan"),
+    ("history", "📜", "Show your last 10 downloads"),
+    ("settings", "⚙️", "Open your settings"),
+    ("language", "🌐", "Change the bot language"),
+    ("premium", "💎", "See premium plans and benefits"),
+    ("redeem", "🏆", "Redeem your points for premium"),
+    ("refer", "🎁", "Invite friends and earn points"),
+    ("invite", "🔗", "Get the invite link of this bot"),
+    ("share", "📤", "Share this bot with your friends"),
+    ("bookmark", "🔖", "Save a link to your bookmarks"),
+    ("bookmarks", "📚", "Show your saved bookmarks"),
+    ("favorite", "⭐", "Add a channel to your favorites"),
+    ("favorites", "🌟", "Show your favorite channels"),
+    ("feedback", "💬", "Send feedback to the owner"),
+)
+
+#: Owner / admin commands whose menu line is written here instead of being
+#: taken from the admin-panel label tables.
+STAFF_MENU_EXTRA = {
+    "menu": ("🧰", "Open the message tools for a replied message"),
+    "giveawaystatus": ("📊", "Show the running giveaway"),
+    "admin": ("🛡", "Open the admin panel"),
+    "admins": ("🛡", "Open the admin panel"),
+    # The panel labels of these read badly as a one-line menu entry.
+    "broadcast": ("📢", "Broadcast to bot users and your channels"),
+    "ban": ("🚫", "Ban a user"),
+    "unban": ("✅", "Unban a user"),
+}
+
+#: Emoji for a staff command that has a label but no icon of its own.
+STAFF_MENU_FALLBACK_ICON = "🛠️"
+
+
+def user_menu_commands() -> list:
+    """``[(command, description), ...]`` — /start first, then the user commands."""
+    return [(name, f"{emoji} {text}") for name, emoji, text in USER_MENU]
+
+
+def staff_menu_description(command: str) -> str:
+    """``"<emoji> <label>"`` for an owner/admin command in the menu."""
+    if command in STAFF_MENU_EXTRA:
+        emoji, text = STAFF_MENU_EXTRA[command]
+    else:
+        emoji = ADMIN_COMMAND_ICONS.get(command, STAFF_MENU_FALLBACK_ICON)
+        text = admin_command_label(command)
+    return f"{emoji} {text}"[:256]
+
+
 def engine_analytics_text(snapshot=None) -> str:
     """The engine half of ``/stats`` — global analytics for the owner/admins."""
     from engines import ENGINE_LABELS, ENGINE_MODE_LABELS, normalize_mode
@@ -3030,8 +3138,8 @@ def pin_offer_keyboard() -> InlineKeyboardMarkup:
 def message_menu_text() -> str:
     return ("🧰 **MESSAGE ACTIONS**\n\n"
             "Choose what to do with the message you replied to. Broadcast copies "
-            "go to connected owner channels and bot users; the dump is used as a "
-            "temporary workspace when connected.")
+            "go straight to connected owner channels and bot users — the dump "
+            "channel is never used for them.")
 
 
 def unpin_complete_text(report: dict) -> str:
@@ -3062,7 +3170,7 @@ def custom_message_prompt_text() -> str:
     return ("🎨 **CUSTOM MESSAGE**\n\n"
             "Reply to any message with /cMSG, or send /cMSG and then send the "
             "message you want to customize. Add up to three blue, green or red "
-            "inline buttons; I stage it in your dump and copy it to connected "
+            "inline buttons; I send it with the buttons attached to connected "
             "channels and bot users without an Edited label. Use /cancel to stop.")
 
 
@@ -3120,8 +3228,28 @@ def setdump_prompt_keyboard(share_url: str | None = None) -> InlineKeyboardMarku
     return keyboard([[button("❌ Cancel", callback_data="cancel_action", style="danger")]])
 
 
+def dump_picker_rights() -> "ChatAdministratorRights":
+    """The admin rights the dump channel needs — Post **and** Delete Messages.
+
+    The workspace has to remove its own staged copies, so the bot needs both
+    rights.  Telegram insists that ``bot_administrator_rights`` is a **subset**
+    of ``user_administrator_rights`` (the Bot API says the user's rights "must
+    be a superset" of the bot's); a button whose bot rights are not covered by
+    the user rights is rejected as an invalid reply markup.  That is exactly
+    why ``/setdump`` used to answer with nothing at all: the user side asked
+    for Post Messages only while the bot side also asked for Delete Messages.
+    Both sides are therefore built from this one object.
+    """
+    return ChatAdministratorRights(
+        is_anonymous=False, can_post_messages=True, can_delete_messages=True)
+
+
 def setdump_picker_keyboard() -> "ReplyKeyboardMarkup":
-    """Open Telegram's channel chooser for the owner's dump channel."""
+    """Open Telegram's channel chooser for the owner's dump channel.
+
+    Like the channel picker this keyboard is temporary: the bot takes it off
+    the screen as soon as ``/setdump`` finishes or is abandoned.
+    """
     if KeyboardButton is None or KeyboardButtonRequestChat is None:
         return None  # pragma: no cover - legacy Pyrogram without request_chat
     from config import DUMP_PICKER_BUTTON_ID
@@ -3136,10 +3264,8 @@ def setdump_picker_keyboard() -> "ReplyKeyboardMarkup":
             request_username=True,
             request_photo=True,
             max_quantity=1,
-            user_administrator_rights=ChatAdministratorRights(
-                is_anonymous=False, can_post_messages=True),
-            bot_administrator_rights=ChatAdministratorRights(
-                is_anonymous=False, can_post_messages=True, can_delete_messages=True),
+            user_administrator_rights=dump_picker_rights(),
+            bot_administrator_rights=dump_picker_rights(),
         ),
     )
     return ReplyKeyboardMarkup(
@@ -3153,10 +3279,15 @@ def setdump_prompt_text() -> str:
     minutes = max(1, int(DUMP_TTL_SECONDS) // 60)
     return (
         "🗄 **DUMP CHANNEL SETUP**\n\n"
-        "The dump is a temporary workspace: downloads and custom messages are "
-        "copied here first, then copied to their destination without a "
-        "*Forwarded from* or *Edited* label. Temporary copies are removed after "
-        f"delivery (the mirror TTL is {minutes} minutes as a safety net).\n\n"
+        "The dump is a temporary workspace for **your users' downloads and "
+        "messages** — and only for a user who has a custom caption switched on "
+        "(/setcaption, /setprefix or /setsuffix). For such a link I download "
+        "the content into this channel first, put the caption on it there, "
+        "then copy it from here to the user without a *Forwarded from* or "
+        "*Edited* label. The staged copy is removed right after delivery "
+        f"(the mirror TTL is {minutes} minutes as a safety net).\n\n"
+        "Everyone else, and your own broadcasts and custom messages, are "
+        "delivered directly and never touch the dump.\n\n"
         "Tap **🗄 Pick my dump** below to choose the channel with Telegram's own "
         "channel picker, or send its link, `@username` or numeric id here.\n\n"
         "I must already be an administrator with posting and delete rights. "
@@ -3169,10 +3300,12 @@ def setdump_done_text(title: str, chat_id) -> str:
     minutes = max(1, int(DUMP_TTL_SECONDS) // 60)
     return (
         f"✅ **Dump channel connected: {title}**\n\n"
-        "Downloads and custom messages can now use this as a temporary "
-        "workspace. Staging copies are removed after delivery; ordinary mirror "
-        f"copies expire after {minutes} minutes. FloodWait pauses are handled "
+        "A download or message requested by a user with a custom caption is "
+        "now staged here first, captioned here and copied from here to the "
+        "user. Staged copies are removed right after delivery (a leftover "
+        f"copy expires after {minutes} minutes). FloodWait pauses are handled "
         "automatically.\n\n"
+        "Other users, and your own broadcasts, never touch this channel.\n\n"
         "Send /dump for the live status or /deldump to disconnect."
     )
 
@@ -3190,9 +3323,10 @@ def dump_status_text(entry, stats: dict | None = None, permissions: dict | None 
     if not entry:
         return ("🗄 **DUMP CHANNEL**\n\n"
                 "No dump channel is connected.\n\n"
-                "👉 Send /setdump to connect a temporary workspace. The bot stages "
-                "content there, then copies it to the final destination so "
-                "recipients do not see a *Forwarded* or *Edited* label.")
+                "👉 Send /setdump to connect a temporary workspace. For a user "
+                "with a custom caption the bot stages the download there, then "
+                "copies it to that user so the recipient sees no *Forwarded* or "
+                "*Edited* label. Everyone else is served directly.")
     permissions = permissions or {"post": None, "delete": None, "ready": False, "reason": "error"}
     title = entry.get("title") or f"chat {entry.get('chat_id')}"
     username = entry.get("username")
@@ -3211,11 +3345,12 @@ def dump_status_text(entry, stats: dict | None = None, permissions: dict | None 
         "Delete Messages: " + {True: "allowed", False: "missing", None: "unknown (check failed)"}[permissions["delete"]],
         "" if permissions["ready"] else dump_admin_failed_text(permissions["reason"]),
         "",
+        "🎯 **Used for:** users' downloads and messages with a custom caption",
         f"⏳ **Mirror TTL:** {int(DUMP_TTL_SECONDS)} s "
-        f"({max(1, int(DUMP_TTL_SECONDS) // 60)} min) then the copy deletes itself",
-        f"🐢 **Flood cooldown:** {DUMP_COOLDOWN_SECONDS:g} s between mirror operations",
+        f"({max(1, int(DUMP_TTL_SECONDS) // 60)} min) then a leftover copy deletes itself",
+        f"🐢 **Flood cooldown:** {DUMP_COOLDOWN_SECONDS:g} s between dump operations",
         f"📦 **Queued for deletion:** {int(stats.get('pending', 0))}",
-        f"🪞 **Mirrored this run:** {int(stats.get('mirrored', 0))}",
+        f"🪞 **Staged this run:** {int(stats.get('mirrored', 0))}",
         f"🗑 **Deleted this run:** {int(stats.get('deleted', 0))}",
         f"⏸ **FloodWait pauses:** {int(stats.get('pauses', 0))} "
         f"({int(stats.get('wait_seconds', 0))} s total)",
@@ -3876,8 +4011,8 @@ def setdump_deep_link_private_text() -> str:
 
 def setdump_owner_only_text() -> str:
     return ("👑 **Owner only**\n\n"
-            "The dump channel mirrors every delivery, so only the owner may "
-            "connect or disconnect it.")
+            "The dump channel is the owner's temporary workspace, so only the "
+            "owner may connect or disconnect it.")
 
 
 def setdump_join_request_text() -> str:
@@ -3896,7 +4031,7 @@ def dump_admin_failed_text(reason: str = "not_admin") -> str:
     base = ("⚠️ **I cannot work with that channel yet**\n\n"
             "{detail}\n\n"
             "👉 Make me an administrator with **Post Messages** and **Delete "
-            "Messages** (the mirror deletes its own copies) and send /setdump "
+            "Messages** (the workspace deletes its own copies) and send /setdump "
             "again. Staging is unavailable until these permissions are verified.")
     details = {
         "not_admin": "I am not an administrator in that chat.",

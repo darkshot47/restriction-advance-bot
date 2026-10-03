@@ -554,6 +554,10 @@ class FakeDB:
     async def get_user(self, user_id):
         return self.users.get(user_id)
 
+    async def update_user(self, user_id, data):
+        if user_id in self.users:
+            self.users[user_id].update(data)
+
     async def is_premium(self, user_id):
         user = self.users.get(user_id)
         return bool(user and user.get("is_premium"))
@@ -564,6 +568,9 @@ class FakeDB:
 
     async def is_admin(self, user_id):
         return user_id in self.admins
+
+    async def get_admins_list(self):
+        return [{"user_id": uid, "name": f"Admin {uid}"} for uid in sorted(self.admins)]
 
     async def check_daily_limit(self, user_id, limit=10):
         user = self.users.get(user_id) or {}
@@ -798,7 +805,7 @@ class FakeDB:
 
 #: every database symbol main.py imports
 DB_NAMES = [
-    "add_user", "get_user", "is_premium", "is_banned", "check_daily_limit",
+    "add_user", "get_user", "update_user", "is_premium", "is_banned", "check_daily_limit",
     "increment_daily", "save_session", "get_session", "delete_session",
     "set_caption", "get_caption", "del_caption", "set_thumbnail", "get_thumbnail",
     "del_thumbnail", "set_prefix", "get_prefix", "set_suffix", "get_suffix",
@@ -935,6 +942,10 @@ def clean_state(monkeypatch):
     #: own session, and the giveaway DM fan-out, must both be born fresh.
     monkeypatch.setattr(main, "ECHO_GUARD", {})
     monkeypatch.setattr(main, "GIVEAWAY_BROADCAST_TASK", None)
+    #: Round 15 state: the chats that show a picker reply keyboard and the users
+    #: already swept for a keyboard an older build left behind.
+    monkeypatch.setattr(main, "PICKER_KEYBOARD_SHOWN", set())
+    monkeypatch.setattr(main, "PICKER_SWEPT", set())
     # A fresh engine controller per test: the mode, the autoscaler counters and
     # the analytics must never leak from one test into the next.  The provider is
     # re-wired so it still reads whatever the FakeDB fixture installs.
@@ -946,6 +957,17 @@ def clean_state(monkeypatch):
         cpu_probe=host.cpu, memory_probe=host.memory, ping_probe=host.ping,
         sample_ttl=0.0, ping_ttl=0.0))
     yield
+
+
+@pytest.fixture
+def staged_campaigns(monkeypatch):
+    """Opt in to staging the owner's campaigns through the dump channel.
+
+    The default is direct delivery (``config.DUMP_STAGE_CAMPAIGNS`` is off): the
+    dump only carries users' downloads and messages.  The staging code is still
+    there behind the switch, and the tests that cover it ask for this fixture.
+    """
+    monkeypatch.setattr(main, "DUMP_STAGE_CAMPAIGNS", True)
 
 
 #: The bot's own user id inside FakeBot (used by every admin check).
@@ -1012,14 +1034,36 @@ class FakeBot:
         self.unpinned: list = []
         self.registered_commands = []
         self.command_scopes = []
+        #: Every ``set_bot_commands`` call as ``(scope, [BotCommand, ...])``, so a
+        #: test can read the menu of each scope (all private chats, one chat).
+        self.command_registry: list = []
+        #: Scopes whose list was deleted with ``delete_bot_commands(scope=...)``.
+        self.deleted_command_scopes: list = []
         self.edited: list = []
 
     async def delete_bot_commands(self, **kwargs):
         self.registered_commands.clear()
+        self.deleted_command_scopes.append(kwargs.get("scope"))
 
     async def set_bot_commands(self, commands, **kwargs):
         self.registered_commands = commands
         self.command_scopes.append(kwargs.get("scope"))
+        self.command_registry.append((kwargs.get("scope"), list(commands)))
+
+    def menu_for(self, scope_name, chat_id=None):
+        """The command names last published for a scope (``None`` if never set).
+
+        ``scope_name`` is the class name, e.g. ``"BotCommandScopeAllPrivateChats"``
+        or ``"BotCommandScopeChat"`` (then pass the ``chat_id``).
+        """
+        found = None
+        for scope, commands in self.command_registry:
+            if scope.__class__.__name__ != scope_name:
+                continue
+            if chat_id is not None and getattr(scope, "chat_id", None) != chat_id:
+                continue
+            found = commands
+        return found
 
     async def send_message(self, chat_id, text, **kwargs):
         msg = FakeMessage(text=text, message_id=len(self.sent) + 1000)

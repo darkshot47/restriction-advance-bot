@@ -227,13 +227,16 @@ GRANT_CUSTOM_DAYS_KEY = "custom"
 GRANT_MAX_DAYS = 36500
 
 # --------------------------------------------------------------------------- #
-#  Owner dump channel (the mirror) — copy, never forward
+#  Owner dump channel (the workspace) — copy, never forward
 # --------------------------------------------------------------------------- #
-#: Every delivered extraction is mirrored into the owner's dump channel and
-#: deleted again after this many seconds (10 minutes by default).  The mirror
-#: uses ``copy_message`` — never ``forward`` — so nothing carries a
-#: "Forwarded from" header, and the copy is removed again once it has served
-#: its purpose.
+#: The dump channel only ever sees **users' downloads and messages**, and only
+#: those of a user who has a custom caption in play (``/setcaption``,
+#: ``/setprefix`` or ``/setsuffix``).  For such a link the bot first puts the
+#: content into the dump, applies the caption *there*, then copies it from the
+#: dump to the user — a fresh copy, so neither a "Forwarded from" header nor an
+#: "Edited" label.  Everybody else is served directly and never touches the
+#: dump.  Staged copies are deleted right after delivery; this many seconds
+#: (10 minutes by default) is the safety net for a delete Telegram refused.
 DUMP_TTL_SECONDS = int(os.environ.get("DUMP_TTL_SECONDS", "600"))
 #: How many mirrored messages may wait for their TTL delete at the same time.
 #: Beyond this the oldest entry is deleted immediately instead of queueing.
@@ -241,6 +244,13 @@ DUMP_QUEUE_LIMIT = int(os.environ.get("DUMP_QUEUE_LIMIT", "500"))
 #: Seconds between two dump-channel operations (mirror / delete) — halves the
 #: chance of a FloodWait and is one of the governor's keys.
 DUMP_COOLDOWN_SECONDS = float(os.environ.get("DUMP_COOLDOWN_SECONDS", "1.0"))
+#: The owner's own outbound campaigns (/broadcast, /botcast, /cMSG, /sendmsg,
+#: /pin) are not user downloads, so they are delivered directly and keep the
+#: dump clean.  Set ``DUMP_STAGE_CAMPAIGNS=1`` to route them through the dump
+#: workspace again (one staged copy, then a copy per recipient).
+DUMP_STAGE_CAMPAIGNS = os.environ.get("DUMP_STAGE_CAMPAIGNS", "0").strip().lower() in {
+    "1", "true", "yes", "on",
+}
 
 # --------------------------------------------------------------------------- #
 #  /pin, /pinned and the inline-button wizard

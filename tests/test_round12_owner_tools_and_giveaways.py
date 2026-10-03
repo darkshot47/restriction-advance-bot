@@ -358,7 +358,8 @@ async def test_pin_a_replied_message_in_the_dump_channel(db, bot):
     assert bot.pinned[-1][0] == USER
     assert bot.pinned[-1][1] != 77, "the broadcast copy, not the source, is pinned"
     assert sc("BROADCAST COMPLETE") in texts(message)
-    assert bot.deleted, "temporary dump stage is removed after fan-out"
+    #: Owner campaigns are not users' downloads: the dump channel is never used.
+    assert not bot.deleted and all(copy[0] != CHANNEL for copy in bot.copies)
 
 
 async def test_pin_accepts_a_message_link(db, bot):
@@ -368,7 +369,8 @@ async def test_pin_accepts_a_message_link(db, bot):
     await main.pin_handler(None, message)
     await drain_background()
     assert bot.pinned[-1][0] == USER
-    assert (CHANNEL, CHANNEL, 88) in bot.copies
+    assert (USER, CHANNEL, 88) in bot.copies, "the linked post is copied straight to the user"
+    assert (CHANNEL, CHANNEL, 88) not in bot.copies, "nothing is staged in the dump"
 
 
 async def test_pin_without_a_target_explains_itself(db, bot):
