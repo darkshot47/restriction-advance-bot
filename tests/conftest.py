@@ -175,6 +175,7 @@ class FakeDB:
         self.admins: set[int] = set()
         self.profile_syncs: list[tuple] = []
         self.payments: list[dict] = []
+        self.stars_payments: list[dict] = []
         #: Global engine controller mode (None → config.DEFAULT_ENGINE_MODE).
         self.engine_mode = None
         #: Persisted per-engine extraction counters.
@@ -807,13 +808,45 @@ class FakeDB:
         return {"downloads": 0, "payments": 0, "feedback": 0, "bookmarks": 0, "stars_payments": 0}
 
     async def add_stars_payment(self, user_id, plan_key, stars_amount, inr_amount, invoice_payload):
+        for row in self.stars_payments:
+            if row.get("invoice_payload") == invoice_payload:
+                return None
+        self.stars_payments.append({
+            "user_id": int(user_id), "plan": plan_key,
+            "stars_amount": int(stars_amount), "inr_amount": int(inr_amount),
+            "invoice_payload": invoice_payload, "status": "pending",
+            "date": _dt.datetime.now(),
+        })
+        return SimpleNamespace(modified_count=0, upserted_id=invoice_payload)
+
+    async def get_stars_payment(self, invoice_payload):
+        for row in self.stars_payments:
+            if row.get("invoice_payload") == invoice_payload:
+                return row
         return None
 
-    async def complete_stars_payment(self, invoice_payload, status="completed"):
+    async def complete_stars_payment(self, invoice_payload, status="completed", *,
+                                     telegram_payment_charge_id=None,
+                                     provider_payment_charge_id=None):
+        if telegram_payment_charge_id and status == "completed":
+            for row in self.stars_payments:
+                if (row.get("status") == "completed"
+                        and row.get("telegram_payment_charge_id") == str(telegram_payment_charge_id)
+                        and row.get("invoice_payload") != invoice_payload):
+                    return False
+        for row in self.stars_payments:
+            if row.get("invoice_payload") == invoice_payload and row.get("status") == "pending":
+                row["status"] = status
+                row["completed_at"] = _dt.datetime.now()
+                if telegram_payment_charge_id:
+                    row["telegram_payment_charge_id"] = str(telegram_payment_charge_id)
+                if provider_payment_charge_id:
+                    row["provider_payment_charge_id"] = str(provider_payment_charge_id)
+                return True
         return False
 
     async def get_stars_payments(self, limit=50):
-        return []
+        return list(reversed(self.stars_payments))[:limit]
 
     async def register_created_bot(self, creator_id, bot_token, bot_username=None, bot_id=None):
         return {}
@@ -888,7 +921,8 @@ DB_NAMES = [
     "all_giveaway_participants", "clear_giveaway_participants",
     "ensure_giveaway_indexes",
     # Auto-delete and child bot features
-    "cleanup_old_records", "add_stars_payment", "complete_stars_payment", "get_stars_payments",
+    "cleanup_old_records", "add_stars_payment", "get_stars_payment", "complete_stars_payment",
+    "get_stars_payments",
     "register_created_bot", "get_created_bot", "get_created_bots_by_creator", "get_all_created_bots",
     "update_created_bot_stats", "delete_created_bot", "is_created_bot_admin",
     "add_child_bot_user", "get_child_bot_user_count", "get_child_bot_users",

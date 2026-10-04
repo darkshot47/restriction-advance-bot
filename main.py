@@ -93,7 +93,8 @@ from database import (
     is_giveaway_participant, list_giveaway_participants,
     all_giveaway_participants, clear_giveaway_participants,
     ensure_giveaway_indexes, PICKER_SWEEP_FIELD,
-    cleanup_old_records, add_stars_payment, complete_stars_payment, get_stars_payments,
+    cleanup_old_records, add_stars_payment, get_stars_payment, complete_stars_payment,
+    get_stars_payments,
     register_created_bot, get_created_bot, get_created_bots_by_creator, get_all_created_bots,
     update_created_bot_stats, delete_created_bot, is_created_bot_admin,
     add_child_bot_user, get_child_bot_user_count, get_child_bot_users,
@@ -9361,6 +9362,113 @@ def ensure_history_cleanup():
 #  Telegram Stars payment handlers
 # --------------------------------------------------------------------------- #
 
+STARS_CURRENCY = "XTR"
+STARS_PROVIDER_DATA = "{}"
+
+
+SENSITIVE_PAYMENT_ENV_KEYS = (
+    "BOT_TOKEN", "API_HASH", "MONGO_URL", "PYROGRAM_SESSION", "SESSION_STRING",
+)
+
+
+def redact_payment_log_text(text):
+    """Remove known deployment secrets before printing payment diagnostics."""
+    cleaned = str(text)
+    for key in SENSITIVE_PAYMENT_ENV_KEYS:
+        value = os.environ.get(key)
+        if value:
+            cleaned = cleaned.replace(value, "<redacted>")
+    if BOT_TOKEN:
+        cleaned = cleaned.replace(BOT_TOKEN, "<redacted>")
+    if API_HASH:
+        cleaned = cleaned.replace(API_HASH, "<redacted>")
+    return cleaned
+
+
+def log_stars_payment_issue(context, exc=None, **details):
+    """Log Stars payment diagnostics without exposing credentials to users."""
+    parts = [f"[STARS PAYMENT] {context}"]
+    if exc is not None:
+        parts.append(f"{type(exc).__name__}: {redact_payment_log_text(exc)}")
+    safe_details = []
+    for key, value in details.items():
+        lowered = key.lower()
+        if any(secret in lowered for secret in ("token", "hash", "session", "uri")):
+            value = "<redacted>"
+        safe_details.append(f"{key}={redact_payment_log_text(value)}")
+    if safe_details:
+        parts.append("; ".join(safe_details))
+    print(" | ".join(parts), flush=True)
+
+
+def stars_amount_for_plan(plan):
+    """Telegram Stars uses integer XTR units; keep the existing floor pricing."""
+    return max(1, int(plan_base_price(plan) * STAR_EXCHANGE_RATE))
+
+
+def parse_stars_payload(payload):
+    """Parse ``stars_<plan>_<user_id>_<nonce>`` payloads safely."""
+    if isinstance(payload, bytes):
+        try:
+            payload = payload.decode()
+        except UnicodeDecodeError:
+            return None
+    if not isinstance(payload, str):
+        return None
+    parts = payload.split("_", 3)
+    if len(parts) != 4 or parts[0] != "stars" or not parts[3]:
+        return None
+    plan_key = parts[1]
+    if plan_key not in PREMIUM_PLANS:
+        return None
+    try:
+        user_id = int(parts[2])
+    except (TypeError, ValueError):
+        return None
+    return {"plan_key": plan_key, "user_id": user_id, "nonce": parts[3]}
+
+
+def payment_int_amount(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+async def validate_stars_payment_payload(payload, *, user_id=None, currency=None,
+                                         total_amount=None):
+    """Validate plan, buyer, XTR currency, amount and pending payment row."""
+    parsed = parse_stars_payload(payload)
+    if not parsed:
+        return False, "Unknown payment.", None, None
+    plan = PREMIUM_PLANS[parsed["plan_key"]]
+    expected_amount = stars_amount_for_plan(plan)
+    if user_id is None:
+        return False, "Payment user mismatch.", parsed, None
+    try:
+        if int(user_id) != parsed["user_id"]:
+            return False, "Payment user mismatch.", parsed, None
+    except (TypeError, ValueError):
+        return False, "Payment user mismatch.", parsed, None
+    if currency != STARS_CURRENCY:
+        return False, "Invalid payment currency.", parsed, None
+    amount = payment_int_amount(total_amount)
+    if amount is None or amount != expected_amount:
+        return False, "Invalid payment amount.", parsed, None
+    row = await get_stars_payment(payload)
+    if not row:
+        return False, "Payment session expired. Please choose the plan again.", parsed, None
+    if row.get("status") != "pending":
+        return False, "Payment was already processed.", parsed, row
+    if int(row.get("user_id", 0)) != parsed["user_id"]:
+        return False, "Payment user mismatch.", parsed, row
+    if row.get("plan") != parsed["plan_key"]:
+        return False, "Payment plan mismatch.", parsed, row
+    if int(row.get("stars_amount", 0)) != expected_amount:
+        return False, "Invalid payment amount.", parsed, row
+    return True, None, parsed, row
+
+
 @callback_action("stars_plans")
 async def cb_stars_plans(client, query):
     await query.answer()
@@ -9388,10 +9496,16 @@ async def handle_stars_buy(client, query, plan_key):
         return
     uid = query.from_user.id
     base_inr = plan_base_price(plan)
-    stars_amount = max(1, int(base_inr * STAR_EXCHANGE_RATE))
+    stars_amount = stars_amount_for_plan(plan)
     title = plan.get("title", plan_key)
-    import secrets
     payload = f"stars_{plan_key}_{uid}_{secrets.token_hex(4)}"
+
+    try:
+        await add_stars_payment(uid, plan_key, stars_amount, base_inr, payload)
+    except Exception as exc:
+        log_stars_payment_issue("pending record failed", exc, user_id=uid, plan=plan_key)
+        await query.answer(ui_text("❌ Could not prepare Stars payment. Please try again."), show_alert=True)
+        return
 
     try:
         from pyrogram.raw import functions, types as raw_types
@@ -9402,11 +9516,13 @@ async def handle_stars_buy(client, query, plan_key):
                     title=f"{title} Premium",
                     description=f"Premium {title} — extracted by @{BOT_USERNAME}",
                     invoice=raw_types.Invoice(
-                        currency="XTR",
+                        currency=STARS_CURRENCY,
                         prices=[raw_types.LabeledPrice(label=f"{title}", amount=stars_amount)],
                     ),
                     payload=payload.encode(),
-                    title_param=f"{title} Premium",
+                    # Kurigram 2.2.26 requires provider_data; Stars need no
+                    # provider token, so the provider field stays unset.
+                    provider_data=raw_types.DataJSON(data=STARS_PROVIDER_DATA),
                 ),
                 message=f"⭐ **{title} Premium**\n\n"
                         f"⭐ Price: **{stars_amount} Stars**\n"
@@ -9415,21 +9531,40 @@ async def handle_stars_buy(client, query, plan_key):
                 random_id=bot.rnd_id(),
             )
         )
-        await query.answer(ui_text(f"⭐ Invoice sent! {stars_amount} Stars"))
-        await add_stars_payment(uid, plan_key, stars_amount, base_inr, payload)
     except Exception as exc:
-        print(f"[STARS INVOICE FAILED] {exc}", flush=True)
-        await query.answer(ui_text(f"❌ Could not send Stars invoice: {exc}"), show_alert=True)
+        log_stars_payment_issue("invoice send failed", exc, user_id=uid, plan=plan_key)
+        try:
+            await complete_stars_payment(payload, "invoice_failed")
+        except Exception as mark_exc:
+            log_stars_payment_issue("invoice failure status update failed", mark_exc,
+                                    user_id=uid, plan=plan_key)
+        await query.answer(ui_text("❌ Could not send Stars invoice. Please try again."), show_alert=True)
+        return
+
+    await query.answer(ui_text(f"⭐ Invoice sent! {stars_amount} Stars"))
 
 
 @bot.on_pre_checkout_query()
 async def pre_checkout_handler(client, query):
     """Approve or reject the Stars pre-checkout."""
     payload = query.invoice_payload or ""
-    if payload.startswith("stars_"):
+    try:
+        ok, error, parsed, _row = await validate_stars_payment_payload(
+            payload,
+            user_id=getattr(getattr(query, "from_user", None), "id", None),
+            currency=getattr(query, "currency", None),
+            total_amount=getattr(query, "total_amount", None),
+        )
+    except Exception as exc:
+        log_stars_payment_issue("pre-checkout validation failed", exc)
+        await query.answer(ok=False, error_message="Could not verify this payment. Please try again.")
+        return
+    if ok:
         await query.answer(ok=True)
     else:
-        await query.answer(ok=False, error_message="Unknown payment.")
+        log_stars_payment_issue("pre-checkout rejected", user_id=(parsed or {}).get("user_id"),
+                                plan=(parsed or {}).get("plan_key"), reason=error)
+        await query.answer(ok=False, error_message=error)
 
 
 @bot.on_message(filters.successful_payment)
@@ -9439,17 +9574,63 @@ async def successful_payment_handler(client, message):
     if not payment:
         return
     payload = getattr(payment, "invoice_payload", "") or ""
-    if not payload.startswith("stars_"):
+    parsed = parse_stars_payload(payload)
+    if not parsed:
+        log_stars_payment_issue("successful payment ignored: invalid payload")
         return
-    parts = payload.split("_")
-    plan_key = parts[1] if len(parts) > 1 else None
-    uid = message.from_user.id
-    plan = PREMIUM_PLANS.get(plan_key) if plan_key else None
-    days = plan["days"] if plan else 30
-    stars_paid = getattr(payment, "total_amount", 0)
+    uid = parsed["user_id"]
+    sender_id = getattr(getattr(message, "from_user", None), "id", None)
+    if sender_id != uid:
+        log_stars_payment_issue("successful payment ignored: user mismatch",
+                                user_id=uid, sender_id=sender_id)
+        return
+    plan_key = parsed["plan_key"]
+    plan = PREMIUM_PLANS[plan_key]
+    days = plan["days"]
+    stars_paid = payment_int_amount(getattr(payment, "total_amount", 0)) or 0
+    currency = getattr(payment, "currency", None)
 
-    await complete_stars_payment(payload, "completed")
-    await add_premium(uid, days, tier="private")
+    try:
+        ok, error, _parsed, _row = await validate_stars_payment_payload(
+            payload, user_id=uid, currency=currency, total_amount=stars_paid,
+        )
+    except Exception as exc:
+        log_stars_payment_issue("successful payment validation failed", exc,
+                                user_id=uid, plan=plan_key)
+        await say(message, "⚠️ Payment received, but activation could not be verified. Please contact support.")
+        return
+    if not ok:
+        log_stars_payment_issue("successful payment rejected", user_id=uid,
+                                plan=plan_key, reason=error)
+        if error != "Payment was already processed.":
+            await say(message, "⚠️ Payment received, but it could not be matched to this checkout. Please contact support.")
+        return
+
+    telegram_charge_id = getattr(payment, "telegram_payment_charge_id", None)
+    provider_charge_id = getattr(payment, "provider_payment_charge_id", None)
+    try:
+        completed = await complete_stars_payment(
+            payload, "completed",
+            telegram_payment_charge_id=telegram_charge_id,
+            provider_payment_charge_id=provider_charge_id,
+        )
+    except Exception as exc:
+        log_stars_payment_issue("payment completion failed", exc, user_id=uid, plan=plan_key)
+        await say(message, "⚠️ Payment received, but activation could not be completed. Please contact support.")
+        return
+    if not completed:
+        log_stars_payment_issue("duplicate successful payment ignored",
+                                user_id=uid, plan=plan_key,
+                                telegram_payment_charge_id=telegram_charge_id)
+        return
+
+    try:
+        await add_premium(uid, days, tier="private")
+    except Exception as exc:
+        log_stars_payment_issue("premium activation failed", exc, user_id=uid, plan=plan_key)
+        await say(message, "⚠️ Payment received, but premium activation failed. Please contact support.")
+        return
+
     await say(message,
         f"⭐ **Payment Successful!**\n\n"
         f"✅ {plan.get('title', 'Premium')} activated!\n"
@@ -9464,10 +9645,10 @@ async def successful_payment_handler(client, message):
             f"👤 {name} (`{uid}`)\n"
             f"📦 {plan.get('title', plan_key)}\n"
             f"⭐ Stars: {stars_paid}\n"
-            f"💰 INR equivalent: ₹{plan_base_price(plan) if plan else '—'}\n"
+            f"💰 INR equivalent: ₹{plan_base_price(plan)}\n"
             f"✅ Premium auto-activated!")
-    except Exception:
-        pass
+    except Exception as exc:
+        log_stars_payment_issue("owner notification failed", exc, user_id=uid, plan=plan_key)
 
 
 # --------------------------------------------------------------------------- #
