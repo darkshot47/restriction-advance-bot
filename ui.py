@@ -458,6 +458,7 @@ def help_keyboard() -> InlineKeyboardMarkup:
          button("💎 Premium", callback_data="cmd_premium", style="success")],
         [button("⚙️ Settings", callback_data="cmd_settings", style="primary"),
          button("💬 Feedback", callback_data="cmd_feedback", style="primary")],
+        [button("🤖 Create Own Bot", callback_data="cmd_createbot", style="success")],
         [home_button()],
     ])
 
@@ -1710,6 +1711,8 @@ def plans_keyboard():
             rows.append([standard, turbo])
         else:
             rows.append([standard])
+    # Telegram Stars payment row
+    rows.append([button("⭐ Pay with Telegram Stars", callback_data="stars_plans", style="success")])
     rows.append([button("⬅️ Benefits", callback_data="cmd_premium", style="primary"),
                  home_button()])
     rows.append([owner_contact_button()])
@@ -1751,6 +1754,36 @@ def payment_keyboard(token):
          button("❌ Cancel", callback_data="cancel_action", style="danger")],
         [owner_contact_button()],
     ])
+
+
+def stars_plans_text():
+    """Telegram Stars plan list — half of the UPI price."""
+    from config import PREMIUM_PLANS, plan_base_price, STAR_EXCHANGE_RATE
+    lines = ["⭐ **TELEGRAM STARS PAYMENT**\n",
+             "Pay with Telegram Stars — official & instant!\n",
+             "💱 Rate: ₹1 = 0.5 Stars (half of UPI price)\n",
+             "⭐ Stars are sent directly to the bot owner.\n"]
+    for key, plan in PREMIUM_PLANS.items():
+        base_inr = plan_base_price(plan)
+        stars = max(1, int(base_inr * STAR_EXCHANGE_RATE))
+        lines.append(f"• **{plan['title']}** — ⭐{stars} Stars (₹{base_inr})")
+    lines.append("\n📲 Select a plan below. An invoice will be sent via Telegram Stars.")
+    lines.append("⭐ Stars go directly to the bot owner's Telegram account.")
+    return "\n".join(lines)
+
+
+def stars_plans_keyboard():
+    """Keyboard for Telegram Stars plan selection."""
+    from config import PREMIUM_PLANS, plan_base_price, STAR_EXCHANGE_RATE
+    rows = []
+    for key, plan in PREMIUM_PLANS.items():
+        base_inr = plan_base_price(plan)
+        stars = max(1, int(base_inr * STAR_EXCHANGE_RATE))
+        rows.append([button(f"⭐ {plan['title']} · {stars} Stars",
+                           callback_data=f"stars_buy:{key}", style="success")])
+    rows.append([button("⬅️ Back to Plans", callback_data="premium_plans", style="primary"),
+                 home_button()])
+    return keyboard(rows)
 
 
 def admin_back_keyboard():

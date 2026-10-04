@@ -18,6 +18,8 @@ downloads_col = db["downloads"]
 bookmarks_col = db["bookmarks"]
 feedback_col = db["feedback"]
 config_col = db["config"]
+created_bots_col = db["created_bots"]  # /CreateBot feature
+stars_payments_col = db["stars_payments"]  # Telegram Stars payments
 
 
 #: User-document flag: "no picker reply keyboard from an older build can still be
@@ -1380,3 +1382,183 @@ async def all_giveaway_participants(giveaway_id):
 async def clear_giveaway_participants(giveaway_id) -> int:
     result = await db["giveaway_participants"].delete_many({"giveaway_id": str(giveaway_id)})
     return int(getattr(result, "deleted_count", 0))
+
+
+# --------------------------------------------------------------------------- #
+#  Auto-delete history and payments older than 30 days
+# --------------------------------------------------------------------------- #
+
+async def cleanup_old_records(days: int = 30):
+    """Delete download history, bookmarks, feedback and payment records older than *days*.
+
+    Called periodically by a background task in main.py.
+    """
+    cutoff = datetime.now() - timedelta(days=days)
+    dl_result = await downloads_col.delete_many({"date": {"$lt": cutoff}})
+    pay_result = await db["payments"].delete_many({"date": {"$lt": cutoff}})
+    fb_result = await feedback_col.delete_many({"date": {"$lt": cutoff}})
+    bm_result = await bookmarks_col.delete_many({"date": {"$lt": cutoff}})
+    stars_result = await stars_payments_col.delete_many({"date": {"$lt": cutoff}})
+    return {
+        "downloads": int(getattr(dl_result, "deleted_count", 0)),
+        "payments": int(getattr(pay_result, "deleted_count", 0)),
+        "feedback": int(getattr(fb_result, "deleted_count", 0)),
+        "bookmarks": int(getattr(bm_result, "deleted_count", 0)),
+        "stars_payments": int(getattr(stars_result, "deleted_count", 0)),
+    }
+
+
+# --------------------------------------------------------------------------- #
+#  Telegram Stars payments
+# --------------------------------------------------------------------------- #
+
+async def add_stars_payment(user_id, plan_key, stars_amount, inr_amount, invoice_payload):
+    """Record a Telegram Stars payment."""
+    row = {
+        "user_id": int(user_id),
+        "plan": plan_key,
+        "stars_amount": int(stars_amount),
+        "inr_amount": int(inr_amount),
+        "invoice_payload": invoice_payload,
+        "status": "pending",
+        "date": datetime.now(),
+    }
+    return await stars_payments_col.insert_one(row)
+
+
+async def complete_stars_payment(invoice_payload, status="completed"):
+    """Mark a Stars payment as completed or refunded."""
+    result = await stars_payments_col.update_one(
+        {"invoice_payload": invoice_payload, "status": "pending"},
+        {"$set": {"status": status, "completed_at": datetime.now()}},
+    )
+    return bool(result.modified_count)
+
+
+async def get_stars_payments(limit=50):
+    """All Stars payments, newest first."""
+    rows = []
+    async for row in stars_payments_col.find({}).sort("date", -1).limit(limit):
+        rows.append(row)
+    return rows
+
+
+# --------------------------------------------------------------------------- #
+#  /CreateBot — user-created child bots
+# --------------------------------------------------------------------------- #
+
+async def register_created_bot(creator_id, bot_token, bot_username=None, bot_id=None):
+    """Register a new child bot created via /CreateBot."""
+    row = {
+        "_id": str(bot_token.split(":")[0]) if ":" in str(bot_token) else str(bot_token),
+        "creator_id": int(creator_id),
+        "bot_token": str(bot_token),
+        "bot_username": bot_username,
+        "bot_id": int(bot_id) if bot_id else None,
+        "status": "active",
+        "users_count": 0,
+        "total_extractions": 0,
+        "created_at": datetime.now(),
+        "last_active": datetime.now(),
+    }
+    try:
+        await created_bots_col.insert_one(row)
+    except DuplicateKeyError:
+        await created_bots_col.update_one(
+            {"_id": row["_id"]},
+            {"$set": {"bot_token": str(bot_token), "bot_username": bot_username,
+                      "bot_id": int(bot_id) if bot_id else None,
+                      "status": "active", "last_active": datetime.now()}},
+        )
+    return row
+
+
+async def get_created_bot(bot_token_prefix):
+    """Get a created bot by its token prefix (bot id part)."""
+    prefix = str(bot_token_prefix).split(":")[0] if ":" in str(bot_token_prefix) else str(bot_token_prefix)
+    return await created_bots_col.find_one({"_id": prefix})
+
+
+async def get_created_bots_by_creator(creator_id):
+    """All bots created by a specific user."""
+    rows = []
+    async for row in created_bots_col.find({"creator_id": int(creator_id)}):
+        rows.append(row)
+    return rows
+
+
+async def get_all_created_bots():
+    """Every registered child bot."""
+    rows = []
+    async for row in created_bots_col.find({}):
+        rows.append(row)
+    return rows
+
+
+async def update_created_bot_stats(bot_token_prefix, *, users_count=None, total_extractions=None):
+    """Update usage stats of a child bot."""
+    prefix = str(bot_token_prefix).split(":")[0] if ":" in str(bot_token_prefix) else str(bot_token_prefix)
+    updates = {"last_active": datetime.now()}
+    if users_count is not None:
+        updates["users_count"] = int(users_count)
+    if total_extractions is not None:
+        updates["total_extractions"] = int(total_extractions)
+    await created_bots_col.update_one({"_id": prefix}, {"$set": updates})
+
+
+async def delete_created_bot(bot_token_prefix):
+    """Remove a child bot registration."""
+    prefix = str(bot_token_prefix).split(":")[0] if ":" in str(bot_token_prefix) else str(bot_token_prefix)
+    result = await created_bots_col.delete_one({"_id": prefix})
+    return bool(result.deleted_count)
+
+
+async def is_created_bot_admin(user_id, bot_token_prefix):
+    """Check if a user is the creator/admin of a specific child bot."""
+    bot = await get_created_bot(bot_token_prefix)
+    return bot and int(bot.get("creator_id", 0)) == int(user_id)
+
+
+async def get_child_bot_users_col(bot_token_prefix):
+    """Get the users collection for a specific child bot's users."""
+    prefix = str(bot_token_prefix).split(":")[0] if ":" in str(bot_token_prefix) else str(bot_token_prefix)
+    return db[f"child_bot_users_{prefix}"]
+
+
+async def add_child_bot_user(bot_token_prefix, user_id, name=None, username=None):
+    """Track a user of a child bot."""
+    col = await get_child_bot_users_col(bot_token_prefix)
+    try:
+        await col.update_one(
+            {"user_id": int(user_id)},
+            {"$set": {"user_id": int(user_id), "name": name, "username": username,
+                      "last_active": datetime.now()},
+             "$setOnInsert": {"joined_at": datetime.now(), "extractions": 0}},
+            upsert=True,
+        )
+    except Exception:
+        pass
+
+
+async def get_child_bot_user_count(bot_token_prefix):
+    """How many users a child bot has."""
+    col = await get_child_bot_users_col(bot_token_prefix)
+    return await col.count_documents({})
+
+
+async def get_child_bot_users(bot_token_prefix, limit=50):
+    """List users of a child bot."""
+    col = await get_child_bot_users_col(bot_token_prefix)
+    rows = []
+    async for row in col.find({}).sort("last_active", -1).limit(limit):
+        rows.append(row)
+    return rows
+
+
+async def increment_child_bot_extractions(bot_token_prefix):
+    """Increment extraction count for a child bot."""
+    prefix = str(bot_token_prefix).split(":")[0] if ":" in str(bot_token_prefix) else str(bot_token_prefix)
+    await created_bots_col.update_one(
+        {"_id": prefix},
+        {"$inc": {"total_extractions": 1}, "$set": {"last_active": datetime.now()}},
+    )

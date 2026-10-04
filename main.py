@@ -16,6 +16,7 @@ from pyrogram import Client, filters, raw, utils
 from pyrogram.types import (
     CallbackQuery, BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeChat,
     ReplyKeyboardMarkup, ReplyKeyboardRemove,
+    InlineKeyboardButton, InlineKeyboardMarkup,
 )
 from pyrogram.enums import ParseMode
 from pyrogram.errors import (
@@ -38,6 +39,7 @@ from config import (BOT_USERNAME, FREE_DAILY_LIMIT, FREE_PRIVATE_LINKS, WATERMAR
                     FSUB_MAX_BUTTON_CHARS, FSUB_ITEMS_PER_PAGE, FSUB_JOINER_SCAN_LIMIT,
                     FSUB_VERIFY_LABEL, CHANNEL_TITLE_FALLBACK,
                     OWNER_CONTACT_URL, plan_addon_price, plan_base_price, plan_total_price,
+                    STAR_EXCHANGE_RATE, HISTORY_RETENTION_DAYS, OWNER_TELEGRAM_ID,
                     ENGINE_PYTHON, ENGINE_CPP, ENGINE_PEAK_THRESHOLD, ENGINE_TURBO_WORKERS,
                     ENGINE_ZERO_COPY_MAX_BYTES, ENGINE_START_GAP_SECONDS,
                     ENGINE_PYTHON_SPEED_LIMIT_MBPS, ENGINE_PYTHON_SPEED_BURST_SECONDS,
@@ -91,6 +93,11 @@ from database import (
     is_giveaway_participant, list_giveaway_participants,
     all_giveaway_participants, clear_giveaway_participants,
     ensure_giveaway_indexes, PICKER_SWEEP_FIELD,
+    cleanup_old_records, add_stars_payment, complete_stars_payment, get_stars_payments,
+    register_created_bot, get_created_bot, get_created_bots_by_creator, get_all_created_bots,
+    update_created_bot_stats, delete_created_bot, is_created_bot_admin,
+    add_child_bot_user, get_child_bot_user_count, get_child_bot_users,
+    increment_child_bot_extractions,
 )  # noqa: F401
 
 API_ID = int(os.environ.get("API_ID"))
@@ -2227,6 +2234,16 @@ async def cb_feedback(client, query):
     await query.answer()
     await start_feedback(query)
 
+@callback_action("cmd_share")
+async def cb_share(client, query):
+    await query.answer()
+    link = f"https://t.me/{BOT_USERNAME}"
+    await render(query,
+        f"📤 **Share this bot!**\n\n🤖 @{BOT_USERNAME}",
+        ui.keyboard([[ui.share_url_button("📤 Share Bot", link,
+                                          f"Check out @{BOT_USERNAME}!")],
+                     [ui.home_button()]]))
+
 
 @callback_action("cmd_language")
 async def cb_language(client, query):
@@ -2525,7 +2542,7 @@ NEW_COMMAND_NAMES = [
     "setdump", "deldump", "dump", "post", "native",
     "giveaway", "participants", "endgiveaway", "giveawaystatus",
 ]
-COMMAND_NAMES = NEW_COMMAND_NAMES + ["start", "help", "login", "logout", "status", "cancel", "setcaption", "delcaption", "setthumb", "delthumb", "setprefix", "setsuffix", "mystats", "myinfo", "history", "settings", "language", "refer", "bookmark", "bookmarks", "favorite", "favorites", "share", "feedback", "invite", "premium", "stats", "users", "loggedusers", "activeusers", "newusers", "topusers", "broadcast", "botcast", "menu", "cmsg", "unpin", "ban", "unban", "banlist", "finduser", "userinfo", "addpremium", "removepremium", "premiumlist", "addadmin", "removeadmin", "adminlist", "setfsub", "fsublist", "delfsub", "fsublabel", "fsubcheck", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export", "adminhelp", "admin", "admins", "addqr", "delqr", "removeqr", "payments", "redeem", "setchat", "delchat", "models", "engine", "mychannels", "setengine"]
+COMMAND_NAMES = NEW_COMMAND_NAMES + ["start", "help", "login", "logout", "status", "cancel", "setcaption", "delcaption", "setthumb", "delthumb", "setprefix", "setsuffix", "mystats", "myinfo", "history", "settings", "language", "refer", "bookmark", "bookmarks", "favorite", "favorites", "share", "feedback", "invite", "premium", "stats", "users", "loggedusers", "activeusers", "newusers", "topusers", "broadcast", "botcast", "superbroadcast", "menu", "cmsg", "unpin", "ban", "unban", "banlist", "finduser", "userinfo", "addpremium", "removepremium", "premiumlist", "addadmin", "removeadmin", "adminlist", "setfsub", "fsublist", "delfsub", "fsublabel", "fsubcheck", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export", "adminhelp", "admin", "admins", "addqr", "delqr", "removeqr", "payments", "redeem", "setchat", "delchat", "models", "engine", "mychannels", "setengine", "CreateBot", "DeleteBot", "Bot_stats"]
 ABORT_GROUP = -1
 #: Runs before everything else: the one-time clean-up of a leftover picker keyboard.
 SWEEP_GROUP = -3
@@ -8267,7 +8284,7 @@ ADMIN_OWNER_COMMANDS = {
     "addqr", "delqr", "removeqr", "clearlogs",
     # Owner tools: pin control, the dump channel, channel posts, the native
     # engine diagnostics and the giveaway control panel.
-    "pin", "pinned", "unpin", "menu", "cmsg", "botcast",
+    "pin", "pinned", "unpin", "menu", "cmsg", "botcast", "superbroadcast",
     "setdump", "deldump", "dump", "post", "native",
     "giveaway", "participants", "endgiveaway",
 }
@@ -8485,6 +8502,10 @@ async def publish_menu_on_start(client):
     stale until then.
     """
     ensure_command_registration()
+    # Start auto-delete background task for old history/payments
+    ensure_history_cleanup()
+    # Start all registered child bots
+    spawn_background(init_child_bots())
 
 
 def command_name_of(message) -> str | None:
@@ -8679,6 +8700,9 @@ async def callback_handler(client, query):
         fsub_pending.pop(uid, None)
     if data.startswith("dl:"):
         await handle_download_controls(query)
+        return
+    if data.startswith("delbot:"):
+        await handle_deletebot_callback(client, query, data)
         return
     if data.startswith(("cap_yes:", "cap_no:")):
         await handle_caption_choice(client, query)
@@ -8880,6 +8904,57 @@ async def text_handler(client, message):
             await say(message, "🚫 Owner only command!")
             return
         await complete_fsub_label(message, user_id)
+        return
+
+    # /CreateBot — user is sending their bot token
+    if user_id in CREATEBOT_PENDING and CREATEBOT_PENDING.get(user_id, {}).get("step") == "waiting_token":
+        CREATEBOT_PENDING.pop(user_id, None)
+        token = text.strip()
+        # Basic validation: bot tokens look like "123456:ABC-DEF..."
+        if ":" not in token or len(token) < 20:
+            await say(message, "❌ **Invalid bot token.**\n\n"
+                               "Get it from @BotFather → /newbot\n\n"
+                               "Send /CreateBot to try again.")
+            return
+        status_msg = await say(message, "⏳ Creating your bot...")
+        try:
+            # Create a temporary client to verify the token
+            temp = Client(f"verify_{user_id}", api_id=API_ID, api_hash=API_HASH,
+                          bot_token=token, in_memory=True)
+            await temp.start()
+            me = await temp.get_me()
+            await temp.stop()
+            bot_username = getattr(me, "username", None)
+            bot_id = getattr(me, "id", None)
+            # Register in database
+            await register_created_bot(user_id, token,
+                                       bot_username=bot_username, bot_id=bot_id)
+            # Start the child bot
+            bot_row = await get_created_bot(token)
+            if bot_row:
+                ok = await start_child_bot(bot_row)
+                if ok:
+                    await say_edit(status_msg,
+                        f"✅ **Bot Created Successfully!**\n\n"
+                        f"🤖 @{bot_username}\n"
+                        f"🆔 `{bot_id}`\n\n"
+                        f"**Your bot features:**\n"
+                        f"• 📥 Public content extraction\n"
+                        f"• 📊 /users — see your users\n"
+                        f"• 📊 /stats — bot statistics\n"
+                        f"• 📣 /broadcast — message all users\n\n"
+                        f"🔒 Private links redirect to @{BOT_USERNAME}\n\n"
+                        f"Share your bot: https://t.me/{bot_username}")
+                else:
+                    await say_edit(status_msg, "❌ Bot registered but failed to start. Try /CreateBot again.")
+            else:
+                await say_edit(status_msg, "❌ Registration failed. Try again.")
+        except Exception as exc:
+            await say_edit(status_msg,
+                f"❌ **Bot creation failed.**\n\n"
+                f"Error: `{exc}`\n\n"
+                f"Make sure the token is valid (from @BotFather).\n"
+                f"Send /CreateBot to try again.")
         return
 
     if user_id in admin_pending:
@@ -9248,6 +9323,597 @@ async def text_handler(client, message):
             else:
                 await say_edit(status, "🔒 Private. Use /login")
         
+
+# --------------------------------------------------------------------------- #
+#  Auto-delete history and payments older than 30 days
+# --------------------------------------------------------------------------- #
+
+async def history_cleanup_loop():
+    """Background task: purge old download history, payments and records every 6 hours."""
+    while True:
+        try:
+            result = await cleanup_old_records(HISTORY_RETENTION_DAYS)
+            total = sum(result.values())
+            if total > 0:
+                print(f"[AUTO-CLEANUP] Purged {total} records older than {HISTORY_RETENTION_DAYS} days: {result}", flush=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[AUTO-CLEANUP FAILED] {type(exc).__name__}: {exc}", flush=True)
+        await asyncio.sleep(6 * 3600)  # every 6 hours
+
+
+HISTORY_CLEANUP_TASK = None
+
+def ensure_history_cleanup():
+    """Start the auto-delete background task once."""
+    global HISTORY_CLEANUP_TASK
+    if HISTORY_CLEANUP_TASK is not None and not HISTORY_CLEANUP_TASK.done():
+        return
+    try:
+        loop = asyncio.get_running_loop()
+        HISTORY_CLEANUP_TASK = loop.create_task(history_cleanup_loop())
+    except RuntimeError:
+        pass
+
+
+# --------------------------------------------------------------------------- #
+#  Telegram Stars payment handlers
+# --------------------------------------------------------------------------- #
+
+@callback_action("stars_plans")
+async def cb_stars_plans(client, query):
+    await query.answer()
+    await render(query, ui.stars_plans_text(), ui.stars_plans_keyboard())
+
+
+@callback_action("stars_buy:month")
+async def cb_stars_buy_month(client, query):
+    await handle_stars_buy(client, query, "month")
+
+@callback_action("stars_buy:quarter")
+async def cb_stars_buy_quarter(client, query):
+    await handle_stars_buy(client, query, "quarter")
+
+@callback_action("stars_buy:year")
+async def cb_stars_buy_year(client, query):
+    await handle_stars_buy(client, query, "year")
+
+
+async def handle_stars_buy(client, query, plan_key):
+    """Send a Telegram Stars invoice for the chosen plan."""
+    plan = PREMIUM_PLANS.get(plan_key)
+    if not plan:
+        await query.answer(ui_text("Unknown plan."), show_alert=True)
+        return
+    uid = query.from_user.id
+    base_inr = plan_base_price(plan)
+    stars_amount = max(1, int(base_inr * STAR_EXCHANGE_RATE))
+    title = plan.get("title", plan_key)
+    import secrets
+    payload = f"stars_{plan_key}_{uid}_{secrets.token_hex(4)}"
+
+    try:
+        from pyrogram.raw import functions, types as raw_types
+        await bot.invoke(
+            functions.messages.SendMedia(
+                peer=await bot.resolve_peer(uid),
+                media=raw_types.InputMediaInvoice(
+                    title=f"{title} Premium",
+                    description=f"Premium {title} — extracted by @{BOT_USERNAME}",
+                    invoice=raw_types.Invoice(
+                        currency="XTR",
+                        prices=[raw_types.LabeledPrice(label=f"{title}", amount=stars_amount)],
+                    ),
+                    payload=payload.encode(),
+                    title_param=f"{title} Premium",
+                ),
+                message=f"⭐ **{title} Premium**\n\n"
+                        f"⭐ Price: **{stars_amount} Stars**\n"
+                        f"💰 UPI Price: ₹{base_inr}\n\n"
+                        f"Tap below to pay with Telegram Stars.",
+                random_id=bot.rnd_id(),
+            )
+        )
+        await query.answer(ui_text(f"⭐ Invoice sent! {stars_amount} Stars"))
+        await add_stars_payment(uid, plan_key, stars_amount, base_inr, payload)
+    except Exception as exc:
+        print(f"[STARS INVOICE FAILED] {exc}", flush=True)
+        await query.answer(ui_text(f"❌ Could not send Stars invoice: {exc}"), show_alert=True)
+
+
+@bot.on_pre_checkout_query()
+async def pre_checkout_handler(client, query):
+    """Approve or reject the Stars pre-checkout."""
+    payload = query.invoice_payload or ""
+    if payload.startswith("stars_"):
+        await query.answer(ok=True)
+    else:
+        await query.answer(ok=False, error_message="Unknown payment.")
+
+
+@bot.on_message(filters.successful_payment)
+async def successful_payment_handler(client, message):
+    """Handle a successful Telegram Stars payment."""
+    payment = message.successful_payment
+    if not payment:
+        return
+    payload = getattr(payment, "invoice_payload", "") or ""
+    if not payload.startswith("stars_"):
+        return
+    parts = payload.split("_")
+    plan_key = parts[1] if len(parts) > 1 else None
+    uid = message.from_user.id
+    plan = PREMIUM_PLANS.get(plan_key) if plan_key else None
+    days = plan["days"] if plan else 30
+    stars_paid = getattr(payment, "total_amount", 0)
+
+    await complete_stars_payment(payload, "completed")
+    await add_premium(uid, days, tier="private")
+    await say(message,
+        f"⭐ **Payment Successful!**\n\n"
+        f"✅ {plan.get('title', 'Premium')} activated!\n"
+        f"⭐ Stars paid: {stars_paid}\n"
+        f"📅 Duration: {days} days\n\n"
+        f"Enjoy your premium access! 🎉")
+    # Notify owner
+    try:
+        name = get_user_display_name(message.from_user)
+        await bot.send_message(OWNER_ID,
+            f"⭐ **New Stars Payment!**\n\n"
+            f"👤 {name} (`{uid}`)\n"
+            f"📦 {plan.get('title', plan_key)}\n"
+            f"⭐ Stars: {stars_paid}\n"
+            f"💰 INR equivalent: ₹{plan_base_price(plan) if plan else '—'}\n"
+            f"✅ Premium auto-activated!")
+    except Exception:
+        pass
+
+
+# --------------------------------------------------------------------------- #
+#  Payment history — show user names alongside IDs
+# --------------------------------------------------------------------------- #
+
+# Patch the existing payments_handler to show user names
+_original_payments_handler = None
+
+@bot.on_message(filters.command("payments") & filters.private)
+@admin_only
+async def payments_handler(client, message):
+    rows = await get_payments()
+    stars_rows = await get_stars_payments()
+    await say(message, f"💳 **PAYMENT REVIEWS**\n\n"
+                       f"UPI Proofs: **{len(rows)}** | Stars: **{len(stars_rows)}**\n"
+                       f"Showing latest 20.")
+    # UPI payments
+    for row in rows[:20]:
+        note = row.get("note")
+        plan = PREMIUM_PLANS.get(note.get("plan"), {}) if isinstance(note, dict) else {}
+        # Fetch user name
+        user_row = await get_user(row['user_id'])
+        user_name = (user_row or {}).get("name", "Unknown") if user_row else "Unknown"
+        user_name_escaped = html.escape(user_name)
+        caption = (f"👤 {user_name_escaped} (`{row['user_id']}`)\n"
+                   f"📦 {plan.get('title', 'Legacy proof')}\n"
+                   f"💰 {RUPEE}{plan.get('price', '—')}\n"
+                   f"📅 {row.get('date', '—')}\n"
+                   f"🔎 Verify payment before granting premium.")
+        plan_key = note.get("plan") if isinstance(note, dict) else None
+        status = row.get("status", "pending_review")
+        keyboard = (ui.payment_review_keyboard(row["user_id"], plan_key)
+                    if status == "pending_review" else None)
+        if isinstance(note, dict) or note == "photo":
+            try:
+                await bot.send_photo(message.chat.id, row["proof"],
+                                     caption=ui_text(caption), reply_markup=keyboard)
+            except Exception:
+                await say(message, caption + "\n⚠️ Screenshot unavailable.")
+        else:
+            await say(message, caption + "\n" + str(row.get("proof", "")))
+
+    # Stars payments
+    if stars_rows:
+        text = "⭐ **TELEGRAM STARS PAYMENTS**\n\n"
+        for i, row in enumerate(stars_rows[:10], 1):
+            user_row = await get_user(row["user_id"])
+            user_name = (user_row or {}).get("name", "Unknown") if user_row else "Unknown"
+            plan = PREMIUM_PLANS.get(row.get("plan"), {})
+            status_emoji = "✅" if row.get("status") == "completed" else "⏳"
+            text += (f"{i}. {status_emoji} {user_name} (`{row['user_id']}`)\n"
+                     f"   📦 {plan.get('title', row.get('plan', '?'))}\n"
+                     f"   ⭐ {row.get('stars_amount', '?')} Stars | 💰 ₹{row.get('inr_amount', '?')}\n"
+                     f"   📅 {row.get('date', '—')}\n\n")
+        await say(message, text)
+
+
+# --------------------------------------------------------------------------- #
+#  /CreateBot — users create their own child bots
+# --------------------------------------------------------------------------- #
+
+CREATEBOT_PENDING = {}
+child_bot_clients = {}  # bot_prefix -> Client instance
+
+@bot.on_message(filters.command("CreateBot") & filters.private)
+async def createbot_handler(client, message):
+    uid = message.from_user.id
+    existing = await get_created_bots_by_creator(uid)
+    if len(existing) >= 3:
+        await say(message, "❌ **You can create up to 3 bots.**\n\n"
+                           "Delete an existing one first with /DeleteBot.")
+        return
+    CREATEBOT_PENDING[uid] = {"step": "waiting_token"}
+    await say(message,
+        "🤖 **CREATE YOUR OWN BOT**\n\n"
+        "1️⃣ Talk to @BotFather and create a new bot\n"
+        "2️⃣ Copy the API token\n"
+        "3️⃣ Send it here\n\n"
+        "⚠️ **Your bot will:**\n"
+        "• Extract **public** content only\n"
+        "• Send results in DM only\n"
+        "• No login/logout required\n\n"
+        "🔒 Private links → users will be told to use @Wantedkar99bot\n\n"
+        "Send /cancel to abort.",
+        reply_markup=ui.feedback_keyboard())
+
+
+@bot.on_message(filters.command("DeleteBot") & filters.private)
+async def deletebot_handler(client, message):
+    uid = message.from_user.id
+    existing = await get_created_bots_by_creator(uid)
+    if not existing:
+        await say(message, "ℹ️ You don't have any created bots.")
+        return
+    text = "🗑 **YOUR CREATED BOTS**\n\n"
+    rows = []
+    for b in existing:
+        bname = b.get("bot_username") or b.get("_id", "?")
+        text += f"• @{bname} — {b.get('users_count', 0)} users\n"
+        rows.append([ui.button(f"🗑 Delete @{bname}", callback_data=f"delbot:{b['_id']}", style="danger")])
+    rows.append([ui.home_button()])
+    await render(message, text, ui.keyboard(rows))
+
+
+@callback_action("cmd_createbot")
+async def cb_createbot(client, query):
+    uid = query.from_user.id
+    existing = await get_created_bots_by_creator(uid)
+    if len(existing) >= 3:
+        await query.answer(ui_text("You can create up to 3 bots."), show_alert=True)
+        return
+    CREATEBOT_PENDING[uid] = {"step": "waiting_token"}
+    await query.answer()
+    await render(query,
+        "🤖 **CREATE YOUR OWN BOT**\n\n"
+        "1️⃣ Talk to @BotFather and create a new bot\n"
+        "2️⃣ Copy the API token\n"
+        "3️⃣ Send it here\n\n"
+        "⚠️ **Your bot will:**\n"
+        "• Extract **public** content only\n"
+        "• Send results in DM only\n"
+        "• No login/logout required\n\n"
+        "🔒 Private links → users will be told to use @Wantedkar99bot\n\n"
+        "Send /cancel to abort.",
+        ui.feedback_keyboard())
+
+
+async def handle_deletebot_callback(client, query, data):
+    uid = query.from_user.id
+    prefix = data.split(":", 1)[1] if ":" in data else ""
+    bot_row = await get_created_bot(prefix)
+    if not bot_row:
+        await query.answer(ui_text("Bot not found."), show_alert=True)
+        return
+    if int(bot_row.get("creator_id", 0)) != uid:
+        await query.answer(ui_text("This is not your bot."), show_alert=True)
+        return
+    # Stop the child bot client if running
+    client_inst = child_bot_clients.pop(prefix, None)
+    if client_inst:
+        try:
+            await client_inst.stop()
+        except Exception:
+            pass
+    await delete_created_bot(prefix)
+    await query.answer(ui_text("🗑 Bot deleted."))
+    await render(query, "✅ Bot deleted successfully.", ui.back_keyboard())
+
+
+async def start_child_bot(bot_row):
+    """Start a child bot instance from its stored credentials."""
+    prefix = bot_row["_id"]
+    token = bot_row.get("bot_token")
+    if not token:
+        return False
+    if prefix in child_bot_clients:
+        try:
+            existing = child_bot_clients[prefix]
+            me = await existing.get_me()
+            if me:
+                return True
+        except Exception:
+            pass
+        child_bot_clients.pop(prefix, None)
+
+    child = Client(
+        f"child_{prefix}",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        bot_token=token,
+        in_memory=True,
+    )
+
+    @child.on_message(filters.command("start") & filters.private)
+    async def child_start(c, message):
+        from database import get_child_bot_users as _unused  # ensure module loaded
+        user = message.from_user
+        await add_child_bot_user(prefix, user.id, user.first_name, user.username)
+        await update_created_bot_stats(prefix, users_count=await get_child_bot_user_count(prefix))
+        bot_username = bot_row.get("bot_username") or "this bot"
+        await message.reply(
+            f"👋 **Welcome!**\n\n"
+            f"🤖 Send me any **public** Telegram link and I'll extract the content.\n\n"
+            f"🔒 Private/restricted links? Use @Wantedkar99bot\n\n"
+            f"⚡ Powered by @{BOT_USERNAME}",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🤖 Create Your Own Bot",
+                                      url=f"https://t.me/{BOT_USERNAME}?start=createbot")],
+            ]),
+        )
+
+    @child.on_message(filters.command("users") & filters.private)
+    async def child_users(c, message):
+        creator_id = bot_row.get("creator_id")
+        if message.from_user.id != creator_id:
+            await message.reply("🚫 **Admin only!**")
+            return
+        users = await get_child_bot_users(prefix, limit=50)
+        count = await get_child_bot_user_count(prefix)
+        text = f"👥 **USERS ({count})**\n\n"
+        for i, u in enumerate(users[:30], 1):
+            name = u.get("name") or "User"
+            username = u.get("username")
+            uname = f"@{username}" if username else ""
+            text += f"{i}. {name} {uname} (`{u.get('user_id', '?')}`)\n"
+        await message.reply(text)
+
+    @child.on_message(filters.command("stats") & filters.private)
+    async def child_stats(c, message):
+        creator_id = bot_row.get("creator_id")
+        if message.from_user.id != creator_id:
+            await message.reply("🚫 **Admin only!**")
+            return
+        count = await get_child_bot_user_count(prefix)
+        bot_info = await get_created_bot(prefix)
+        extractions = (bot_info or {}).get("total_extractions", 0)
+        bname = bot_row.get("bot_username") or prefix
+        await message.reply(
+            f"📊 **BOT STATS — @{bname}**\n\n"
+            f"👥 Users: **{count}**\n"
+            f"📥 Total extractions: **{extractions}**\n"
+            f"📅 Created: {bot_info.get('created_at', '—')}\n"
+            f"🟢 Last active: {bot_info.get('last_active', '—')}")
+
+    @child.on_message(filters.command("broadcast") & filters.private)
+    async def child_broadcast(c, message):
+        creator_id = bot_row.get("creator_id")
+        if message.from_user.id != creator_id:
+            await message.reply("🚫 **Admin only!**")
+            return
+        args = (message.text or "").split(maxsplit=1)
+        text = args[1].strip() if len(args) > 1 else ""
+        if not text:
+            await message.reply("Usage: `/broadcast Your message`")
+            return
+        users = await get_child_bot_users(prefix)
+        sent, failed = 0, 0
+        for u in users:
+            try:
+                await c.send_message(int(u["user_id"]), text, parse_mode=ParseMode.DISABLED)
+                sent += 1
+            except Exception:
+                failed += 1
+            await asyncio.sleep(0.05)
+        await message.reply(f"📣 **Broadcast complete!**\n\n✅ Sent: {sent}\n❌ Failed: {failed}")
+
+    @child.on_message(filters.text & filters.private & ~filters.command(["start", "users", "stats", "broadcast"]))
+    async def child_text(c, message):
+        user = message.from_user
+        await add_child_bot_user(prefix, user.id, user.first_name, user.username)
+        await update_created_bot_stats(prefix, users_count=await get_child_bot_user_count(prefix))
+        text = (message.text or "").strip()
+        if not text:
+            return
+        # Check for private links — redirect to main bot
+        if re.search(r"(?:t\.me|telegram\.me)/(?:c/|\+|joinchat/)", text):
+            await message.reply(
+                f"🔒 **Private/restricted link detected!**\n\n"
+                f"This bot only extracts **public** content.\n\n"
+                f"👉 Use @{BOT_USERNAME} for private links.")
+            return
+        # Parse public links
+        target, msg_id, is_private = parse_link(text)
+        if target is None:
+            await message.reply("❌ Send a valid Telegram link.\n\n"
+                               f"🔒 Private links? Use @{BOT_USERNAME}")
+            return
+        if is_private:
+            await message.reply(
+                f"🔒 **Private link!**\n\n"
+                f"This bot only extracts **public** content.\n\n"
+                f"👉 Use @{BOT_USERNAME} for private links.")
+            return
+        # Extract public content
+        status = await message.reply("⏳ Fetching...")
+        try:
+            msg = await c.get_messages(target, msg_id)
+            if not msg or msg.empty:
+                await status.edit("❌ Message not found.")
+                return
+            if msg.media:
+                max_size = 50 * 1024 * 1024  # 50MB limit for child bots
+                file_size = 0
+                if msg.video:
+                    file_size = msg.video.file_size
+                elif msg.document:
+                    file_size = msg.document.file_size
+                if file_size > max_size:
+                    await status.edit("❌ File too large (max 50 MB).")
+                    return
+                file_path = await c.download_media(msg)
+                if not file_path:
+                    await status.edit("❌ Download failed.")
+                    return
+                try:
+                    if msg.photo:
+                        await message.reply_photo(file_path, caption=msg.caption or "")
+                    elif msg.video:
+                        await message.reply_video(file_path, caption=msg.caption or "")
+                    elif msg.document:
+                        await message.reply_document(file_path, caption=msg.caption or "")
+                    elif msg.audio:
+                        await message.reply_audio(file_path, caption=msg.caption or "")
+                    elif msg.voice:
+                        await message.reply_voice(file_path, caption=msg.caption or "")
+                    elif msg.animation:
+                        await message.reply_animation(file_path, caption=msg.caption or "")
+                    else:
+                        await message.reply_document(file_path, caption=msg.caption or "")
+                    await status.delete()
+                finally:
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+            elif msg.text:
+                await message.reply(msg.text)
+                await status.delete()
+            else:
+                await status.edit("❌ No content available.")
+            await increment_child_bot_extractions(prefix)
+        except Exception as exc:
+            try:
+                await status.edit(f"❌ Error: {exc}")
+            except Exception:
+                pass
+
+    try:
+        await child.start()
+        child_bot_clients[prefix] = child
+        me = await child.get_me()
+        if me:
+            bot_row["bot_username"] = getattr(me, "username", None)
+            await register_created_bot(
+                bot_row.get("creator_id"), token,
+                bot_username=getattr(me, "username", None),
+                bot_id=getattr(me, "id", None))
+            print(f"[CHILD BOT] Started @{getattr(me, 'username', prefix)}", flush=True)
+            return True
+    except Exception as exc:
+        print(f"[CHILD BOT FAILED] {prefix}: {exc}", flush=True)
+    return False
+
+
+async def init_child_bots():
+    """Start all registered child bots on startup."""
+    try:
+        all_bots = await get_all_created_bots()
+        started = 0
+        for b in all_bots:
+            if b.get("status") == "active":
+                ok = await start_child_bot(b)
+                if ok:
+                    started += 1
+        if started:
+            print(f"[CHILD BOTS] Started {started} child bot(s)", flush=True)
+    except Exception as exc:
+        print(f"[CHILD BOTS INIT FAILED] {exc}", flush=True)
+
+
+# --------------------------------------------------------------------------- #
+#  /Bot_stats — owner sees all created bots' stats
+# --------------------------------------------------------------------------- #
+
+@bot.on_message(filters.command("Bot_stats") & filters.private)
+@owner_only
+async def bot_stats_handler(client, message):
+    all_bots = await get_all_created_bots()
+    if not all_bots:
+        await say(message, "📊 **No created bots yet.**\n\nUsers can create bots with /CreateBot.")
+        return
+    text = f"📊 **ALL CREATED BOTS ({len(all_bots)})**\n\n"
+    for i, b in enumerate(all_bots, 1):
+        creator_id = b.get("creator_id", 0)
+        creator_row = await get_user(creator_id)
+        creator_name = (creator_row or {}).get("name", "Unknown")
+        bname = b.get("bot_username") or b.get("_id", "?")
+        status = "🟢" if b.get("status") == "active" else "🔴"
+        user_count = b.get("users_count", 0)
+        extractions = b.get("total_extractions", 0)
+        prefix = b["_id"]
+        # Get live user count from child bot collection
+        live_count = await get_child_bot_user_count(prefix)
+        text += (f"{i}. {status} **@{bname}**\n"
+                 f"   👤 Admin: {creator_name} (`{creator_id}`)\n"
+                 f"   👥 Users: {live_count} | 📥 Extractions: {extractions}\n"
+                 f"   📅 Created: {b.get('created_at', '—')}\n\n")
+    await say(message, text)
+
+# Register new command handlers in the global dict
+COMMAND_HANDLERS["CreateBot"] = createbot_handler
+COMMAND_HANDLERS["DeleteBot"] = deletebot_handler
+COMMAND_HANDLERS["Bot_stats"] = bot_stats_handler
+
+
+# --------------------------------------------------------------------------- #
+#  Owner broadcast to all connected bots (/superbroadcast)
+# --------------------------------------------------------------------------- #
+
+@bot.on_message(filters.command("superbroadcast") & filters.private)
+@owner_only
+async def superbroadcast_handler(client, message):
+    """Broadcast to all main bot users + all child bots' users."""
+    args = (message.text or "").split(maxsplit=1)
+    text = args[1].strip() if len(args) > 1 else ""
+    reply = getattr(message, "reply_to_message", None)
+    if reply is None and not text:
+        await say(message, "📢 Reply to a message with /superbroadcast, or send\n"
+                           "`/superbroadcast Your message`\n\n"
+                           "Sends to all users of the main bot AND all connected child bots.")
+        return
+    status_msg = await say(message, "📣 Broadcasting to all users (main + child bots)...")
+    # Main bot broadcast
+    users = await get_all_users()
+    main_sent, main_failed = 0, 0
+    for entry in users:
+        uid = int(entry.get("user_id", 0))
+        if uid > 0 and uid != OWNER_ID:
+            try:
+                if reply is not None:
+                    await bot.copy_message(uid, reply.chat.id, reply.id)
+                else:
+                    await bot.send_message(uid, text, parse_mode=ParseMode.DISABLED)
+                main_sent += 1
+            except Exception:
+                main_failed += 1
+            await asyncio.sleep(0.05)
+    # Child bots broadcast
+    child_sent, child_failed = 0, 0
+    for prefix, child_client in child_bot_clients.items():
+        child_users = await get_child_bot_users(prefix)
+        for u in child_users:
+            try:
+                if reply is not None:
+                    await child_client.copy_message(int(u["user_id"]), reply.chat.id, reply.id)
+                else:
+                    await child_client.send_message(int(u["user_id"]), text, parse_mode=ParseMode.DISABLED)
+                child_sent += 1
+            except Exception:
+                child_failed += 1
+            await asyncio.sleep(0.05)
+    await say_edit(status_msg,
+        f"📣 **Broadcast Complete!**\n\n"
+        f"**Main Bot:**\n✅ Sent: {main_sent}\n❌ Failed: {main_failed}\n\n"
+        f"**Child Bots:**\n✅ Sent: {child_sent}\n❌ Failed: {child_failed}\n\n"
+        f"**Total:** ✅ {main_sent + child_sent} | ❌ {main_failed + child_failed}")
+
 
 web = Flask("")
 
