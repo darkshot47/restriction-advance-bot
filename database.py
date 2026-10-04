@@ -1413,7 +1413,7 @@ async def cleanup_old_records(days: int = 30):
 # --------------------------------------------------------------------------- #
 
 async def add_stars_payment(user_id, plan_key, stars_amount, inr_amount, invoice_payload):
-    """Record a Telegram Stars payment."""
+    """Record a pending Telegram Stars payment once per invoice payload."""
     row = {
         "user_id": int(user_id),
         "plan": plan_key,
@@ -1423,14 +1423,48 @@ async def add_stars_payment(user_id, plan_key, stars_amount, inr_amount, invoice
         "status": "pending",
         "date": datetime.now(),
     }
-    return await stars_payments_col.insert_one(row)
+    return await stars_payments_col.update_one(
+        {"invoice_payload": invoice_payload},
+        {"$setOnInsert": row},
+        upsert=True,
+    )
 
 
-async def complete_stars_payment(invoice_payload, status="completed"):
-    """Mark a Stars payment as completed or refunded."""
+async def get_stars_payment(invoice_payload):
+    """Return the Stars payment row for an invoice payload, if any."""
+    if not invoice_payload:
+        return None
+    return await stars_payments_col.find_one({"invoice_payload": invoice_payload})
+
+
+async def complete_stars_payment(invoice_payload, status="completed", *,
+                                 telegram_payment_charge_id=None,
+                                 provider_payment_charge_id=None):
+    """Atomically move a pending Stars payment to its final status.
+
+    The pending-status predicate is the idempotency gate: replayed Telegram
+    successful-payment updates for the same payload will not modify the row and
+    therefore must not grant premium a second time.  When Telegram supplies its
+    payment charge id, store it on the same row and reject a completed charge
+    that was already recorded for a different payload.
+    """
+    updates = {"status": status, "completed_at": datetime.now()}
+    if telegram_payment_charge_id:
+        charge_id = str(telegram_payment_charge_id)
+        if status == "completed":
+            duplicate = await stars_payments_col.find_one({
+                "telegram_payment_charge_id": charge_id,
+                "status": "completed",
+                "invoice_payload": {"$ne": invoice_payload},
+            })
+            if duplicate:
+                return False
+        updates["telegram_payment_charge_id"] = charge_id
+    if provider_payment_charge_id:
+        updates["provider_payment_charge_id"] = str(provider_payment_charge_id)
     result = await stars_payments_col.update_one(
         {"invoice_payload": invoice_payload, "status": "pending"},
-        {"$set": {"status": status, "completed_at": datetime.now()}},
+        {"$set": updates},
     )
     return bool(result.modified_count)
 
