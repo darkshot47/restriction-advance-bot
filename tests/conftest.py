@@ -802,6 +802,52 @@ class FakeDB:
     async def get_bookmarks(self, user_id):
         return [{"link": link} for link in self.bookmarks.get(user_id, [])]
 
+    # Auto-delete, Stars payments and child bot stubs
+    async def cleanup_old_records(self, days=30):
+        return {"downloads": 0, "payments": 0, "feedback": 0, "bookmarks": 0, "stars_payments": 0}
+
+    async def add_stars_payment(self, user_id, plan_key, stars_amount, inr_amount, invoice_payload):
+        return None
+
+    async def complete_stars_payment(self, invoice_payload, status="completed"):
+        return False
+
+    async def get_stars_payments(self, limit=50):
+        return []
+
+    async def register_created_bot(self, creator_id, bot_token, bot_username=None, bot_id=None):
+        return {}
+
+    async def get_created_bot(self, bot_token_prefix):
+        return None
+
+    async def get_created_bots_by_creator(self, creator_id):
+        return []
+
+    async def get_all_created_bots(self):
+        return []
+
+    async def update_created_bot_stats(self, bot_token_prefix, **kwargs):
+        pass
+
+    async def delete_created_bot(self, bot_token_prefix):
+        return False
+
+    async def is_created_bot_admin(self, user_id, bot_token_prefix):
+        return False
+
+    async def add_child_bot_user(self, bot_token_prefix, user_id, name=None, username=None):
+        pass
+
+    async def get_child_bot_user_count(self, bot_token_prefix):
+        return 0
+
+    async def get_child_bot_users(self, bot_token_prefix, limit=50):
+        return []
+
+    async def increment_child_bot_extractions(self, bot_token_prefix):
+        pass
+
 
 #: every database symbol main.py imports
 DB_NAMES = [
@@ -841,6 +887,12 @@ DB_NAMES = [
     "is_giveaway_participant", "list_giveaway_participants",
     "all_giveaway_participants", "clear_giveaway_participants",
     "ensure_giveaway_indexes",
+    # Auto-delete and child bot features
+    "cleanup_old_records", "add_stars_payment", "complete_stars_payment", "get_stars_payments",
+    "register_created_bot", "get_created_bot", "get_created_bots_by_creator", "get_all_created_bots",
+    "update_created_bot_stats", "delete_created_bot", "is_created_bot_admin",
+    "add_child_bot_user", "get_child_bot_user_count", "get_child_bot_users",
+    "increment_child_bot_extractions",
 ]
 
 
@@ -941,6 +993,10 @@ def clean_state(monkeypatch):
     #: Round 14 state: the echo guard for a native copy made with the user's
     #: own session, and the giveaway DM fan-out, must both be born fresh.
     monkeypatch.setattr(main, "ECHO_GUARD", {})
+    #: Child bot / CreateBot state
+    monkeypatch.setattr(main, "CREATEBOT_PENDING", {})
+    monkeypatch.setattr(main, "child_bot_clients", {})
+    monkeypatch.setattr(main, "HISTORY_CLEANUP_TASK", None)
     monkeypatch.setattr(main, "GIVEAWAY_BROADCAST_TASK", None)
     #: Round 15 state: the chats that show a picker reply keyboard and the users
     #: already swept for a keyboard an older build left behind.

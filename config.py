@@ -22,6 +22,14 @@ PREMIUM_PLANS = {
     "quarter": {"title": "3 months", "price": 249, "addon_price": 100, "days": 90},
     "year": {"title": "1 year", "price": 700, "addon_price": 149, "days": 365},
 }
+#: Telegram Stars payment — half of UPI price (stars go to owner's Telegram account).
+#: e.g. ₹99 = 50 stars, ₹249 = 125 stars, ₹700 = 350 stars.
+STAR_EXCHANGE_RATE = 0.5  # 1 INR = 0.5 Stars (so ₹100 = 50 Stars)
+OWNER_TELEGRAM_ID = int(os.environ.get("OWNER_ID", "0"))
+
+#: History auto-delete: records older than this many days are purged.
+HISTORY_RETENTION_DAYS = 30
+
 PREMIUM_BENEFITS = (
     "Unlimited public-channel extractions",
     "Up to 2 GB files",
