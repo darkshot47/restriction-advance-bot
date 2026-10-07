@@ -124,14 +124,14 @@ public class MainActivity extends Activity {
                 }
                 return;
             }
-            JSONObject account = result.optJson("account");
-            if (account != null) {
-                Prefs.saveAccount(this, account.optString("name", ""),
-                        account.optLong("user_id", 0L));
+            JSONObject info = result.optJson("account");
+            if (info != null) {
+                Prefs.saveAccount(this, info.optString("name", ""),
+                        info.optLong("user_id", 0L));
                 TextView view = findViewById(R.id.accountText);
-                String label = account.optString("name", "");
-                String plan = account.optBoolean("premium", false) ? "Premium" : "Free";
-                String session = account.optBoolean("session", false)
+                String label = info.optString("name", "");
+                String plan = info.optBoolean("premium", false) ? "Premium" : "Free";
+                String session = info.optBoolean("session", false)
                         ? "private downloads ready" : "run /login in the bot for private links";
                 view.setText((label.isEmpty() ? "Logged in" : label) + " • " + plan + " • " + session);
             }
@@ -183,7 +183,11 @@ public class MainActivity extends Activity {
                     boolean isPrivate = "private".equals(result.optString("type", ""));
                     if (isPrivate) {
                         JSONObject media = result.optJson("media");
-                        String name = media == null ? null : media.optString("file_name", null);
+                        String name = null;
+                        if (media != null && media.has("file_name")
+                                && !media.isNull("file_name")) {
+                            name = media.getString("file_name");
+                        }
                         askPrivateDownload(link, name, result.optBoolean("needs_login", false));
                     } else {
                         sendToDm(link);
