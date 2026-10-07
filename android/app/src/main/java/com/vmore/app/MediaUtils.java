@@ -252,33 +252,28 @@ final class MediaUtils {
             for (int index = 0; index < tracks; index++) {
                 extractor.selectTrack(index);
                 extractor.seekTo(offsetUs, MediaExtractor.SEEK_TO_PREVIOUS_SYNC);
-                int sampleSize;
-                while ((sampleSize = extractor.readSample()) >= 0) {
+                while (true) {
                     long timeUs = extractor.getSampleTime();
-                    if (timeUs > endUs) {
-                        break;
-                    }
-                    info.offset = 0;
-                    info.size = sampleSize;
-                    info.presentationTimeUs = Math.max(0L, timeUs - offsetUs);
-                    info.flags = extractor.getSampleFlags() == MediaExtractor.SAMPLE_FLAG_SYNC
-                            ? MediaCodec.BUFFER_FLAG_KEY_FRAME : 0;
-                    if (buffer.capacity() < sampleSize) {
-                        buffer = ByteBuffer.allocateDirect(sampleSize * 2);
+                    if (timeUs < 0 || timeUs > endUs) {
+                        break;                // ran past the new end of the video
                     }
                     buffer.clear();
-                    int written = extractor.readSampleData(buffer, 0);
-                    if (written <= 0) {
+                    int size = extractor.readSampleData(buffer, 0);
+                    if (size <= 0) {
                         break;
                     }
-                    info.size = written;
                     info.offset = 0;
+                    info.size = size;
+                    info.presentationTimeUs = Math.max(0L, timeUs - offsetUs);
+                    info.flags = (extractor.getSampleFlags() & MediaExtractor.SAMPLE_FLAG_SYNC) != 0
+                            ? MediaCodec.BUFFER_FLAG_KEY_FRAME : 0;
                     buffer.position(0);
-                    buffer.limit(written);
+                    buffer.limit(size);
                     muxer.writeSampleData(trackMap[index], buffer, info);
-                    extractor.advance();
+                    if (!extractor.advance()) {
+                        break;
+                    }
                 }
-                extractor.unselectTrack(index);
             }
             return target;
         } finally {

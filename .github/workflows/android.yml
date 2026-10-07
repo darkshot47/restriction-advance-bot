@@ -160,6 +160,6 @@ jobs:
           #: Raw logs live behind a URL this setup cannot always read, but
           #: annotations are on the API — so the real compiler errors are
           #: re-emitted as annotations, message intact.
-          grep -aE "error:|\.java:[0-9]+:|Execution failed|Could not|FAILURE:" build.log 2>/dev/null             | head -40 | while IFS= read -r line; do
+          grep -aA 3 -E "\.java:[0-9]+: error:|Execution failed for task|Could not resolve|Caused by:" build.log 2>/dev/null | tr -d "\r" | head -80 | while IFS= read -r line; do
               echo "::error::$(printf '%s' "$line" | tr -d '\r' | cut -c1-900)"
             done

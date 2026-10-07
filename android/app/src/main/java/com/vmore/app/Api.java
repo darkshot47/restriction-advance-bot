@@ -62,6 +62,18 @@ public final class Api {
         public JSONObject optJson(String key) {
             return json == null ? null : json.optJSONObject(key);
         }
+
+        public boolean optBoolean(String key, boolean fallback) {
+            return json == null ? fallback : json.optBoolean(key, fallback);
+        }
+
+        public int optInt(String key, int fallback) {
+            return json == null ? fallback : json.optInt(key, fallback);
+        }
+
+        public long optLong(String key, long fallback) {
+            return json == null ? fallback : json.optLong(key, fallback);
+        }
     }
 
     public interface Callback {
