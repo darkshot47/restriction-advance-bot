@@ -391,6 +391,23 @@ public class MainActivity extends Activity {
 
     // --------------------------------------------------------------- helpers //
 
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions,
+                                          int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != 601) {
+            return;
+        }
+        boolean granted = grantResults.length > 0
+                && grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        if (!granted) {
+            //: Say it out loud: downloads still work, the progress notification
+            //: just stays quiet until the permission is given in Settings.
+            setStatus("ℹ️ Notification permission is off, so download progress stays inside "
+                    + "the app. Downloads keep running in the background either way.");
+        }
+    }
+
     /** Android 13+ needs this once, otherwise no progress notification appears. */
     private void askForNotificationPermission() {
         if (Build.VERSION.SDK_INT >= 33
