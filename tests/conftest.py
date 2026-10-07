@@ -1066,6 +1066,7 @@ DB_NAMES = [
     "count_app_users", "add_app_activity", "update_app_activity", "get_app_activity",
     "count_app_activity", "cleanup_app_activity", "set_app_apk", "get_app_apk",
     "get_app_config", "set_app_base_url", "purge_created_bot_data",
+    "app_token_expired", "app_token_days_left", "expire_stale_app_tokens",
 ]
 
 
@@ -1083,6 +1084,7 @@ def db(monkeypatch) -> FakeDB:
         replacement = getattr(fake, name, None)
         if replacement is None:
             default = {
+                "expire_stale_app_tokens": 0,
                 "check_daily_limit": (True, 0),
                 "get_history": [],
                 "get_bookmarks": [],

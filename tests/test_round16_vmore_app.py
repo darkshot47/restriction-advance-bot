@@ -134,6 +134,39 @@ async def test_the_old_collections_are_purged_once(store):
     assert second["skipped"] is True and second["collections"] == []
 
 
+def test_every_startup_errand_uses_a_patched_database_function():
+    """The start hook spawns app errands — each must be faked in tests.
+
+    ``publish_menu_on_start`` runs the /CreateBot purge, retires expired tokens
+    and caches the owner card.  A task left pointing at the *real* database
+    module blew up with "Event loop is closed" in CI (the motor client belongs
+    to a loop the tests never run), so the list is pinned here.
+    """
+    from conftest import DB_NAMES
+    assert {"purge_created_bot_data", "expire_stale_app_tokens"} <= set(DB_NAMES)
+    for coro in (main.purge_created_bot_data(), main.expire_stale_app_tokens(),
+                 main.APP_BRIDGE.refresh_owner()):
+        coro.close()          #: nothing runs; only the wiring is checked
+    #: And the hook itself must be reachable, with the defensive wrapper in place.
+    assert callable(main.spawn_app_startup_tasks)
+
+
+@pytest.mark.asyncio
+async def test_the_start_hook_survives_a_broken_database(db, monkeypatch):
+    """A failing errand is logged and swallowed — the bot still starts."""
+    calls = []
+
+    async def boom():
+        calls.append("boom")
+        raise RuntimeError("Event loop is closed")
+
+    monkeypatch.setattr(main, "expire_stale_app_tokens", boom)
+    main.spawn_app_startup_tasks()
+    from conftest import drain_background
+    await drain_background()           # would re-raise if anything escaped
+    assert calls == ["boom"]           # it ran, and the failure stayed inside
+
+
 # --------------------------------------------------------------------------- #
 #  2. The access token — one per account, /gentoken, revoke
 # --------------------------------------------------------------------------- #

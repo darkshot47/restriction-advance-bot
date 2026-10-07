@@ -8532,12 +8532,38 @@ async def publish_menu_on_start(client):
         appapi.bind_loop(asyncio.get_running_loop())
     except RuntimeError:  # pragma: no cover - only outside a running loop
         pass
-    # The /CreateBot feature is retired: its collections are dropped once.
-    spawn_background(purge_created_bot_data())
-    # Tokens have a 30-day life — retire the ones that ran out while offline.
-    spawn_background(expire_stale_app_tokens())
-    # The app's top-right corner: the owner's name and profile picture.
-    spawn_background(APP_BRIDGE.refresh_owner())
+    spawn_app_startup_tasks()
+
+
+def spawn_app_startup_tasks():
+    """Kick off the app's startup errands.
+
+    None of them is worth losing the bot over: the /CreateBot purge, retiring
+    tokens whose 30 days ran out, and caching the owner card the app shows in
+    its top-right corner.  A failure is logged and the bot keeps running.
+    """
+    for label, factory in (("purge", purge_created_bot_data),
+                           ("expired-tokens", expire_stale_app_tokens),
+                           ("owner-card", APP_BRIDGE.refresh_owner)):
+        try:
+            spawn_background(_run_startup_errand(label, factory))
+        except Exception as exc:
+            print(f"[APP] startup task {label} did not start: "
+                  f"{type(exc).__name__}: {exc}", flush=True)
+
+
+async def _run_startup_errand(label, factory):
+    """Await one errand, swallowing whatever it throws.
+
+    These tasks are fired from the start hook, so nothing may propagate out of
+    them: an unreachable database or a chat lookup that fails is worth a log
+    line, never a crashed bot (or a failed test that drains the background).
+    """
+    try:
+        await factory()
+    except Exception as exc:
+        print(f"[APP] startup task {label} failed: {type(exc).__name__}: {exc}",
+              flush=True)
 
 
 def command_name_of(message) -> str | None:
