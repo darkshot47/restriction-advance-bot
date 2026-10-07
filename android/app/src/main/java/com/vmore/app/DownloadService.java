@@ -76,11 +76,22 @@ public class DownloadService extends Service {
         }
     }
 
+    /**
+     * Drive a running download (pause / resume / stop).
+     *
+     * ``startForegroundService`` on Android 8+: a plain ``startService`` from the
+     * background throws, which would have made the screen buttons work but the
+     * notification buttons silently do nothing.
+     */
     public static void command(Context context, String action) {
         Intent intent = new Intent(context, DownloadService.class);
         intent.setAction(action);
         try {
-            context.startService(intent);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent);
+            } else {
+                context.startService(intent);
+            }
         } catch (Exception ignored) {
         }
     }
@@ -107,6 +118,10 @@ public class DownloadService extends Service {
             paused = true;
             Live.PAUSED.set(true);
             Live.STATUS = "paused";
+            //: Android may have started this service looking for a foreground
+            //: service (the notification's Pause button) — satisfy that in the
+            //: same breath as the state change.
+            keepForeground();
             post("paused");
             postJob("pause");
             return START_STICKY;
@@ -116,6 +131,7 @@ public class DownloadService extends Service {
             stopped = false;
             Live.PAUSED.set(false);
             Live.STATUS = "downloading";
+            keepForeground();
             postJob("resume");
             //: Pausing closed the socket, so resuming opens a fresh one — the
             //: server answers with the remaining bytes (Range) and the file
@@ -186,29 +202,29 @@ public class DownloadService extends Service {
         Live.TOTAL.set(total);
         try {
             Api.download(url, target, (written, reported) -> {
-                if (stopped) {
-                    throw new IllegalStateException("stopped");
+                //: Returning false closes the socket at once.  That is what makes
+                //: Pause instant (and Stop immediate); Resume asks the server for
+                //: the remaining bytes with a Range request.
+                if (stopped || paused) {
+                    Live.WRITTEN.set(written);
+                    return false;
                 }
                 Live.WRITTEN.set(written);
                 if (reported > 0) {
                     Live.TOTAL.set(reported);
                 }
-                while (paused && !stopped) {
-                    try {
-                        Thread.sleep(200);
-                    } catch (InterruptedException exc) {
-                        Thread.currentThread().interrupt();
-                        break;
-                    }
-                }
                 post("download");
-                return !stopped;
+                return true;
             });
         } catch (Api.Stopped exc) {
-            //: Pausing closes the socket on purpose — fall through and wait for Resume.
+            if (stopped) {
+                finish("stopped", null, null);
+                return;
+            }
             paused = true;
-        } catch (IllegalStateException exc) {
-            finish("stopped", null, null);
+            keepForeground();
+            post("paused");
+            worker = null;
             return;
         } catch (Exception exc) {
             finish("error", exc.getMessage(), null);
@@ -263,6 +279,23 @@ public class DownloadService extends Service {
         }
         stopForeground(true);
         stopSelf();
+    }
+
+    /**
+     * Re-assert the foreground notification.
+     *
+     * Cheap and idempotent, but it is also the contract Android enforces: a
+     * service started with {@code startForegroundService()} (which is how the
+     * notification's Pause / Resume buttons reach us) must call
+     * {@code startForeground()} promptly.
+     */
+    private void keepForeground() {
+        if (target == null) {
+            stopSelf();
+            return;
+        }
+        startForeground(Notifications.ID_PROGRESS, Notifications.progress(
+                this, Live.NAME, Live.WRITTEN.get(), Live.TOTAL.get(), paused));
     }
 
     private void post(String state) {

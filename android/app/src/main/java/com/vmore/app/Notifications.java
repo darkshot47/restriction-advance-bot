@@ -20,9 +20,12 @@ final class Notifications {
     static final int ID_PROGRESS = 4101;
     static final int ID_DONE = 4102;
 
-    static final String ACTION_PAUSE = "com.vmore.app.PAUSE";
-    static final String ACTION_RESUME = "com.vmore.app.RESUME";
-    static final String ACTION_STOP = "com.vmore.app.STOP";
+    //: One source of truth for the actions: the service handles these intents
+    //: directly, so the notification buttons and the on-screen buttons are the
+    //: same code path.
+    static final String ACTION_PAUSE = DownloadService.ACTION_PAUSE;
+    static final String ACTION_RESUME = DownloadService.ACTION_RESUME;
+    static final String ACTION_STOP = DownloadService.ACTION_STOP;
 
     private Notifications() {
     }
@@ -47,14 +50,18 @@ final class Notifications {
         manager.createNotificationChannel(done);
     }
 
+    /** The service itself, so Android knows these actions may wake it up. */
     private static PendingIntent action(Context context, String action, int requestCode) {
-        Intent intent = new Intent(context, NotificationActionReceiver.class);
+        Intent intent = new Intent(context, DownloadService.class);
         intent.setAction(action);
         int flags = PendingIntent.FLAG_UPDATE_CURRENT;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             flags |= PendingIntent.FLAG_IMMUTABLE;
         }
-        return PendingIntent.getBroadcast(context, requestCode, intent, flags);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            return PendingIntent.getForegroundService(context, requestCode, intent, flags);
+        }
+        return PendingIntent.getService(context, requestCode, intent, flags);
     }
 
     private static PendingIntent openApp(Context context) {

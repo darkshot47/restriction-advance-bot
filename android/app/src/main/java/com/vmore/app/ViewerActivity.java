@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.content.Intent;
 import android.graphics.BitmapFactory;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.view.View;
 import android.widget.ImageView;
@@ -104,6 +105,14 @@ public class ViewerActivity extends Activity {
     }
 
     private void save() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
+                && checkSelfPermission("android.permission.WRITE_EXTERNAL_STORAGE")
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{"android.permission.WRITE_EXTERNAL_STORAGE"}, 602);
+            Toast.makeText(this, "Allow storage access, then tap Save again",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
         try {
             String where = MediaUtils.saveToDevice(this, file);
             Toast.makeText(this, "Saved to " + where, Toast.LENGTH_LONG).show();
@@ -112,12 +121,20 @@ public class ViewerActivity extends Activity {
         }
     }
 
+    /**
+     * Hand the file to another app.
+     *
+     * The URI comes from {@link VmoreFiles}: since Android 7 a {@code file://}
+     * URI in an Intent throws {@code FileUriExposedException}, so the app shares
+     * a {@code content://} URI (with a read grant) instead.
+     */
     private void openExternally() {
         try {
+            Uri uri = VmoreFiles.uriFor(this, file);
             Intent intent = new Intent(Intent.ACTION_VIEW);
-            Uri uri = Uri.fromFile(file);
             intent.setDataAndType(uri, MediaUtils.mimeOf(file));
-            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                    | Intent.FLAG_ACTIVITY_NEW_TASK);
             startActivity(intent);
         } catch (Exception exc) {
             Toast.makeText(this, "No app can open this file", Toast.LENGTH_LONG).show();
@@ -126,9 +143,11 @@ public class ViewerActivity extends Activity {
 
     private void share() {
         try {
+            Uri uri = VmoreFiles.uriFor(this, file);
             Intent intent = new Intent(Intent.ACTION_SEND);
             intent.setType(MediaUtils.mimeOf(file));
-            intent.putExtra(Intent.EXTRA_STREAM, Uri.fromFile(file));
+            intent.putExtra(Intent.EXTRA_STREAM, uri);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             startActivity(Intent.createChooser(intent, "Share"));
         } catch (Exception exc) {
             Toast.makeText(this, "Sharing is not available", Toast.LENGTH_LONG).show();

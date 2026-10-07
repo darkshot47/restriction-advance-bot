@@ -308,6 +308,13 @@ public class MainActivity extends Activity {
     }
 
     private void saveToDevice(File file) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
+                && checkSelfPermission("android.permission.WRITE_EXTERNAL_STORAGE")
+                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{"android.permission.WRITE_EXTERNAL_STORAGE"}, 602);
+            toast("Allow storage access, then tap Save to device again");
+            return;
+        }
         try {
             String where = MediaUtils.saveToDevice(this, file);
             setStatus("📥 Saved to " + where);
@@ -395,6 +402,10 @@ public class MainActivity extends Activity {
     public void onRequestPermissionsResult(int requestCode, String[] permissions,
                                           int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == 602) {
+            toast("Storage permission — tap Save to device again");
+            return;
+        }
         if (requestCode != 601) {
             return;
         }
