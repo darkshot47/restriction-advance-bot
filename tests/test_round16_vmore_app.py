@@ -225,6 +225,13 @@ async def test_regenerating_replaces_the_old_token(store, live_db, monkeypatch):
     assert old["revoked"] is True
 
 
+def test_the_howto_text_says_a_whole_link_can_be_pasted():
+    """The app accepts the exact link the bot prints — say so, or users struggle."""
+    text = ui.plain_caps(ui.app_howto_text(base_url="https://x.onrender.com")).lower()
+    assert "paste the whole line" in text
+    assert "https://x.onrender.com/api/v2/token/" in         ui.app_howto_text(base_url="https://x.onrender.com")
+
+
 def test_the_ui_and_the_database_agree_on_the_token_lifetime():
     assert ui.APP_TOKEN_LIFETIME_DAYS == database.APP_TOKEN_LIFETIME_DAYS == 30
 

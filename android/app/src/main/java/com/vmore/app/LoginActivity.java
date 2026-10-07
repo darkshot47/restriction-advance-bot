@@ -52,6 +52,12 @@ public class LoginActivity extends Activity {
 
         baseField.setText(Prefs.baseUrl(this));
         tokenField.setText(Prefs.token(this));
+        //: The bot prints the whole login link; if that is what was pasted, keep
+        //: the token and drop the rest (normalizeBase does the dropping).
+        String pastedToken = Api.tokenFromUrl(baseField.getText().toString());
+        if (!pastedToken.isEmpty() && tokenField.getText().toString().trim().isEmpty()) {
+            tokenField.setText(pastedToken);
+        }
 
         findViewById(R.id.ownerCard).setOnClickListener(v -> Blogger.openOwner(this));
         findViewById(R.id.howToLogin).setOnClickListener(v ->

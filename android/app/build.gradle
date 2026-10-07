@@ -32,6 +32,10 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
+
     lint {
         abortOnError false
         checkReleaseBuilds false
@@ -40,4 +44,10 @@ android {
     packagingOptions {
         resources.excludes += ['META-INF/*']
     }
+}
+
+dependencies {
+    //: JVM unit tests for the pure helpers (URLs, file kinds).  Nothing else —
+    //: the app itself has no runtime dependency.
+    testImplementation 'junit:junit:4.13.2'
 }

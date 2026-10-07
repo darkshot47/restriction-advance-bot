@@ -95,12 +95,16 @@ jobs:
           print("baked base url:", url)
           PY
 
-      - name: Build the debug APK
+      - name: Build the debug APK (and run its unit tests)
         working-directory: android
         run: |
           set -o pipefail
-          gradle --no-daemon assembleDebug --stacktrace 2>&1 | tee ../build.log
+          gradle --no-daemon testDebugUnitTest assembleDebug --stacktrace 2>&1 | tee ../build.log
           tail -5 ../build.log
+          echo "::notice::unit tests + assembleDebug finished"
+          grep -aE "^[0-9]+ tests completed" ../build.log | tail -2 | while IFS= read -r line; do
+            echo "::notice::$(printf '%s' "$line" | cut -c1-900)"
+          done
 
       - name: Pack it the way the owner wants it (zip → APK)
         working-directory: android

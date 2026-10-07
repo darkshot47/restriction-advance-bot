@@ -15,7 +15,6 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -81,24 +80,16 @@ public final class Api {
     }
 
     public static String normalizeBase(String base) {
-        if (base == null) {
-            return "";
-        }
-        String value = base.trim();
-        if (value.isEmpty()) {
-            return "";
-        }
-        if (!value.startsWith("http://") && !value.startsWith("https://")) {
-            value = "https://" + value;
-        }
-        while (value.endsWith("/")) {
-            value = value.substring(0, value.length() - 1);
-        }
-        return value;
+        return Urls.normalizeBase(base);
     }
 
     public static String tokenUrl(String base, String token) {
-        return normalizeBase(base) + API + "/token/" + (token == null ? "" : token.trim().toUpperCase());
+        return Urls.tokenUrl(base, token);
+    }
+
+    /** The token inside a pasted login link ({@code …/api/v2/token/HPSEG9}). */
+    public static String tokenFromUrl(String value) {
+        return Urls.tokenFromUrl(value);
     }
 
     public static void get(final String url, final Callback callback) {
@@ -375,10 +366,6 @@ public final class Api {
     }
 
     public static String encode(String value) {
-        try {
-            return URLEncoder.encode(value == null ? "" : value, "UTF-8");
-        } catch (Exception exc) {
-            return "";
-        }
+        return Urls.encode(value);
     }
 }
