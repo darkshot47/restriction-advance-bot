@@ -165,21 +165,32 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.release_tag || 'vmore-latest' }}
         run: |
-          gh release delete "$TAG" --yes --cleanup-tag || true
-          gh release create "$TAG" \
-            android/dist/Vmore.apk \
-            android/dist/Vmore-apk.zip \
-            android/dist/SHA256SUMS.txt \
-            --title "Vmore APK (latest)" \
-            --notes "Automated build of the Vmore Android app.
+          {
+            cat > release-notes.md <<'NOTES'
+          Automated build of the Vmore Android app.
 
           **Install**
-          1. Download \`Vmore.apk\` (or \`Vmore-apk.zip\` and unzip it).
-          2. Open it on the phone and allow \"Install unknown apps\" once.
+          1. Download `Vmore.apk` (or `Vmore-apk.zip` and unzip it).
+          2. Open it on the phone and allow "Install unknown apps" once.
           3. Enter the server address and your access token (send /gentoken to the bot).
 
-          The bot's **♾️ Unlimited Download (App)** button points at this release, so this link stays valid." \
-            --latest
+          The bot's **♾️ Unlimited Download (App)** button points at this release,
+          and the file is replaced with every build — so the link never rots.
+          NOTES
+            #: Deleting and recreating the release would briefly break the stable
+            #: link (and race the tag); replacing the assets in place cannot.
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              gh release upload "$TAG" android/dist/Vmore.apk android/dist/Vmore-apk.zip \
+                android/dist/SHA256SUMS.txt --clobber
+              gh release edit "$TAG" --title "Vmore APK (latest)" --notes-file release-notes.md \
+                --latest
+            else
+              gh release create "$TAG" android/dist/Vmore.apk android/dist/Vmore-apk.zip \
+                android/dist/SHA256SUMS.txt --title "Vmore APK (latest)" \
+                --notes-file release-notes.md --latest
+            fi
+          } 2>&1 | tee release.log
+          echo "::notice::release $TAG now serves Vmore.apk $(cat android/dist/SHA256SUMS.txt | head -1)"
 
       - name: What went wrong (job summary)
         if: failure()
@@ -187,12 +198,15 @@ jobs:
           {
             echo "## ❌ android build failed"
             echo '```'
-            tail -n 150 build.log 2>/dev/null || echo "no build log"
+            tail -n 120 build.log 2>/dev/null || echo "no build log"
+            echo "--- release ---"
+            tail -n 40 release.log 2>/dev/null || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           #: Raw logs live behind a URL this setup cannot always read, but
           #: annotations are on the API — so the real compiler errors are
           #: re-emitted as annotations, message intact.
-          (grep -aA 3 -E "\.java:[0-9]+: error:|Execution failed for task|Could not resolve|Caused by:" build.log 2>/dev/null || true) | tr -d "\r" | head -80 | while IFS= read -r line; do
+          (grep -aA 4 -E "^\.java|error:|Error:|could not|Cannot|Validation Failed|failed to|Execution failed for task|Could not resolve|Caused by:" \
+              build.log release.log 2>/dev/null || true) | tr -d "\r" | head -80 | while IFS= read -r line; do
               echo "::error::$(printf '%s' "$line" | tr -d '\r' | cut -c1-900)"
             done
