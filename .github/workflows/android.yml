@@ -112,7 +112,20 @@ jobs:
           unzip -t Vmore-apk.zip
           #: Prove the APK inside the zip is a real, installable package.
           AAPT2="$(ls "$ANDROID_SDK_ROOT"/build-tools/*/aapt2 2>/dev/null | head -1)"
-          if [ -n "$AAPT2" ]; then "$AAPT2" dump badging Vmore.apk | head -5; fi
+          if [ -z "$AAPT2" ]; then
+            echo "::error::aapt2 not found — cannot verify the APK"
+            exit 1
+          fi
+          "$AAPT2" dump badging Vmore.apk > badging.txt
+          grep -E "^(package|application-label|launchable-activity|sdkVersion|targetSdkVersion|uses-permission)" badging.txt | head -20
+          #: The APK must really be Vmore, installable, and start on its login screen.
+          grep -q "package: name='com.vmore.app'" badging.txt
+          grep -q "launchable-activity: name='com.vmore.app.LoginActivity'" badging.txt
+          grep -q "sdkVersion:'26'" badging.txt
+          grep -q "application-label:'Vmore'" badging.txt
+          while IFS= read -r line; do
+            echo "::notice::$(printf '%s' "$line" | cut -c1-900)"
+          done < <(grep -E "^(package|application-label:|launchable-activity:|sdkVersion|targetSdkVersion)" badging.txt)
           sha256sum Vmore.apk Vmore-apk.zip > SHA256SUMS.txt
           cat SHA256SUMS.txt
           ls -lh
