@@ -183,10 +183,11 @@ public class MainActivity extends Activity {
                     boolean isPrivate = "private".equals(result.optString("type", ""));
                     if (isPrivate) {
                         JSONObject media = result.optJson("media");
-                        String name = null;
-                        if (media != null && media.has("file_name")
-                                && !media.isNull("file_name")) {
-                            name = media.getString("file_name");
+                        //: optString, not getString: org.json throws a checked
+                        //: JSONException for a missing key and this is a UI path.
+                        String name = media == null ? "" : media.optString("file_name", "");
+                        if (name.isEmpty()) {
+                            name = null;
                         }
                         askPrivateDownload(link, name, result.optBoolean("needs_login", false));
                     } else {
