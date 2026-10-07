@@ -658,11 +658,24 @@ async def test_apk_refuses_non_owners_and_non_apk_files(store, live_db):
     assert "not an apk" in ui.plain_caps(owner.shown_text).lower()
 
 
-def test_the_apk_button_and_the_app_page(store):
+def test_the_download_button_points_at_the_stable_release(store):
+    """Requirement: the bot's Unlimited Download button → the stable APK link."""
     keyboard = ui.app_details_keyboard(base_url="https://x.onrender.com", has_apk=True)
     url = [b.url for b in flat(keyboard) if b.url]
-    assert "https://x.onrender.com/api/v2/app/apk" in url
-    #: Without a URL the button still works — it asks the bot for the file.
+    assert ui.APP_RELEASE_URL in url
+    assert ui.APP_RELEASE_URL.endswith("/releases/latest/download/Vmore.apk")
+    #: The deployment route and the in-chat fallback stay available next to it.
+    assert "app:apk" in {b.callback_data for b in flat(keyboard) if b.callback_data}
+    assert ui.app_apk_url("https://x.onrender.com") == "https://x.onrender.com/api/v2/app/apk"
+
+
+def test_without_a_release_link_the_button_falls_back(store, monkeypatch):
+    """A fork that hosts the APK elsewhere (or the bot alone) still works."""
+    monkeypatch.setattr(ui, "APP_RELEASE_URL", "")
+    keyboard = ui.app_details_keyboard(base_url="https://x.onrender.com", has_apk=True)
+    #: Row 1 is the download button — the only URL the deployment supplies.
+    assert keyboard.inline_keyboard[0][0].url == "https://x.onrender.com/api/v2/app/apk"
+    #: No deployment URL either → the bot sends the file itself.
     fallback = ui.app_details_keyboard(base_url=None, has_apk=True)
     assert "app:apk" in {b.callback_data for b in flat(fallback) if b.callback_data}
 
@@ -682,7 +695,7 @@ async def test_the_app_page_shows_the_whole_product(store, live_db, monkeypatch)
     assert "how to use" in ui.plain_caps(
         " ".join(b.text for b in flat(message.shown_markup))).lower()
     rows = message.shown_markup.inline_keyboard
-    assert rows[0][0].url == "https://x.onrender.com/api/v2/app/apk"
+    assert rows[0][0].url == ui.APP_RELEASE_URL
     assert any(b.callback_data == "app:howto" for b in flat(message.shown_markup))
 
 
@@ -696,7 +709,7 @@ def test_the_start_button_owns_the_last_row():
 def test_the_private_link_screen_offers_the_two_options():
     keyboard = ui.private_access_keyboard("https://x.onrender.com", has_apk=True)
     rows = keyboard.inline_keyboard
-    assert rows[0][0].url == "https://x.onrender.com/api/v2/app/apk"
+    assert rows[0][0].url == ui.APP_RELEASE_URL
     assert rows[0][0].text == sc("♾️ Unlimited Download (App)")
     assert [b.callback_data for b in rows[1]] == ["cmd_premium", "cmd_refer"]
     text = ui.app_private_link_text()

@@ -4172,6 +4172,13 @@ APP_API_PATH = "/api/v2"
 #: Mirrors ``database.APP_TOKEN_LIFETIME_DAYS`` — kept here (not imported) so this
 #: module stays free of database imports; the test suite pins the two together.
 APP_TOKEN_LIFETIME_DAYS = 30
+#: The **stable** APK link: the ``android`` workflow rewrites this GitHub Release
+#: on every build, so one URL works forever (the owner's build or a fork — set
+#: APP_RELEASE_URL to point elsewhere, or to "" to fall back to /apk delivery).
+APP_RELEASE_URL = os.environ.get(
+    "APP_RELEASE_URL",
+    "https://github.com/darkshot47/restriction-advance-bot/releases/latest/download/Vmore.apk",
+).strip()
 
 
 def green_reply_button(text: str, **kwargs):
@@ -4217,13 +4224,15 @@ def app_download_button(stored_base_url: str | None = None, *, has_apk: bool = T
     button instead asks the bot to send the APK file in the chat, so the option
     is never a dead end.
     """
+    if APP_RELEASE_URL:
+        #: The workflow keeps this release fresh, so the button never rots.
+        return button(label, url=APP_RELEASE_URL, style="success")
     url = app_apk_url(stored_base_url)
     if url:
-        #: The deployment serves the file (and answers with a clear JSON error
-        #: when the owner has not uploaded the APK yet), so the button opens the
-        #: browser straight at /api/v2/app/apk.
+        #: No release link configured: open the deployment's own /api/v2/app/apk
+        #: (it answers with a clear JSON error when no APK was uploaded yet).
         return button(label, url=url, style="success")
-    #: No deployment URL yet: the bot sends the APK file itself in the chat.
+    #: Nothing to link to: the bot sends the APK file itself in the chat.
     return button(label, callback_data="app:apk", style="success")
 
 
@@ -4249,6 +4258,12 @@ def app_details_text(*, base_url=None, apk=None, premium: bool = False,
         "",
         f"**Version:** `{version}`",
         f"**Build:** `{name}` • `{size_line}`",
+    ]
+    if APP_RELEASE_URL:
+        #: The link the download button opens, written out so it can be copied
+        #: and shared even by people who never tap a button.
+        lines.append(f"**Download:** {APP_RELEASE_URL}")
+    lines += [
         f"**Server:** `{base or 'not set yet — the owner runs /apk with the URL'}`",
         f"**Owner:** @{owner}",
         "",
