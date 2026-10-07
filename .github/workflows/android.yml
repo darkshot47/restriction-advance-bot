@@ -101,10 +101,26 @@ jobs:
           set -o pipefail
           gradle --no-daemon testDebugUnitTest assembleDebug --stacktrace 2>&1 | tee ../build.log
           tail -5 ../build.log
-          echo "::notice::unit tests + assembleDebug finished"
-          grep -aE "^[0-9]+ tests completed" ../build.log | tail -2 | while IFS= read -r line; do
-            echo "::notice::$(printf '%s' "$line" | cut -c1-900)"
-          done
+
+      - name: Report the app's unit tests
+        working-directory: android
+        run: |
+          python3 - <<'PY'
+          import glob
+          import xml.etree.ElementTree as ET
+
+          total = failures = errors = 0
+          for report in glob.glob("app/build/test-results/testDebugUnitTest/*.xml"):
+              root = ET.parse(report).getroot()
+              total += int(root.get("tests", 0))
+              failures += int(root.get("failures", 0))
+              errors += int(root.get("errors", 0))
+          print(f"::notice::Vmore unit tests: {total} run, {failures} failed, {errors} errors")
+          if total == 0:
+              print("::error::the app's unit tests did not run")
+              raise SystemExit(1)
+          raise SystemExit(1 if (failures or errors) else 0)
+          PY
 
       - name: Pack it the way the owner wants it (zip → APK)
         working-directory: android
@@ -177,6 +193,6 @@ jobs:
           #: Raw logs live behind a URL this setup cannot always read, but
           #: annotations are on the API — so the real compiler errors are
           #: re-emitted as annotations, message intact.
-          grep -aA 3 -E "\.java:[0-9]+: error:|Execution failed for task|Could not resolve|Caused by:" build.log 2>/dev/null | tr -d "\r" | head -80 | while IFS= read -r line; do
+          (grep -aA 3 -E "\.java:[0-9]+: error:|Execution failed for task|Could not resolve|Caused by:" build.log 2>/dev/null || true) | tr -d "\r" | head -80 | while IFS= read -r line; do
               echo "::error::$(printf '%s' "$line" | tr -d '\r' | cut -c1-900)"
             done

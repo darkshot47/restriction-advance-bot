@@ -37,15 +37,15 @@ jobs:
           #: Ordinary logs live behind a URL CI tooling cannot always read; the
           #: annotations API is always reachable, so the failing tests are
           #: re-emitted there with their short traceback.
-          grep -aE "^(FAILED|ERROR) " pytest.log | head -40 | while IFS= read -r line; do
+          (grep -aE "^(FAILED|ERROR) " pytest.log || true) | head -40 | while IFS= read -r line; do
             echo "::error::$(printf '%s' "$line" | cut -c1-900)"
           done
-          grep -aB 1 -A 6 "^E  *AssertionError\|^E  *[A-Za-z]*Error" pytest.log | tr -d '\r' | head -60 | while IFS= read -r line; do
+          (grep -aB 1 -A 6 "^E  *AssertionError\|^E  *[A-Za-z]*Error" pytest.log || true) | tr -d '\r' | head -60 | while IFS= read -r line; do
             echo "::error::$(printf '%s' "$line" | cut -c1-900)"
           done
           {
             echo "## ❌ pytest failed"
             echo '```'
-            grep -aE "^(FAILED|ERROR) " pytest.log | head -40
+            (grep -aE "^(FAILED|ERROR) " pytest.log | head -40 || true)
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
