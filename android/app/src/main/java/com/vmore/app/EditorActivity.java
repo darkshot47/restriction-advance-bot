@@ -1,0 +1,332 @@
+package com.vmore.app;
+
+import android.app.Activity;
+import android.app.AlertDialog;
+import android.content.Intent;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.os.Bundle;
+import android.view.View;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.ImageView;
+import android.widget.ProgressBar;
+import android.widget.SeekBar;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import org.json.JSONObject;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+
+/**
+ * The editing tools that appear after a private download: change the **caption**,
+ * set a **thumbnail** and **trim the video from the front or the back** — then
+ * upload the result, which goes out through the user's own Telegram session.
+ */
+public class EditorActivity extends Activity {
+
+    private static final int PICK_IMAGE = 501;
+
+    private File file;
+    private EditText captionField;
+    private TextView fileLabel;
+    private TextView trimLabel;
+    private SeekBar startBar;
+    private SeekBar endBar;
+    private TextView trimSwitch;
+    private ProgressBar progress;
+    private Button uploadButton;
+    private File thumbnail;
+    private long durationMs = 0;
+    private boolean trimming = false;
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_editor);
+        String path = getIntent().getStringExtra("path");
+        file = path == null ? null : new File(path);
+        if (file == null || !file.exists()) {
+            toast("Nothing to edit");
+            finish();
+            return;
+        }
+        captionField = findViewById(R.id.captionField);
+        fileLabel = findViewById(R.id.fileLabel);
+        trimLabel = findViewById(R.id.trimLabel);
+        startBar = findViewById(R.id.startBar);
+        endBar = findViewById(R.id.endBar);
+        trimSwitch = findViewById(R.id.trimSwitch);
+        progress = findViewById(R.id.uploadProgress);
+        uploadButton = findViewById(R.id.uploadButton);
+
+        fileLabel.setText(file.getName() + " • " + Notifications.human(file.length()));
+        captionField.setText(Prefs.lastCaption(this));
+
+        findViewById(R.id.captionFromFile).setOnClickListener(v ->
+                captionField.setText(stripExtension(file.getName())));
+
+        findViewById(R.id.pickThumb).setOnClickListener(v -> pickThumbnail());
+        findViewById(R.id.grabThumb).setOnClickListener(v -> grabThumbnail());
+        findViewById(R.id.uploadButton).setOnClickListener(v -> upload());
+        findViewById(R.id.viewButton).setOnClickListener(v -> {
+            Intent intent = new Intent(this, ViewerActivity.class);
+            intent.putExtra("path", file.getAbsolutePath());
+            startActivity(intent);
+        });
+        findViewById(R.id.trimSwitch).setOnClickListener(v -> toggleTrim());
+
+        long[] meta = MediaUtils.videoMeta(file);
+        durationMs = meta[0];
+        boolean video = MediaUtils.isVideo(file) && MediaUtils.canTrim(file) && durationMs > 0;
+        findViewById(R.id.trimBox).setVisibility(video ? View.VISIBLE : View.GONE);
+        if (video) {
+            setupTrim();
+        } else if (MediaUtils.isVideo(file)) {
+            findViewById(R.id.trimBox).setVisibility(View.VISIBLE);
+            findViewById(R.id.trimSwitch).setEnabled(false);
+            trimLabel.setText("Trimming works on MP4 videos (this file is "
+                    + MediaUtils.extension(file.getName()) + ").");
+        }
+        String existing = Prefs.thumbnailPath(this);
+        if (existing != null && !existing.isEmpty() && new File(existing).exists()) {
+            thumbnail = new File(existing);
+            showThumbnail(thumbnail);
+        }
+    }
+
+    // ------------------------------------------------------------- caption //
+
+    private String stripExtension(String name) {
+        int dot = name.lastIndexOf('.');
+        return dot <= 0 ? name : name.substring(0, dot);
+    }
+
+    // ----------------------------------------------------------- thumbnail //
+
+    private void pickThumbnail() {
+        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
+        intent.setType("image/*");
+        startActivityForResult(intent, PICK_IMAGE);
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != PICK_IMAGE || resultCode != RESULT_OK || data == null
+                || data.getData() == null) {
+            return;
+        }
+        try (InputStream in = getContentResolver().openInputStream(data.getData())) {
+            if (in == null) {
+                toast("Could not read that image");
+                return;
+            }
+            File target = new File(getCacheDir(), "thumb_edit.jpg");
+            try (FileOutputStream out = new FileOutputStream(target)) {
+                byte[] buffer = new byte[64 * 1024];
+                int read;
+                while ((read = in.read(buffer)) > 0) {
+                    out.write(buffer, 0, read);
+                }
+            }
+            thumbnail = target;
+            Prefs.setThumbnailPath(this, target.getAbsolutePath());
+            showThumbnail(target);
+            toast("Thumbnail set");
+        } catch (Exception exc) {
+            toast("Could not read that image");
+        }
+    }
+
+    private void grabThumbnail() {
+        if (!MediaUtils.isVideo(file)) {
+            toast("Thumbnails come from videos");
+            return;
+        }
+        File target = new File(getCacheDir(), "thumb_frame.jpg");
+        File grabbed = MediaUtils.thumbnailFrom(file, target);
+        if (grabbed == null) {
+            toast("Could not grab a frame");
+            return;
+        }
+        thumbnail = grabbed;
+        Prefs.setThumbnailPath(this, grabbed.getAbsolutePath());
+        showThumbnail(grabbed);
+        toast("Thumbnail taken from the video");
+    }
+
+    private void showThumbnail(File source) {
+        ImageView view = findViewById(R.id.thumbPreview);
+        Bitmap bitmap = BitmapFactory.decodeFile(source.getAbsolutePath());
+        if (bitmap != null) {
+            view.setImageBitmap(bitmap);
+            view.setVisibility(View.VISIBLE);
+        }
+    }
+
+    // ---------------------------------------------------------------- trim //
+
+    private void setupTrim() {
+        startBar.setMax(1000);
+        endBar.setMax(1000);
+        endBar.setProgress(1000);
+        SeekBar.OnSeekBarChangeListener listener = new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int value, boolean fromUser) {
+                if (startBar.getProgress() > endBar.getProgress() - 10) {
+                    if (seekBar == startBar) {
+                        endBar.setProgress(Math.min(1000, startBar.getProgress() + 10));
+                    } else {
+                        startBar.setProgress(Math.max(0, endBar.getProgress() - 10));
+                    }
+                }
+                paintTrim();
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+            }
+        };
+        startBar.setOnSeekBarChangeListener(listener);
+        endBar.setOnSeekBarChangeListener(listener);
+        paintTrim();
+        Prefs.setTrimEnabled(this, Prefs.trimEnabled(this));
+        paintTrimSwitch();
+    }
+
+    private void paintTrim() {
+        long start = startMs();
+        long end = endMs();
+        trimLabel.setText("Front cut: " + time(start) + " • Back cut: " + time(end)
+                + "  (new length " + time(end - start) + ")");
+    }
+
+    private void paintTrimSwitch() {
+        trimSwitch.setText(trimming ? "✂️ Trim: ON — tap to upload the full video"
+                : "✂️ Trim: OFF — tap to cut it here");
+        startBar.setEnabled(trimming);
+        endBar.setEnabled(trimming);
+    }
+
+    private void toggleTrim() {
+        trimming = !trimming;
+        Prefs.setTrimEnabled(this, trimming);
+        paintTrimSwitch();
+    }
+
+    private long startMs() {
+        return durationMs * startBar.getProgress() / 1000;
+    }
+
+    private long endMs() {
+        long end = durationMs * endBar.getProgress() / 1000;
+        return end <= 0 ? durationMs : end;
+    }
+
+    private String time(long ms) {
+        long total = ms / 1000;
+        return String.format(java.util.Locale.US, "%02d:%02d", total / 60, total % 60);
+    }
+
+    // -------------------------------------------------------------- upload //
+
+    private void upload() {
+        uploadButton.setEnabled(false);
+        progress.setVisibility(View.VISIBLE);
+        progress.setIndeterminate(true);
+
+        new Thread(() -> {
+            File toUpload = file;
+            String note = null;
+            try {
+                if (trimming && MediaUtils.canTrim(file)) {
+                    File trimmed = new File(getCacheDir(), "trimmed_"
+                            + System.currentTimeMillis() + ".mp4");
+                    MediaUtils.trim(file, trimmed, startMs(), endMs());
+                    toUpload = trimmed;
+                    note = "trimmed " + time(startMs()) + " → " + time(endMs());
+                }
+            } catch (Exception exc) {
+                final File original = file;
+                runOnUiThread(() -> {
+                    progress.setVisibility(View.GONE);
+                    uploadButton.setEnabled(true);
+                    toast("Trim failed (" + exc.getMessage() + ") — uploading the original");
+                });
+                toUpload = file;
+                note = null;
+            }
+            doUpload(toUpload, note);
+        }).start();
+    }
+
+    private void doUpload(File toUpload, String note) {
+        String caption = captionField.getText().toString();
+        String kind = uploadKind(toUpload);
+        long[] meta = MediaUtils.isVideo(toUpload) || MediaUtils.isAudio(toUpload)
+                ? MediaUtils.videoMeta(toUpload) : new long[]{0, 0, 0};
+        try {
+            JSONObject body = Api.upload(Prefs.baseUrl(this), Prefs.token(this), toUpload,
+                    caption, thumbnail, kind, toUpload.getName(), meta[0], (int) meta[1],
+                    (int) meta[2], (sent, total) -> {
+                        runOnUiThread(() -> {
+                            progress.setIndeterminate(total <= 0);
+                            progress.setMax(1000);
+                            progress.setProgress(total > 0
+                                    ? (int) Math.min(1000, sent * 1000 / total) : 0);
+                            fileLabel.setText("⬆️ Uploading " + Notifications.human(sent)
+                                    + (total > 0 ? " / " + Notifications.human(total) : ""));
+                        });
+                        return true;
+                    });
+            Prefs.setLastCaption(this, caption);
+            runOnUiThread(() -> {
+                progress.setVisibility(View.GONE);
+                uploadButton.setEnabled(true);
+                boolean ok = body.optBoolean("ok", false);
+                fileLabel.setText(ok
+                        ? "✅ Uploaded" + (note == null ? "" : " (" + note + ")")
+                        : "⚠️ " + body.optString("error", "upload failed"));
+                new AlertDialog.Builder(this)
+                        .setTitle(ok ? "Uploaded" : "Upload failed")
+                        .setMessage(ok
+                                ? "Your file went back through your own Telegram account — "
+                                  + "open the chat with the bot to see it."
+                                : body.optString("error", "unknown error"))
+                        .setPositiveButton("OK", null)
+                        .show();
+            });
+        } catch (Exception exc) {
+            runOnUiThread(() -> {
+                progress.setVisibility(View.GONE);
+                uploadButton.setEnabled(true);
+                toast("Upload failed: " + exc.getMessage());
+            });
+        }
+    }
+
+    private String uploadKind(File target) {
+        if (MediaUtils.isVideo(target)) {
+            return "video";
+        }
+        if (MediaUtils.isImage(target)) {
+            return "photo";
+        }
+        if (MediaUtils.isAudio(target)) {
+            return "audio";
+        }
+        return "document";
+    }
+
+    private void toast(String text) {
+        Toast.makeText(this, text, Toast.LENGTH_SHORT).show();
+    }
+}

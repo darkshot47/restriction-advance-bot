@@ -1,0 +1,10 @@
+// Vmore — the unlimited-download companion app for the bot.
+// Plain Android framework only (no third-party libraries): the only thing the
+// build needs is the Android Gradle Plugin, which keeps CI fast and dependable.
+plugins {
+    id 'com.android.application' version '8.5.2' apply false
+}
+
+tasks.register('clean', Delete) {
+    delete rootProject.layout.buildDirectory
+}

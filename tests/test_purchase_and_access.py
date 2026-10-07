@@ -121,7 +121,7 @@ async def test_cancel_clears_checkout(db, press):
 @pytest.mark.parametrize("premium,source", [(False, None), (True, "redeem"), (True, None)])
 @pytest.mark.parametrize("link", ["https://t.me/c/12345/10", "https://t.me/c/12345/10-12", "https://t.me/publicname/1\nhttps://t.me/c/12345/10"])
 async def test_private_links_blocked_before_fetch_for_nonmanual_users(db, monkeypatch, premium, source, link):
-    """Requirement 1: premium-only pitch + [Buy Premium][Earn Points] on every path."""
+    """Requirement 7: app download first, [Buy Premium][Earn Points] second."""
     await db.add_user(1001, "Tester")
     db.users[1001].update(is_premium=premium, premium_source=source)
     fetch = AsyncMock()
@@ -129,14 +129,14 @@ async def test_private_links_blocked_before_fetch_for_nonmanual_users(db, monkey
     message = FakeMessage(text=link)
     await main.text_handler(None, message)
     fetch.assert_not_called()
-    assert sc("Private Channel Access (Premium Only)") in message.shown_text
-    assert sc("available exclusively for Premium users") in message.shown_text
-    assert sc("Upgrade to Premium or refer friends to earn points!") in message.shown_text
+    assert sc("Private / Restricted Link") in message.shown_text
+    assert sc("Unlimited Download (App)") in message.shown_text
     assert message.button("cmd_premium").text == sc("💎 Buy Premium")
     assert message.button("cmd_refer").text == sc("🎁 Earn Points")
-    # both buttons share a single row
-    row = next(r for r in message.shown_markup.inline_keyboard
-               if any(b.callback_data == "cmd_premium" for b in r))
+    #: Row one is the app (unlimited), row two is the premium pair.
+    rows = message.shown_markup.inline_keyboard
+    assert rows[0][0].callback_data == "app:apk"
+    row = next(r for r in rows if any(b.callback_data == "cmd_premium" for b in r))
     assert [b.callback_data for b in row] == ["cmd_premium", "cmd_refer"]
 
 

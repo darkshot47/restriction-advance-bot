@@ -28,6 +28,7 @@ os.environ.setdefault("BOT_USERNAME", "TestRestrictBot")
 os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017")
 
 import main  # noqa: E402  (import after the environment is ready)
+import appapi  # noqa: E402
 import engines  # noqa: E402
 import telemetry  # noqa: E402
 from pyrogram.types import (  # noqa: E402
@@ -848,38 +849,173 @@ class FakeDB:
     async def get_stars_payments(self, limit=50):
         return list(reversed(self.stars_payments))[:limit]
 
-    async def register_created_bot(self, creator_id, bot_token, bot_username=None, bot_id=None):
-        return {}
+    # ── the Vmore app: access tokens, app users, the APK and its activity ──
+    async def _app_tokens(self):
+        return self.__dict__.setdefault("app_tokens", {})
 
-    async def get_created_bot(self, bot_token_prefix):
-        return None
+    async def create_app_token(self, user_id, name=None, username=None, *, regenerate=False):
+        tokens = await self._app_tokens()
+        live = [row for row in tokens.values()
+                if row["user_id"] == int(user_id) and not row.get("revoked")]
+        if live and not regenerate:
+            return dict(live[-1])
+        if regenerate:
+            for row in live:
+                row["revoked"] = True
+        token = f"TEST{len(tokens) + 1:02d}"
+        row = {"_id": token, "token": token, "user_id": int(user_id), "name": name,
+               "username": username, "revoked": False, "calls": 0,
+               "created_at": _dt.datetime.now(), "last_used": None,
+               "logged_in_once": False}
+        tokens[token] = row
+        return dict(row)
 
-    async def get_created_bots_by_creator(self, creator_id):
-        return []
+    async def get_app_token(self, token):
+        tokens = await self._app_tokens()
+        row = tokens.get(str(token or "").upper())
+        return dict(row) if row else None
 
-    async def get_all_created_bots(self):
-        return []
+    async def get_active_app_token(self, user_id):
+        tokens = await self._app_tokens()
+        live = [row for row in tokens.values()
+                if row["user_id"] == int(user_id) and not row.get("revoked")]
+        return dict(live[-1]) if live else None
 
-    async def update_created_bot_stats(self, bot_token_prefix, **kwargs):
-        pass
+    async def revoke_app_token(self, user_id=None, *, token=None, reason="user"):
+        tokens = await self._app_tokens()
+        hit = False
+        for row in tokens.values():
+            if token is not None and row["token"] != str(token).upper():
+                continue
+            if token is None and user_id is not None and row["user_id"] != int(user_id):
+                continue
+            if not row.get("revoked"):
+                row["revoked"] = True
+                hit = True
+        return hit
 
-    async def delete_created_bot(self, bot_token_prefix):
+    async def touch_app_token(self, token, *, ip=None, device=None, app_version=None,
+                              count_call=True):
+        tokens = await self._app_tokens()
+        row = tokens.get(str(token or "").upper())
+        if not row:
+            return None
+        row["last_used"] = _dt.datetime.now()
+        if count_call:
+            row["calls"] = int(row.get("calls", 0)) + 1
+        row.update({k: v for k, v in
+                    (("device", device), ("app_version", app_version), ("last_ip", ip))
+                    if v})
+        return dict(row)
+
+    async def mark_app_token_login(self, token, *, device=None, app_version=None, ip=None):
+        tokens = await self._app_tokens()
+        row = tokens.get(str(token or "").upper())
+        if not row:
+            return False
+        first = not row.get("logged_in_once")
+        row.update({"logged_in_once": True, "last_login": _dt.datetime.now()})
+        return first
+
+    async def list_app_tokens(self, limit=100):
+        tokens = await self._app_tokens()
+        return list(tokens.values())[:limit]
+
+    async def count_app_tokens(self, active_only=True):
+        tokens = await self._app_tokens()
+        return len([r for r in tokens.values() if not active_only or not r.get("revoked")])
+
+    async def register_app_user(self, user_id, *, name=None, username=None, device=None,
+                                app_version=None, ip=None):
+        users = self.__dict__.setdefault("app_users", {})
+        row = users.setdefault(int(user_id), {"user_id": int(user_id), "logins": 0,
+                                              "downloads": 0, "uploads": 0, "sends": 0,
+                                              "first_seen": _dt.datetime.now()})
+        row.update({"last_seen": _dt.datetime.now(), "device": device,
+                    "app_version": app_version, "name": name, "username": username})
+        if name:
+            row["name"] = name
+        return row
+
+    async def increment_app_user_usage(self, user_id, *, downloads=0, uploads=0, sends=0,
+                                       logins=0):
+        users = self.__dict__.setdefault("app_users", {})
+        row = users.get(int(user_id))
+        if not row:
+            return False
+        for key, value in (("downloads", downloads), ("uploads", uploads),
+                           ("sends", sends), ("logins", logins)):
+            if value:
+                row[key] = int(row.get(key, 0)) + int(value)
+        return True
+
+    async def get_app_user(self, user_id):
+        return self.__dict__.setdefault("app_users", {}).get(int(user_id))
+
+    async def list_app_users(self, limit=200, *, order_by="last_seen"):
+        users = list(self.__dict__.setdefault("app_users", {}).values())
+        return users[:limit]
+
+    async def count_app_users(self):
+        return len(self.__dict__.setdefault("app_users", {}))
+
+    async def add_app_activity(self, user_id, *, kind, link=None, status="done",
+                               file_name=None, size=None, caption=None, detail=None):
+        rows = self.__dict__.setdefault("app_activity", [])
+        row = {"_id": len(rows) + 1, "user_id": int(user_id), "kind": kind, "link": link,
+               "status": status, "file_name": file_name, "size": size, "caption": caption,
+               "detail": detail, "date": _dt.datetime.now()}
+        rows.append(row)
+        return row
+
+    async def update_app_activity(self, activity_id, **fields):
+        for row in self.__dict__.setdefault("app_activity", []):
+            if row["_id"] == activity_id:
+                row.update(fields)
+                return True
         return False
 
-    async def is_created_bot_admin(self, user_id, bot_token_prefix):
-        return False
+    async def get_app_activity(self, user_id, limit=50):
+        rows = [r for r in self.__dict__.setdefault("app_activity", [])
+                if r["user_id"] == int(user_id)]
+        return list(reversed(rows))[:limit]
 
-    async def add_child_bot_user(self, bot_token_prefix, user_id, name=None, username=None):
-        pass
+    async def count_app_activity(self, user_id=None):
+        rows = self.__dict__.setdefault("app_activity", [])
+        if user_id is None:
+            return len(rows)
+        return len([r for r in rows if r["user_id"] == int(user_id)])
 
-    async def get_child_bot_user_count(self, bot_token_prefix):
+    async def cleanup_app_activity(self, days=30):
         return 0
 
-    async def get_child_bot_users(self, bot_token_prefix, limit=50):
-        return []
+    async def set_app_apk(self, *, file_id, file_name=None, size=None, base_url=None,
+                          version=None, apk_hash=None, uploaded_by=None):
+        row = {"file_id": file_id, "file_name": file_name, "size": size,
+               "base_url": base_url, "version": version, "apk_hash": apk_hash,
+               "uploaded_by": uploaded_by, "uploaded_at": _dt.datetime.now()}
+        config = self.__dict__.setdefault("app_config", {})
+        config["apk"] = row
+        config["base_url"] = base_url
+        config["version"] = version
+        return row
 
-    async def increment_child_bot_extractions(self, bot_token_prefix):
-        pass
+    async def get_app_apk(self):
+        return self.__dict__.setdefault("app_config", {}).get("apk")
+
+    async def get_app_config(self):
+        return dict(self.__dict__.setdefault("app_config", {}))
+
+    async def set_app_base_url(self, base_url, *, version=None):
+        config = self.__dict__.setdefault("app_config", {})
+        config["base_url"] = str(base_url).rstrip("/") if base_url else None
+        if version:
+            config["version"] = version
+        return config
+
+    async def purge_created_bot_data(self, *, force=False):
+        self.__dict__["createbot_purged"] = True
+        return {"skipped": False, "collections": ["created_bots"]}
 
 
 #: every database symbol main.py imports
@@ -920,13 +1056,16 @@ DB_NAMES = [
     "is_giveaway_participant", "list_giveaway_participants",
     "all_giveaway_participants", "clear_giveaway_participants",
     "ensure_giveaway_indexes",
-    # Auto-delete and child bot features
+    # Auto-delete and the Telegram Stars ledger
     "cleanup_old_records", "add_stars_payment", "get_stars_payment", "complete_stars_payment",
     "get_stars_payments",
-    "register_created_bot", "get_created_bot", "get_created_bots_by_creator", "get_all_created_bots",
-    "update_created_bot_stats", "delete_created_bot", "is_created_bot_admin",
-    "add_child_bot_user", "get_child_bot_user_count", "get_child_bot_users",
-    "increment_child_bot_extractions",
+    # The Vmore app (replaces the retired /CreateBot child-bot system)
+    "create_app_token", "get_app_token", "get_active_app_token", "revoke_app_token",
+    "touch_app_token", "mark_app_token_login", "list_app_tokens", "count_app_tokens",
+    "register_app_user", "increment_app_user_usage", "get_app_user", "list_app_users",
+    "count_app_users", "add_app_activity", "update_app_activity", "get_app_activity",
+    "count_app_activity", "cleanup_app_activity", "set_app_apk", "get_app_apk",
+    "get_app_config", "set_app_base_url", "purge_created_bot_data",
 ]
 
 
@@ -1027,9 +1166,10 @@ def clean_state(monkeypatch):
     #: Round 14 state: the echo guard for a native copy made with the user's
     #: own session, and the giveaway DM fan-out, must both be born fresh.
     monkeypatch.setattr(main, "ECHO_GUARD", {})
-    #: Child bot / CreateBot state
-    monkeypatch.setattr(main, "CREATEBOT_PENDING", {})
-    monkeypatch.setattr(main, "child_bot_clients", {})
+    #: The Vmore app: the owner card and the per-test app state.
+    monkeypatch.setattr(main, "OWNER_PROFILE_CACHE", {})
+    monkeypatch.setattr(main, "APP_BRIDGE", main.VmoreAppBridge())
+    monkeypatch.setattr(appapi, "JOBS", appapi.JobRegistry())
     monkeypatch.setattr(main, "HISTORY_CLEANUP_TASK", None)
     monkeypatch.setattr(main, "GIVEAWAY_BROADCAST_TASK", None)
     #: Round 15 state: the chats that show a picker reply keyboard and the users

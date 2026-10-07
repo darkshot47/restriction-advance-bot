@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- The token and server address are small and useful on a new phone. -->
+    <include domain="sharedpref" path="vmore.xml" />
+</full-backup-content>

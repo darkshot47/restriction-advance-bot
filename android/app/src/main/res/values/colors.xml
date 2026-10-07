@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="vmore_bg">#0E1117</color>
+    <color name="vmore_surface">#161B22</color>
+    <color name="vmore_surface_alt">#1D232C</color>
+    <color name="vmore_stroke">#2A313C</color>
+    <color name="vmore_text">#E6EDF3</color>
+    <color name="vmore_text_dim">#8B949E</color>
+    <color name="vmore_accent">#2EA043</color>
+    <color name="vmore_accent_dim">#238636</color>
+    <color name="vmore_danger">#DA3633</color>
+    <color name="vmore_primary">#1F6FEB</color>
+</resources>

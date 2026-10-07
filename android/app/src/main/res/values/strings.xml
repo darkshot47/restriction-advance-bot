@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Vmore</string>
+    <string name="editor_title">Vmore — Edit &amp; Upload</string>
+    <string name="history_title">Vmore — Downloads &amp; History</string>
+    <string name="howto_title">How to use Vmore</string>
+    <string name="login_ok">Login successful — check your Telegram DM.</string>
+    <string name="login_ok_offline">Logged in. The bot could not be told right now.</string>
+    <string name="login_failed">Login failed</string>
+    <string name="error_base_required">Enter the server address first</string>
+    <string name="error_token_required">Enter your access token</string>
+    <!-- Optional: a workflow input can bake in the owner's server address. -->
+    <string name="default_base_url" translatable="false"></string>
+</resources>

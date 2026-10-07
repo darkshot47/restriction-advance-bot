@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/vmore_bg"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <TextView
+            android:id="@+id/viewerTitle"
+            style="@style/VmoreTitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Viewer" />
+
+        <VideoView
+            android:id="@+id/videoView"
+            android:layout_width="match_parent"
+            android:layout_height="240dp"
+            android:layout_marginTop="12dp"
+            android:visibility="gone" />
+
+        <ImageView
+            android:id="@+id/imageView"
+            android:layout_width="match_parent"
+            android:layout_height="300dp"
+            android:layout_marginTop="12dp"
+            android:contentDescription="@string/app_name"
+            android:scaleType="fitCenter"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/textView"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:fontFamily="monospace"
+            android:textColor="@color/vmore_text"
+            android:textSize="12sp"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/saveDeviceButton"
+            style="@style/VmoreButtonAccent"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:drawableStart="@drawable/ic_save"
+            android:drawablePadding="10dp"
+            android:text="📥 Save to device" />
+
+        <Button
+            android:id="@+id/openExternalButton"
+            style="@style/VmoreButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="📤 Open in another app" />
+
+        <Button
+            android:id="@+id/shareButton"
+            style="@style/VmoreButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="🔗 Share" />
+
+        <Button
+            android:id="@+id/editButton"
+            style="@style/VmoreButton"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:drawableStart="@drawable/ic_edit"
+            android:drawablePadding="10dp"
+            android:text="✂️ Edit &amp; upload" />
+    </LinearLayout>
+</ScrollView>
