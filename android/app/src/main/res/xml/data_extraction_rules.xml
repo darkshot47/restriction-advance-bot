@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+: the token and server address may move to a new phone. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <include domain="sharedpref" path="vmore.xml" />
+    </cloud-backup>
+    <device-transfer>
+        <include domain="sharedpref" path="vmore.xml" />
+    </device-transfer>
+</data-extraction-rules>

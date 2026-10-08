@@ -420,6 +420,84 @@ Force subscription is owner-granted and never applies to the owner. Telegram err
 
 Every visible heading, screen copy and inline button label is rendered through the **Unicode small-caps font engine** (`ui.smallcaps`). Digits and punctuation are untouched, and the conversion is context aware: URLs, `@usernames`, `/commands`, ``code`` spans, HTML tags/entities and every `callback_data` payload are copied through byte for byte, so links stay clickable and buttons keep working. `SMALL_CAPS=off` in the environment disables the font while debugging. Send-side text (`ui_text`/`say*`), captions, watermarks and extracted media payloads are never converted. Admin pages use at most two buttons per row and seven rows, rather than a single oversized command list. Native button colors are used when supported, with the existing fallback retained. Legacy language buttons remain compatible; operational messages stay in English.
 
+## Vmore — the unlimited-download app
+
+The heavy work no longer has to go through the bot. **Vmore** is a small Android app that downloads
+private-channel content over the user's *own* Telegram data and streams it straight to the phone, so
+the server never re-uploads a file to Telegram. The app is built by GitHub Actions from `android/`,
+published as a Release APK, and the bot's **♾️ Unlimited Download (App)** button opens that stable
+link.
+
+### The user's flow
+
+1. **Get a token** — `/gentoken` in the bot. One account owns exactly **one** token, a short code like
+   `HPSEG9` (`APP_TOKEN_ALPHABET`, six characters, no `I/L/O/0/1`). It lives **30 days**
+   (`APP_TOKEN_LIFETIME_DAYS`); after that the app asks for a fresh one and `/gentoken` generates it in
+   one tap. Regenerating retires the old token immediately, `/revoketoken` switches it off for good.
+2. **Log in inside the app** — server address (a workflow input may pre-fill it, it stays editable) plus
+   the token. Nothing else: no phone number, no OTP, no session string. The first successful login
+   registers the user as an **app user** and the bot DMs **“login in app successful”**.
+3. **Paste a link** — public links are handed to the bot, which sends them into the Telegram DM (the
+   phone downloads nothing). Private links download **inside the app** with the user's stored
+   `/login` session — unlimited, no premium needed.
+4. **Edit before uploading** — caption, thumbnail and a **front/back trim** that runs on the phone
+   (`MediaExtractor` + `MediaMuxer`, no re-encode), then **Save to device**, watch the video, or
+   **upload**. The upload goes back through the user's own session, so the bot spends no bandwidth on it.
+5. **While it downloads** — Pause and Stop buttons on screen *and* in the notification bar; the
+   download keeps running with the app closed (foreground service, `dataSync`), progress lives in the
+   notification, and a second notification announces the finished file.
+
+### The API (`appapi.py`, mounted on the bot's Flask app at `/api/v2`)
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/v2/token/<TOKEN>` | validate the token, return the account snapshot |
+| `POST /api/v2/token/<TOKEN>/login` | app login → registers the app user, sends the DM |
+| `POST /api/v2/token/<TOKEN>/resolve` | what is behind a link (public / private, size, kind) |
+| `POST /api/v2/token/<TOKEN>/send` | public link → the Telegram DM |
+| `POST /api/v2/token/<TOKEN>/job` | start a private download (`downloads/app/` spool) |
+| `GET /api/v2/token/<TOKEN>/job/<ID>` · `/file` | progress · Range-aware byte stream (`206`) |
+| `POST …/job/<ID>/pause` · `/resume` · `/cancel` | the app's pause / stop |
+| `POST /api/v2/token/<TOKEN>/upload` | the edited file, sent through the user's own session |
+| `GET /api/v2/token/<TOKEN>/history` | bot downloads **and** app activity in one list |
+| `POST /api/v2/token/<TOKEN>/revoke` | switch the token off |
+| `GET /api/v2/app` · `/app/apk` · `/howto` · `/owner` · `/owner/photo` | app info, APK, help text, the owner card |
+
+`/health` on the same service reports `{ok, app, api}`.
+
+### Bot side
+
+* `/gentoken` (generate / show, 30-day life), `/revoketoken` (confirm, then off), `/app` (the full app
+  page behind the big button at the bottom of `/start`), `/apk` (owner: send the APK with the deployment
+  URL in the caption — or just a URL to set the server address and version) and `/appusers` (owner/admin:
+  **only** accounts that really logged in from the app — generating a token never counts).
+* A private/restricted link now shows **two options**: **♾️ Unlimited Download (App)** → the APK, and the
+  existing premium pitch for delivery in the DM.
+* Reply-keyboard buttons (`KeyboardButton`) are green; inline buttons keep their own colours.
+
+### Building the APK
+
+`.github/workflows/android.yml` builds `android/` (Java, no third-party dependencies) on every push that
+touches it, verifies the APK with `aapt2 dump badging`, packs it **into a zip** (the owner's
+requirement), uploads the zip as an artifact and (re)creates the **`vmore-latest` GitHub Release** with
+`Vmore.apk`, `Vmore-apk.zip` and `SHA256SUMS.txt`.
+
+Stable links — `APP_RELEASE_URL` in `ui.py` (override with the `APP_RELEASE_URL` env var):
+
+```
+https://github.com/darkshot47/restriction-advance-bot/releases/latest/download/Vmore.apk
+https://github.com/darkshot47/restriction-advance-bot/releases/latest/download/Vmore-apk.zip
+```
+
+`workflow_dispatch` takes an optional `base_url` input: it is baked into `strings.xml` as the *default*
+server address of a fresh install (the field stays editable in the app's Settings, and nothing else is
+baked in).
+
+### Icons
+
+`android/icons/*.svg` are the design sources; each has an exact VectorDrawable twin in
+`android/app/src/main/res/drawable/ic_*.xml`, which is what the build ships.
+
 ## Setup
 
 Set `API_ID`, `API_HASH`, `BOT_TOKEN`, `OWNER_ID`, `BOT_USERNAME` (without `@`), and `MONGO_URL`. `BOT_USERNAME` must match the actual bot so referral links work. The default is `wantedkar99bot`; free attribution is always `Extracted by @wantedkar99bot` as configured in `config.py`.
@@ -444,6 +522,11 @@ Set `API_ID`, `API_HASH`, `BOT_TOKEN`, `OWNER_ID`, `BOT_USERNAME` (without `@`),
 | `TELEMETRY_PING_HOST` / `TELEMETRY_PING_PORT` | `api.telegram.org` / `443` | target of the latency probe (a TCP handshake only) |
 | `TELEMETRY_BAR_WIDTH` | `12` | cells in the `[████████░░░░]` progress bar |
 | `SMALL_CAPS` / `BUTTON_STYLES` | `auto` | `off` disables the font / the native button colours while debugging |
+| `APP_TOKEN_LIFETIME_DAYS` | `30` | how long an app access token works before `/gentoken` hands out a new one |
+| `APP_RELEASE_URL` | this repo's `vmore-latest` APK | the stable APK link behind **♾️ Unlimited Download (App)**; set it to `""` to serve the APK from the deployment instead |
+| `APP_SPOOL_DIR` | `downloads/app` | where app downloads/uploads are staged before they are streamed or sent |
+| `APP_JOB_TTL_SECONDS` · `APP_JOB_IDLE_ABORT_SECONDS` | `2700` · `600` | how long a finished job (and its file) is kept, and when an unread download is abandoned |
+| `APP_MAX_UPLOAD_BYTES` | `2147483648` | largest file the app may upload back |
 
 ```bash
 python -m venv .venv
@@ -475,6 +558,7 @@ Seven further suites cover rounds 7-12 and the native engine on the same in-memo
 
 - `tests/test_round12_owner_tools_and_giveaways.py` — **the owner tools**: copy-before-download (and the Saved Messages guard), the share-URL deep link (minting, expiry, forgery, registration from inside the channel), the dump channel (/setdump, TTL deletion, queue, FloodWait pause, /deldump), `/pin` and `/pinned` in every form, the inline-button wizard end to end (cancel/skip/over-long label/bad link, broadcast formatting through the C++ pool, channel post + pin offer), and the giveaway engine (step wizard, single active giveaway, deep-link join once, live count, daily re-post, random winner granted, deadline draw) — plus the presentation budget re-checked over every new keyboard and screen.
 - `tests/test_round15_picker_dump_and_menu.py` — **the temporary picker keyboard, `/setdump`, the dump rule and the Telegram menu**: the bot rights of both choosers proved a subset of the user rights (as objects and on the MTProto wire), `/setdump` answering even when Telegram refuses the keyboard and a failed typed reference keeping the picker armed; the keyboard removed on every exit (finished setup by picker/typed/refused, `/cancel`, inline Cancel, another command, another button, a full channel list), kept for a retry, never pulled from a live flow, and a leftover from an older build swept exactly once; the dump used only for a user with a caption, prefix or suffix (text, media and native-copy paths, and never when the batch declined the caption), nothing mirrored, owner campaigns direct by default and staged behind `DUMP_STAGE_CAMPAIGNS`; and the menu — emoji-first descriptions, `/start` first, user vs admin vs owner lists inside Telegram's limits, per-chat scopes kept in sync by `/addadmin`, `/removeadmin` and `/start`, and publication at client start.
+- `tests/test_round16_vmore_app.py` — **the Vmore app**: `/CreateBot` and `/Bot_stats` gone (no command, no handler, no keyboard, no dead `main` symbols) and the retired collections dropped exactly once; one token per account with `/gentoken` generating it, regeneration retiring the old one, revocation from the bot, the **30-day expiry** (the token screen shows the days left, the API answers `expired: true`, startup retires what ran out, and the sweep is idempotent) and *generating* a token never making anybody an app user; the HTTP API end to end through Flask's test client against an in-memory Mongo (index, `/howto`, `/app`, `/owner`, account snapshot, login registering the user and DMing once, resolve public/private, delivery into the DM, premium gate, history merge, jobs with pause/resume/cancel, `Range` requests answering `206`, upload through the user's session with and without one, and a missing session degrading to "run /login"); `/apk` storing the file *and* the caption's deployment URL, refusing non-owners and non-APKs, and the download button pointing at the stable `APP_RELEASE_URL` (with the deployment and in-chat fallbacks still checked); every reply keyboard button green while inline buttons keep their own colours; and the two guards that keep the start hook honest (every app errand faked in the suite, and a failing errand swallowed instead of crashing the bot).
 - `tests/test_cpp_engine.py` — **the real C++ engine**: the `.cpp`/`.hpp` sources and build recipe, the loaded library's version/ABI/self-test, the worker pool actually running tasks, and byte-for-byte parity between the native and Python backends for `parse_link`, `scan`, `escape_html`, `escape_batch` and the token bucket, plus the wiring assertions (`main.parse_link`, the command registry and `telemetry.SpeedThrottle`).
 
 The round-six suite (`tests/test_round6_dual_engine.py`, 253 tests) covers the dual-engine overhaul on the same in-memory fakes: the complete `resolve_engine` routing matrix as one parametrised truth table (three controller modes × `models` permission × stored preference × peak), the strict "exceeds the threshold" peak rule, `TrafficMonitor` concurrency accounting including slot restoration when an extraction raises, controller-mode persistence with a fall-back when the store is unreachable, autoscaler escalation and reversion through the real `fetch_and_send` path, and the C++ Turbo worker pool **measured** rather than assumed — a Turbo batch must reach `ENGINE_TURBO_WORKERS` overlapping links while a Python batch must never exceed one. The telemetry HUD is asserted against the specification's exact strings (`📥 Downloading: 68% [████████░░░░]`, `📊 Server Load: CPU 19.2% | RAM 41.8% | Ping 11ms`, `🚀 Speed: 44.2 MB/s • ETA: 00:03`) both as pure functions and as rendered inside a real download, with a deterministic host stand-in so no test reads `/proc` or opens a socket; probe failures, an unknown file size and a raising sampler must all degrade to `--` without breaking the transfer. Also covered: the red `ButtonStyle.DANGER` Models Architecture button and its page, the `/start` badge parity, the switcher (including refusal once the permission is revoked, and the two lock modes), `/setengine` in all three modes plus owner-only enforcement and a failed database write, the four-tier granular grant end to end (tier → flags → duration → stored document → user notice, custom days, `grant_back`, stale and forged callbacks), `/removepremium`, the tiered pricing maths straight from `config`, the Contact Owner `url=` button on every pricing surface, the `/mychannels` dashboard with all four posting-rights outcomes and a forged chat id, the engine block of `/stats`, the twelve admin command pairs, and the real `database.py` functions for every new field against a Mongo mock. Every new keyboard is checked against the standing constraints — at most 7 rows and 2 buttons per row, labels within 28 characters, ASCII-only `callback_data`, links only inside `url=` buttons — and every new screen is checked for English-only copy (no Devanagari) with no raw link in the prose.

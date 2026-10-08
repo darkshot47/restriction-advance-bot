@@ -981,7 +981,8 @@ def test_start_badge_strings_match_the_specification():
         "🟢 **Active Engine:** [Python Standard ⚙️]"
 
 
-def test_models_architecture_button_is_red_and_lives_in_the_start_footer():
+def test_models_architecture_button_is_red_and_lives_in_the_help_footer():
+    """The red engines page moved one tap deeper: /start now ends with the app."""
     button = ui.models_architecture_button()
     assert button.callback_data == "models_info"
     assert button.text == sc("🧠 Models Architecture")
@@ -990,8 +991,12 @@ def test_models_architecture_button_is_red_and_lives_in_the_start_footer():
 
     rows = ui.start_keyboard().inline_keyboard
     assert len(rows) == 7, rows
-    assert rows[-1] == [button], "the red button owns the last row of /start"
-    assert rows[-1][0].text == sc("🧠 Models Architecture")
+    assert rows[-1] == [ui.app_footer_button()], "the app owns the last row of /start"
+    assert rows[-1][0].callback_data == "cmd_app"
+
+    help_rows = ui.help_keyboard().inline_keyboard
+    assert help_rows[-2] == [button], "the red button closes the help menu"
+    assert len(help_rows) <= 7
 
 
 def test_start_text_carries_the_engine_badge():
@@ -1017,11 +1022,12 @@ async def test_start_shows_the_live_engine_badge(db, press):
     assert "Peak Auto-Scale" not in plain(message2.shown_text)
 
 
-async def test_start_menu_button_opens_the_architecture_page(db, press):
+async def test_help_menu_button_opens_the_architecture_page(db, press):
     await db.add_user(1001, "Tester")
     message = FakeMessage(text="/start")
     await main.start_handler(None, message)
-    assert "models_info" in message.callback_data()
+    await press(message, "cmd_help")
+    assert "models_info" in message.callback_data(), "help carries the engines page"
 
     await press(message, "models_info")
     text = plain(message.shown_text)

@@ -1,4 +1,5 @@
 import os
+import secrets
 from motor.motor_asyncio import AsyncIOMotorClient
 from datetime import datetime, timedelta
 import calendar
@@ -1478,121 +1479,428 @@ async def get_stars_payments(limit=50):
 
 
 # --------------------------------------------------------------------------- #
-#  /CreateBot — user-created child bots
+#  Vmore app — access tokens, app users, APK store and app activity
+#
+#  The old /CreateBot child-bot system used to live here.  It is gone: no child
+#  bot is ever started again, and ``purge_created_bot_data`` deletes the two
+#  collections it wrote to (``created_bots`` and one ``child_bot_users_<id>``
+#  per child bot) once, on the first start after this change.
 # --------------------------------------------------------------------------- #
 
-async def register_created_bot(creator_id, bot_token, bot_username=None, bot_id=None):
-    """Register a new child bot created via /CreateBot."""
-    row = {
-        "_id": str(bot_token.split(":")[0]) if ":" in str(bot_token) else str(bot_token),
-        "creator_id": int(creator_id),
-        "bot_token": str(bot_token),
-        "bot_username": bot_username,
-        "bot_id": int(bot_id) if bot_id else None,
-        "status": "active",
-        "users_count": 0,
-        "total_extractions": 0,
-        "created_at": datetime.now(),
-        "last_active": datetime.now(),
-    }
-    try:
-        await created_bots_col.insert_one(row)
-    except DuplicateKeyError:
-        await created_bots_col.update_one(
-            {"_id": row["_id"]},
-            {"$set": {"bot_token": str(bot_token), "bot_username": bot_username,
-                      "bot_id": int(bot_id) if bot_id else None,
-                      "status": "active", "last_active": datetime.now()}},
+#: One row per account: the app access token (``HPSEG9`` style, 6 characters).
+app_tokens_col = db["app_tokens"]
+#: One row per account that actually *used* the app (logging in is the proof —
+#: generating a token alone never lands here, which is what /appusers lists).
+app_users_col = db["app_users"]
+#: Everything the app did: downloads, edits, sends and uploads.
+app_activity_col = db["app_activity"]
+#: ``config`` document key holding the APK the owner handed over with /apk.
+APP_CONFIG_KEY = "vmore_app"
+
+#: Characters used by :func:`new_app_token`.  ``I``, ``L``, ``O``, ``0`` and
+#: ``1`` are deliberately missing — a token is read aloud and typed by hand.
+APP_TOKEN_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+APP_TOKEN_LENGTH = 6
+#: How long a token stays "fresh" in /appusers before it is called idle.
+APP_TOKEN_IDLE_DAYS = 30
+#: An access token is valid for this many days; after that the app asks the user
+#: for a fresh one (/gentoken hands out a new token immediately).
+APP_TOKEN_LIFETIME_DAYS = int(os.environ.get("APP_TOKEN_LIFETIME_DAYS", "30"))
+
+
+def new_app_token() -> str:
+    """A random 6-character app access token, e.g. ``HPSEG9``."""
+    return "".join(secrets.choice(APP_TOKEN_ALPHABET) for _ in range(APP_TOKEN_LENGTH))
+
+
+def normalize_app_token(token) -> str:
+    """Tokens are case-insensitive on the wire and stored upper-case."""
+    return str(token or "").strip().upper()
+
+
+def app_token_expiry(created_at=None):
+    """When a token created at *created_at* stops working."""
+    return (created_at or utcnow()) + timedelta(days=APP_TOKEN_LIFETIME_DAYS)
+
+
+def app_token_expired(row) -> bool:
+    """Has this token row reached its expiry date?"""
+    if not row:
+        return True
+    expiry = row.get("expires_at") or app_token_expiry(row.get("created_at"))
+    return utcnow() >= expiry
+
+
+def app_token_days_left(row):
+    """Whole days left on the token (``0`` when it is gone)."""
+    if not row:
+        return 0
+    expiry = row.get("expires_at") or app_token_expiry(row.get("created_at"))
+    seconds = (expiry - utcnow()).total_seconds()
+    return max(0, int(seconds // 86400))
+
+
+async def expire_stale_app_tokens() -> int:
+    """Revoke every token whose lifetime is over (returns how many were retired)."""
+    expired = 0
+    async for row in app_tokens_col.find({"revoked": False}):
+        if app_token_expired(row):
+            await app_tokens_col.update_one(
+                {"_id": row["_id"]},
+                {"$set": {"revoked": True, "revoked_at": utcnow(),
+                          "revoked_reason": "expired"}})
+            expired += 1
+    return expired
+
+
+async def create_app_token(user_id, name=None, username=None, *, regenerate=False):
+    """Create (or return) the single app token of *user_id*.
+
+    One account owns exactly one active token: calling this again returns the
+    existing token unless ``regenerate=True``, which revokes the old one first.
+    """
+    user_id = int(user_id)
+    if regenerate:
+        await app_tokens_col.update_many(
+            {"user_id": user_id, "revoked": False},
+            {"$set": {"revoked": True, "revoked_at": utcnow(), "revoked_reason": "regenerated"}},
         )
+    elif not regenerate:
+        existing = await app_tokens_col.find_one(
+            {"user_id": user_id, "revoked": False}, sort=[("created_at", -1)])
+        if existing and app_token_expired(existing):
+            #: The 30 days are over: retire the row and fall through to a fresh one.
+            await app_tokens_col.update_one(
+                {"_id": existing["_id"]},
+                {"$set": {"revoked": True, "revoked_at": utcnow(),
+                          "revoked_reason": "expired"}})
+            existing = None
+        if existing:
+            await app_tokens_col.update_one(
+                {"_id": existing["_id"]},
+                {"$set": {"name": name or existing.get("name"),
+                          "username": username if username is not None else existing.get("username"),
+                          "updated_at": utcnow()}},
+            )
+            return await app_tokens_col.find_one({"_id": existing["_id"]})
+
+    for _attempt in range(8):
+        token = new_app_token()
+        row = {
+            "_id": token,
+            "token": token,
+            "user_id": user_id,
+            "name": name,
+            "username": username,
+            "revoked": False,
+            "created_at": utcnow(),
+            "updated_at": utcnow(),
+            "last_used": None,
+            "last_ip": None,
+            "device": None,
+            "app_version": None,
+            "calls": 0,
+            "logged_in_once": False,
+            "expires_at": app_token_expiry(),
+            "lifetime_days": APP_TOKEN_LIFETIME_DAYS,
+        }
+        try:
+            await app_tokens_col.insert_one(row)
+            return row
+        except DuplicateKeyError:  # pragma: no cover - astronomically unlikely
+            continue
+    else:  # pragma: no cover - the alphabet space is 1e9+
+        return None
+
+
+async def get_app_token(token):
+    """The row behind a token, or ``None`` when the token is unknown."""
+    token = normalize_app_token(token)
+    if not token:
+        return None
+    return await app_tokens_col.find_one({"_id": token})
+
+
+async def get_active_app_token(user_id):
+    """The live token of *user_id*.
+
+    ``None`` when none exists, it was revoked, or its 30 days ran out — in that
+    last case the stale row is retired on the spot so the screens (and the API)
+    always agree about what is active.
+    """
+    row = await app_tokens_col.find_one(
+        {"user_id": int(user_id), "revoked": False}, sort=[("created_at", -1)])
+    if row and app_token_expired(row):
+        await app_tokens_col.update_one(
+            {"_id": row["_id"]},
+            {"$set": {"revoked": True, "revoked_at": utcnow(), "revoked_reason": "expired"}})
+        return None
     return row
 
 
-async def get_created_bot(bot_token_prefix):
-    """Get a created bot by its token prefix (bot id part)."""
-    prefix = str(bot_token_prefix).split(":")[0] if ":" in str(bot_token_prefix) else str(bot_token_prefix)
-    return await created_bots_col.find_one({"_id": prefix})
+async def revoke_app_token(user_id=None, *, token=None, reason="user") -> bool:
+    """Revoke one token (by id) or every live token of *user_id*."""
+    query = {"revoked": False}
+    if token is not None:
+        query["_id"] = normalize_app_token(token)
+    elif user_id is not None:
+        query["user_id"] = int(user_id)
+    else:
+        return False
+    result = await app_tokens_col.update_many(
+        query, {"$set": {"revoked": True, "revoked_at": utcnow(), "revoked_reason": reason}})
+    return bool(result.modified_count)
 
 
-async def get_created_bots_by_creator(creator_id):
-    """All bots created by a specific user."""
+async def touch_app_token(token, *, ip=None, device=None, app_version=None, count_call=True):
+    """Record that a token was just used; returns the (already validated) row."""
+    token = normalize_app_token(token)
+    updates = {"last_used": utcnow()}
+    if ip:
+        updates["last_ip"] = str(ip)[:64]
+    if device:
+        updates["device"] = str(device)[:120]
+    if app_version:
+        updates["app_version"] = str(app_version)[:32]
+    payload = {"$set": updates}
+    if count_call:
+        payload["$inc"] = {"calls": 1}
+    await app_tokens_col.update_one({"_id": token}, payload)
+    return await app_tokens_col.find_one({"_id": token})
+
+
+async def mark_app_token_login(token, *, device=None, app_version=None, ip=None):
+    """Record an app login.
+
+    Returns ``True`` when this was the **first** login of that token, so the bot
+    sends its "login in app successful" DM exactly once per token — later logins
+    refresh the device fields silently.
+    """
+    token = normalize_app_token(token)
+    row = await app_tokens_col.find_one({"_id": token}) or {}
+    first = not row.get("logged_in_once")
+    updates = {
+        "logged_in_once": True,
+        "last_login": utcnow(),
+        "first_login": row.get("first_login") or utcnow(),
+    }
+    if device:
+        updates["device"] = str(device)[:120]
+    if app_version:
+        updates["app_version"] = str(app_version)[:32]
+    if ip:
+        updates["last_ip"] = str(ip)[:64]
+    await app_tokens_col.update_one({"_id": token}, {"$set": updates})
+    return first
+
+
+async def list_app_tokens(limit=100):
+    """Every token ever generated (owner view — generators, not app users)."""
     rows = []
-    async for row in created_bots_col.find({"creator_id": int(creator_id)}):
+    async for row in app_tokens_col.find({}).sort("created_at", -1).limit(limit):
         rows.append(row)
     return rows
 
 
-async def get_all_created_bots():
-    """Every registered child bot."""
-    rows = []
-    async for row in created_bots_col.find({}):
-        rows.append(row)
-    return rows
+async def count_app_tokens(active_only=True):
+    if not active_only:
+        return await app_tokens_col.count_documents({})
+    cursor = app_tokens_col.find({"revoked": False})
+    alive = 0
+    async for row in cursor:
+        if not app_token_expired(row):
+            alive += 1
+    return alive
 
 
-async def update_created_bot_stats(bot_token_prefix, *, users_count=None, total_extractions=None):
-    """Update usage stats of a child bot."""
-    prefix = str(bot_token_prefix).split(":")[0] if ":" in str(bot_token_prefix) else str(bot_token_prefix)
-    updates = {"last_active": datetime.now()}
-    if users_count is not None:
-        updates["users_count"] = int(users_count)
-    if total_extractions is not None:
-        updates["total_extractions"] = int(total_extractions)
-    await created_bots_col.update_one({"_id": prefix}, {"$set": updates})
+async def register_app_user(user_id, *, name=None, username=None, device=None,
+                            app_version=None, ip=None):
+    """Record that *user_id* really used the app.
+
+    This is deliberately called from the API (a successful login or any real
+    action), never from /gentoken: generating a token does not make somebody an
+    app user, using the app does — which is exactly what /appusers must show.
+    """
+    user_id = int(user_id)
+    existing = await app_users_col.find_one({"_id": user_id})
+    now = utcnow()
+    updates = {
+        "user_id": user_id,
+        "last_seen": now,
+        "last_ip": str(ip)[:64] if ip else (existing or {}).get("last_ip"),
+        "device": str(device)[:120] if device else (existing or {}).get("device"),
+        "app_version": str(app_version)[:32] if app_version else (existing or {}).get("app_version"),
+    }
+    if name:
+        updates["name"] = name
+    if username:
+        updates["username"] = username
+    payload = {"$set": updates, "$setOnInsert": {"first_seen": now, "downloads": 0,
+                                                 "uploads": 0, "sends": 0}}
+    payload["$inc"] = {"logins": 0 if existing else 1}
+    await app_users_col.update_one({"_id": user_id}, payload, upsert=True)
+    return await app_users_col.find_one({"_id": user_id})
 
 
-async def delete_created_bot(bot_token_prefix):
-    """Remove a child bot registration."""
-    prefix = str(bot_token_prefix).split(":")[0] if ":" in str(bot_token_prefix) else str(bot_token_prefix)
-    result = await created_bots_col.delete_one({"_id": prefix})
-    return bool(result.deleted_count)
-
-
-async def is_created_bot_admin(user_id, bot_token_prefix):
-    """Check if a user is the creator/admin of a specific child bot."""
-    bot = await get_created_bot(bot_token_prefix)
-    return bot and int(bot.get("creator_id", 0)) == int(user_id)
-
-
-async def get_child_bot_users_col(bot_token_prefix):
-    """Get the users collection for a specific child bot's users."""
-    prefix = str(bot_token_prefix).split(":")[0] if ":" in str(bot_token_prefix) else str(bot_token_prefix)
-    return db[f"child_bot_users_{prefix}"]
-
-
-async def add_child_bot_user(bot_token_prefix, user_id, name=None, username=None):
-    """Track a user of a child bot."""
-    col = await get_child_bot_users_col(bot_token_prefix)
-    try:
-        await col.update_one(
-            {"user_id": int(user_id)},
-            {"$set": {"user_id": int(user_id), "name": name, "username": username,
-                      "last_active": datetime.now()},
-             "$setOnInsert": {"joined_at": datetime.now(), "extractions": 0}},
-            upsert=True,
-        )
-    except Exception:
-        pass
-
-
-async def get_child_bot_user_count(bot_token_prefix):
-    """How many users a child bot has."""
-    col = await get_child_bot_users_col(bot_token_prefix)
-    return await col.count_documents({})
-
-
-async def get_child_bot_users(bot_token_prefix, limit=50):
-    """List users of a child bot."""
-    col = await get_child_bot_users_col(bot_token_prefix)
-    rows = []
-    async for row in col.find({}).sort("last_active", -1).limit(limit):
-        rows.append(row)
-    return rows
-
-
-async def increment_child_bot_extractions(bot_token_prefix):
-    """Increment extraction count for a child bot."""
-    prefix = str(bot_token_prefix).split(":")[0] if ":" in str(bot_token_prefix) else str(bot_token_prefix)
-    await created_bots_col.update_one(
-        {"_id": prefix},
-        {"$inc": {"total_extractions": 1}, "$set": {"last_active": datetime.now()}},
+async def increment_app_user_usage(user_id, *, downloads=0, uploads=0, sends=0, logins=0):
+    """Bump the per-app-user counters shown in /appusers."""
+    updates = {}
+    for key, value in (("downloads", downloads), ("uploads", uploads),
+                       ("sends", sends), ("logins", logins)):
+        if value:
+            updates[key] = int(value)
+    if not updates:
+        return False
+    await app_users_col.update_one(
+        {"_id": int(user_id)},
+        {"$set": {"last_seen": utcnow()}, "$inc": updates},
+        upsert=False,
     )
+    return True
+
+
+async def get_app_user(user_id):
+    return await app_users_col.find_one({"_id": int(user_id)})
+
+
+async def list_app_users(limit=200, *, order_by="last_seen"):
+    rows = []
+    async for row in app_users_col.find({}).sort(order_by, -1).limit(limit):
+        rows.append(row)
+    return rows
+
+
+async def count_app_users():
+    return await app_users_col.count_documents({})
+
+
+async def add_app_activity(user_id, *, kind, link=None, status="done", file_name=None,
+                           size=None, caption=None, detail=None):
+    """Append one row to the app's own activity log (downloads + history, one list)."""
+    row = {
+        "user_id": int(user_id),
+        "kind": str(kind)[:24],
+        "link": (str(link)[:512] if link else None),
+        "status": str(status)[:24],
+        "file_name": (str(file_name)[:200] if file_name else None),
+        "size": int(size) if size else None,
+        "caption": (str(caption)[:1024] if caption else None),
+        "detail": (str(detail)[:300] if detail else None),
+        "date": utcnow(),
+    }
+    result = await app_activity_col.insert_one(row)
+    row["_id"] = result.inserted_id
+    return row
+
+
+async def update_app_activity(activity_id, **fields):
+    if not fields:
+        return False
+    result = await app_activity_col.update_one({"_id": activity_id}, {"$set": fields})
+    return bool(result.modified_count or result.matched_count)
+
+
+async def get_app_activity(user_id, limit=50):
+    rows = []
+    async for row in app_activity_col.find({"user_id": int(user_id)}).sort("date", -1).limit(limit):
+        rows.append(row)
+    return rows
+
+
+async def count_app_activity(user_id=None):
+    query = {"user_id": int(user_id)} if user_id is not None else {}
+    return await app_activity_col.count_documents(query)
+
+
+async def cleanup_app_activity(days=30):
+    cutoff = datetime.now() - timedelta(days=int(days))
+    result = await app_activity_col.delete_many({"date": {"$lt": cutoff}})
+    return int(getattr(result, "deleted_count", 0))
+
+
+# --------------------------------------------------------------------------- #
+#  /apk — the owner hands the built APK to the bot
+# --------------------------------------------------------------------------- #
+
+async def set_app_apk(*, file_id, file_name=None, size=None, base_url=None,
+                      version=None, apk_hash=None, uploaded_by=None):
+    """Store the APK the owner sent with /apk (re-upload replaces it)."""
+    row = {
+        "file_id": str(file_id),
+        "file_name": file_name,
+        "size": int(size) if size else None,
+        "base_url": (str(base_url).strip() if base_url else None),
+        "version": (str(version).strip() if version else None),
+        "apk_hash": apk_hash,
+        "uploaded_by": int(uploaded_by) if uploaded_by else None,
+        "uploaded_at": utcnow(),
+    }
+    await config_col.update_one(
+        {"_id": APP_CONFIG_KEY},
+        {"$set": {"apk": row, "base_url": row["base_url"], "version": row["version"],
+                  "updated_at": utcnow()}},
+        upsert=True,
+    )
+    return row
+
+
+async def get_app_apk():
+    doc = await config_col.find_one({"_id": APP_CONFIG_KEY})
+    return (doc or {}).get("apk")
+
+
+async def get_app_config():
+    doc = await config_col.find_one({"_id": APP_CONFIG_KEY})
+    return doc or {}
+
+
+async def set_app_base_url(base_url, *, version=None):
+    """Remember the deployment URL the owner typed with /apk."""
+    updates = {"base_url": str(base_url).strip().rstrip("/") if base_url else None,
+               "updated_at": utcnow()}
+    if version:
+        updates["version"] = str(version).strip()
+    await config_col.update_one({"_id": APP_CONFIG_KEY}, {"$set": updates}, upsert=True)
+    return updates
+
+
+# --------------------------------------------------------------------------- #
+#  One-time removal of the retired /CreateBot data
+# --------------------------------------------------------------------------- #
+
+#: Collection names that belonged to the /CreateBot child-bot system.
+LEGACY_CREATEBOT_COLLECTIONS = ("created_bots", "child_bots")
+
+
+async def purge_created_bot_data(*, force=False):
+    """Delete every trace of the retired /CreateBot feature.
+
+    Drops ``created_bots`` and each ``child_bot_users_<id>`` collection once.
+    The ``createbot_purged`` flag in the config collection makes this a no-op on
+    later starts, so it never runs again on a live database.
+    """
+    doc = await config_col.find_one({"_id": "createbot_purge"})
+    if doc and doc.get("done") and not force:
+        return {"skipped": True, "collections": []}
+
+    dropped = []
+    names = set(LEGACY_CREATEBOT_COLLECTIONS)
+    try:
+        existing = await db.list_collection_names()
+    except Exception:
+        existing = []
+    for name in existing:
+        if name.startswith("child_bot_users"):
+            names.add(name)
+    for name in sorted(names):
+        try:
+            await db.drop_collection(name)
+            dropped.append(name)
+        except Exception as exc:  # pragma: no cover - depends on the server
+            print(f"[PURGE] could not drop {name}: {type(exc).__name__}: {exc}", flush=True)
+    await config_col.update_one(
+        {"_id": "createbot_purge"},
+        {"$set": {"done": True, "at": utcnow(), "collections": dropped}},
+        upsert=True,
+    )
+    return {"skipped": False, "collections": dropped}

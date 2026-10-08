@@ -1,0 +1,212 @@
+name: android
+
+# Builds the Vmore app, packs the APK into a zip and publishes it twice:
+#   • as a workflow artifact (every build), and
+#   • as a GitHub Release asset — the stable link the bot's "Unlimited Download"
+#     button points at (the owner copies that link into /apk's caption).
+#
+# The zip is what the owner asked for: "build the app and extract the APK from a
+# zip file".  Both files are verified (unzip -t + aapt2 badging) before release.
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "android/**"
+      - ".github/workflows/android.yml"
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Server address baked into the app as the starting value (optional)"
+        required: false
+        default: ""
+      release_tag:
+        description: "Release tag to publish (default: vmore-latest)"
+        required: false
+        default: "vmore-latest"
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Android SDK packages
+        run: |
+          SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
+          if [ -z "$SDK" ]; then
+            echo "::error::no Android SDK found on the runner"
+            exit 1
+          fi
+          echo "ANDROID SDK: $SDK"
+          ls "$SDK" || true
+          SDKMANAGER="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(command -v sdkmanager || true)"
+          fi
+          if [ -z "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager not found"
+            exit 1
+          fi
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          "$SDKMANAGER" "platforms;android-34" "build-tools;34.0.0" "platform-tools" 2>&1 | tail -20
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
+          ls "$SDK/platforms"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          #: The project ships no wrapper jar (it is a binary), so the action
+          #: installs this exact Gradle — the version AGP 8.5 wants.
+          gradle-version: "8.7"
+
+      - name: Point the app at the owner's server (optional)
+        if: ${{ inputs.base_url != '' }}
+        working-directory: android
+        run: |
+          #: The address stays editable in the app; this only pre-fills it so a
+          #: fresh install already knows the deployment.
+          python3 - "${{ inputs.base_url }}" <<'PY'
+          import pathlib, sys
+          url = sys.argv[1].strip().rstrip("/")
+          if not url.startswith(("http://", "https://")):
+              url = "https://" + url
+          path = pathlib.Path("app/src/main/res/values/strings.xml")
+          text = path.read_text(encoding="utf-8")
+          start = text.index('<string name="default_base_url"')
+          end = text.index("</string>", start) + len("</string>")
+          text = text[:start] + f'<string name="default_base_url" translatable="false">{url}</string>' + text[end:]
+          path.write_text(text, encoding="utf-8")
+          print("baked base url:", url)
+          PY
+
+      - name: Build the debug APK (and run its unit tests)
+        working-directory: android
+        run: |
+          set -o pipefail
+          gradle --no-daemon testDebugUnitTest assembleDebug --stacktrace 2>&1 | tee ../build.log
+          tail -5 ../build.log
+
+      - name: Report the app's unit tests
+        working-directory: android
+        run: |
+          python3 - <<'PY'
+          import glob
+          import xml.etree.ElementTree as ET
+
+          total = failures = errors = 0
+          for report in glob.glob("app/build/test-results/testDebugUnitTest/*.xml"):
+              root = ET.parse(report).getroot()
+              total += int(root.get("tests", 0))
+              failures += int(root.get("failures", 0))
+              errors += int(root.get("errors", 0))
+          print(f"::notice::Vmore unit tests: {total} run, {failures} failed, {errors} errors")
+          if total == 0:
+              print("::error::the app's unit tests did not run")
+              raise SystemExit(1)
+          raise SystemExit(1 if (failures or errors) else 0)
+          PY
+
+      - name: Pack it the way the owner wants it (zip → APK)
+        working-directory: android
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/debug/app-debug.apk dist/Vmore.apk
+          cd dist
+          zip -9 Vmore-apk.zip Vmore.apk
+          unzip -t Vmore-apk.zip
+          #: Prove the APK inside the zip is a real, installable package.
+          AAPT2="$(ls "$ANDROID_SDK_ROOT"/build-tools/*/aapt2 2>/dev/null | head -1)"
+          if [ -z "$AAPT2" ]; then
+            echo "::error::aapt2 not found — cannot verify the APK"
+            exit 1
+          fi
+          "$AAPT2" dump badging Vmore.apk > badging.txt
+          grep -E "^(package|application-label|launchable-activity|sdkVersion|targetSdkVersion|uses-permission)" badging.txt | head -20
+          #: The APK must really be Vmore, installable, and start on its login screen.
+          grep -q "package: name='com.vmore.app'" badging.txt
+          grep -q "launchable-activity: name='com.vmore.app.LoginActivity'" badging.txt
+          grep -q "sdkVersion:'26'" badging.txt
+          grep -q "application-label:'Vmore'" badging.txt
+          while IFS= read -r line; do
+            echo "::notice::$(printf '%s' "$line" | cut -c1-900)"
+          done < <(grep -E "^(package|application-label:|launchable-activity:|sdkVersion|targetSdkVersion)" badging.txt)
+          sha256sum Vmore.apk Vmore-apk.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+          ls -lh
+
+      - name: Upload the zip (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: vmore-apk
+          path: |
+            android/dist/Vmore-apk.zip
+            android/dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+      - name: Publish the release (stable download link)
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag || 'vmore-latest' }}
+        run: |
+          {
+            cat > release-notes.md <<'NOTES'
+          Automated build of the Vmore Android app.
+
+          **Install**
+          1. Download `Vmore.apk` (or `Vmore-apk.zip` and unzip it).
+          2. Open it on the phone and allow "Install unknown apps" once.
+          3. Enter the server address and your access token (send /gentoken to the bot).
+
+          The bot's **♾️ Unlimited Download (App)** button points at this release,
+          and the file is replaced with every build — so the link never rots.
+          NOTES
+            #: Deleting and recreating the release would briefly break the stable
+            #: link (and race the tag); replacing the assets in place cannot.
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              gh release upload "$TAG" android/dist/Vmore.apk android/dist/Vmore-apk.zip \
+                android/dist/SHA256SUMS.txt --clobber
+              gh release edit "$TAG" --title "Vmore APK (latest)" --notes-file release-notes.md \
+                --latest
+            else
+              gh release create "$TAG" android/dist/Vmore.apk android/dist/Vmore-apk.zip \
+                android/dist/SHA256SUMS.txt --title "Vmore APK (latest)" \
+                --notes-file release-notes.md --latest
+            fi
+          } 2>&1 | tee release.log
+          echo "::notice::release $TAG now serves Vmore.apk $(cat android/dist/SHA256SUMS.txt | head -1)"
+
+      - name: What went wrong (job summary)
+        if: failure()
+        run: |
+          {
+            echo "## ❌ android build failed"
+            echo '```'
+            tail -n 120 build.log 2>/dev/null || echo "no build log"
+            echo "--- release ---"
+            tail -n 40 release.log 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          #: Raw logs live behind a URL this setup cannot always read, but
+          #: annotations are on the API — so the real compiler errors are
+          #: re-emitted as annotations, message intact.
+          (grep -aA 4 -E "^\.java|error:|Error:|could not|Cannot|Validation Failed|failed to|Execution failed for task|Could not resolve|Caused by:" \
+              build.log release.log 2>/dev/null || true) | tr -d "\r" | head -80 | while IFS= read -r line; do
+              echo "::error::$(printf '%s' "$line" | tr -d '\r' | cut -c1-900)"
+            done
