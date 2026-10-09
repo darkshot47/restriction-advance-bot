@@ -25,6 +25,9 @@ public final class Prefs {
     private static final String KEY_TRIM = "trim_enabled";
     private static final String KEY_OWNER = "owner_username";
     private static final String KEY_OWNER_NAME = "owner_name";
+    private static final String KEY_TD_API_ID = "td_api_id";
+    private static final String KEY_TD_API_HASH = "td_api_hash";
+    private static final String KEY_BOT_USERNAME = "bot_username";
 
     private Prefs() {
     }
@@ -109,5 +112,33 @@ public final class Prefs {
 
     public static void setTrimEnabled(Context context, boolean value) {
         prefs(context).edit().putBoolean(KEY_TRIM, value).apply();
+    }
+
+    // ------------------------------------------------- TDLib direct mode //
+
+    /** The Telegram application credentials the server vends on /api/v2/app —
+     *  TDLib on the phone logs in with the very same ones the bot's sessions
+     *  use, so both Telegram sessions ride one app identity. */
+    public static int tdApiId(Context context) {
+        return prefs(context).getInt(KEY_TD_API_ID, 0);
+    }
+
+    public static String tdApiHash(Context context) {
+        return prefs(context).getString(KEY_TD_API_HASH, "");
+    }
+
+    /** The bot's Telegram username — where direct uploads land (the same
+     *  chat the server-mode upload sends into). */
+    public static String botUsername(Context context) {
+        return prefs(context).getString(KEY_BOT_USERNAME, "");
+    }
+
+    public static void saveTdConfig(Context context, int apiId, String apiHash,
+                                    String botUsername) {
+        prefs(context).edit()
+                .putInt(KEY_TD_API_ID, apiId)
+                .putString(KEY_TD_API_HASH, apiHash == null ? "" : apiHash)
+                .putString(KEY_BOT_USERNAME, botUsername == null ? "" : botUsername)
+                .apply();
     }
 }

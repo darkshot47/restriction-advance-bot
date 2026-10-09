@@ -133,9 +133,10 @@ async def test_private_links_blocked_before_fetch_for_nonmanual_users(db, monkey
     assert sc("Unlimited Download (App)") in message.shown_text
     assert message.button("cmd_premium").text == sc("💎 Buy Premium")
     assert message.button("cmd_refer").text == sc("🎁 Earn Points")
-    #: Row one is the app (unlimited), row two is the premium pair.
+    #: Row one is the app (unlimited) — APK lands in the chat, never a link —
+    #: row two is the premium pair.
     rows = message.shown_markup.inline_keyboard
-    assert rows[0][0].url == ui.APP_RELEASE_URL
+    assert rows[0][0].callback_data == "app:apk" and rows[0][0].url is None
     row = next(r for r in rows if any(b.callback_data == "cmd_premium" for b in r))
     assert [b.callback_data for b in row] == ["cmd_premium", "cmd_refer"]
 

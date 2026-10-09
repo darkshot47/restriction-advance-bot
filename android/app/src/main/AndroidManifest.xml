@@ -21,6 +21,7 @@
         android:label="@string/app_name"
         android:supportsRtl="true"
         android:usesCleartextTraffic="true"
+        android:extractNativeLibs="false"
         android:theme="@style/VmoreTheme">
 
         <activity
@@ -59,6 +60,11 @@
             android:name=".HowToActivity"
             android:exported="false"
             android:label="@string/howto_title" />
+
+        <activity
+            android:name=".TdLoginActivity"
+            android:exported="false"
+            android:label="Telegram Direct" />
 
         <provider
             android:name=".VmoreFiles"

@@ -10,3 +10,11 @@ downloads/
 .env
 # Built native engine (rebuilt on demand by native_engine.py)
 native/build/
+
+# TDLib direct mode: generated bindings and native builds (android/tdlib/
+# regenerates everything deterministically — see android/tdlib/README.md)
+android/app/src/main/java/org/drinkless/
+android/app/src/main/jniLibs/
+android/tdlib/td/
+android/tdlib/third-party/
+android/tdlib/build-*/

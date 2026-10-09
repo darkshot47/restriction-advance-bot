@@ -9822,6 +9822,16 @@ class VmoreAppBridge:
         cached.setdefault("url", OWNER_CONTACT_URL)
         return cached
 
+    # ── TDLib config: what the app's direct mode needs ─────────────────────
+    def td_config(self) -> dict:
+        """The api_id/api_hash the app needs to run its own Telegram session
+        (TDLib on the phone) — the exact same application credentials the
+        bot's server-side user sessions already use, so a phone login lands on
+        the same Telegram "app".  These are not secrets: every Telegram client
+        ships its pair in the binary."""
+        return {"td_api_id": int(API_ID or 0), "td_api_hash": API_HASH or "",
+                "bot_username": BOT_USERNAME or ""}
+
     async def refresh_owner(self) -> dict:
         """Read the owner's Telegram name/username/photo once and cache them."""
         card = {"id": OWNER_ID, "username": PAYMENT_CONTACT, "name": PAYMENT_CONTACT,
@@ -10119,6 +10129,125 @@ class VmoreAppBridge:
         except Exception:
             pass
         return {"ok": True, "message_id": int(getattr(sent, "id", 0) or 0), "kind": kind}
+
+    # ── zero-transfer upload: the file never crosses the phone again ──────
+    async def upload_reference(self, row, link: str, *, caption=None, thumbnail=None,
+                               file_name=None, kind=None, duration=None, width=None,
+                               height=None, **_) -> dict:
+        """Re-send an already-fetched message without the phone round-trip.
+
+        The app only ships the caption (and possibly a thumbnail).  Telegram's
+        own servers do the work first: ``copy_message`` — and a cached re-send
+        by ``file_id`` — finish **server-side**, so not a single byte of media
+        leaves this machine.  Only when every reference is refused (restricted
+        content) or a new thumbnail must be burned in do we pull the media
+        down here and push it straight back out through the user's session —
+        the phone, whose bill this is all about, still moves nothing.
+
+        ``needs_bytes`` in the failure payload tells the app to fall back to
+        the classic byte upload itself.
+        """
+        import uuid
+        from pathlib import Path
+
+        uid = int(row["user_id"])
+        chat_target, msg_id, is_private = parse_link(link or "")
+        if chat_target is None:
+            return {"ok": False, "needs_bytes": True,
+                    "error": "Send a Telegram message link (t.me/...)."}
+        client = bot
+        if is_private:
+            client = await get_user_client(uid)
+            if client is None:
+                return {"ok": False, "needs_login": True,
+                        "error": ui.app_session_missing_text()}
+        if not BOT_USERNAME:
+            return {"ok": False, "needs_bytes": True,
+                    "error": "The bot has no username configured."}
+        try:
+            msg = await client.get_messages(chat_target, msg_id)
+        except Exception as exc:
+            return {"ok": False, "needs_bytes": True,
+                    "error": f"{type(exc).__name__}: {exc}"}
+        if not msg or getattr(msg, "empty", False):
+            return {"ok": False, "needs_bytes": True, "error": "Message not found."}
+        media = (getattr(msg, "video", None) or getattr(msg, "document", None)
+                 or getattr(msg, "audio", None) or getattr(msg, "photo", None)
+                 or getattr(msg, "voice", None) or getattr(msg, "animation", None))
+        if media is None:
+            return {"ok": False, "needs_bytes": True,
+                    "error": "That message has no media to re-send."}
+        kind = kind or media_type_guess(msg)
+        file_name = (file_name or getattr(media, "file_name", None) or "Vmore.bin")
+        #: An empty caption from the app means "don't touch the words".
+        caption = caption if caption else (getattr(msg, "caption", None) or "")
+
+        sent = None
+        via = None
+        if thumbnail is None:
+            from_chat = getattr(getattr(msg, "chat", None), "id", None) or chat_target
+            #: Zero bytes: Telegram copies the media server-side — neither the
+            #: phone nor this server moves the media at all.
+            try:
+                sent = await client.copy_message(BOT_USERNAME, from_chat, msg.id,
+                                                 caption=caption)
+                via = "copy"
+            except Exception as exc:
+                print(f"[APP] copy re-send failed for {uid}: "
+                      f"{type(exc).__name__}: {exc}", flush=True)
+            if sent is None:
+                file_id = getattr(media, "file_id", None)
+                if file_id:
+                    try:
+                        sent = await client.send_cached_media(BOT_USERNAME, file_id,
+                                                              caption=caption)
+                        via = "reference"
+                    except Exception as exc:
+                        print(f"[APP] cached re-send failed for {uid}: "
+                              f"{type(exc).__name__}: {exc}", flush=True)
+        if sent is None:
+            #: Every reference was refused (restricted media, a new thumbnail
+            #: to attach…): pull the bytes down here once and push them back
+            #: out through the user's session.  The server sees the file
+            #: twice, the phone never again.
+            appapi.SPOOL_DIR.mkdir(parents=True, exist_ok=True)
+            suffix = Path(str(getattr(media, "file_name", "") or "")).suffix[:12] or ".bin"
+            staged = appapi.SPOOL_DIR / f"ref_{uuid.uuid4().hex[:16]}{suffix}"
+            try:
+                fetched = await client.download_media(msg, file_name=str(staged))
+                if not fetched:
+                    raise RuntimeError("download_media returned nothing")
+                payload = await self.upload(
+                    row, str(staged), kind=kind, file_name=file_name,
+                    caption=caption, thumbnail=thumbnail, link=link,
+                    duration=duration, width=width, height=height)
+                if payload.get("ok"):
+                    payload["via"] = "download"
+                return payload
+            except Exception as exc:
+                print(f"[APP] reference download failed for {uid}: "
+                      f"{type(exc).__name__}: {exc}", flush=True)
+                return {"ok": False, "needs_bytes": True,
+                        "error": f"{type(exc).__name__}: {exc}"}
+            finally:
+                staged.unlink(missing_ok=True)
+
+        await add_download(uid, link, kind)
+        await add_app_activity(uid, kind="upload", link=link, status="done",
+                               file_name=file_name, caption=caption,
+                               detail=f"re-sent ({via}, zero transfer)")
+        await increment_app_user_usage(uid, uploads=1)
+        try:
+            await bot.send_message(
+                uid,
+                ui_text("✅ **Upload complete**\n\n"
+                        "Your file was re-sent **without moving a single byte** — "
+                        "Telegram handled it on its own servers, so neither the "
+                        "bot nor your phone spent any data on it."))
+        except Exception:
+            pass
+        return {"ok": True, "message_id": int(getattr(sent, "id", 0) or 0),
+                "kind": kind, "via": via}
 
     # ── history: the bot's downloads and the app's activity, in one list ───
     async def history(self, row, *, limit: int = 50) -> dict:

@@ -10,6 +10,9 @@ import android.os.PowerManager;
 import org.json.JSONObject;
 
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -52,6 +55,11 @@ public class DownloadService extends Service {
     private String jobId;
     private String link;
     private File target;
+    /** Direct mode (TDLib on the phone): the file key and the origin message. */
+    private volatile int tdFileId;
+    private volatile long tdChatId;
+    private volatile long tdMessageId;
+    private final AtomicBoolean tdCancelled = new AtomicBoolean(false);
 
     public static boolean running() {
         return current != null;
@@ -124,22 +132,31 @@ public class DownloadService extends Service {
             keepForeground();
             post("paused");
             postJob("pause");
+            if (tdFileId != 0) {
+                tdCancelled.set(true);
+                TdDirect.get(this).cancelDownload(tdFileId);
+            }
             return START_STICKY;
         }
         if (ACTION_RESUME.equals(action)) {
             paused = false;
             stopped = false;
+            tdCancelled.set(false);
             Live.PAUSED.set(false);
             Live.STATUS = "downloading";
             keepForeground();
             postJob("resume");
-            //: Pausing closed the socket, so resuming opens a fresh one — the
-            //: server answers with the remaining bytes (Range) and the file
-            //: continues from where it stopped.
+            //: Pausing closed the socket (server mode) or cancelled TDLib's feed
+            //: (direct mode).  Either way, resuming asks for the rest — the
+            //: server answers with a Range, TDLib continues from its prefix.
             if (worker == null && jobId != null && target != null) {
-                final String id = jobId;
                 final long total = Live.TOTAL.get();
-                worker = new Thread(() -> stream(id, target.getName(), total), "vmore-download");
+                if (jobId.startsWith("td:")) {
+                    worker = new Thread(() -> streamDirect(total), "vmore-td-download");
+                } else {
+                    final String id = jobId;
+                    worker = new Thread(() -> stream(id, target.getName(), total), "vmore-download");
+                }
                 worker.start();
             }
             return START_STICKY;
@@ -147,6 +164,10 @@ public class DownloadService extends Service {
         if (ACTION_STOP.equals(action)) {
             stopped = true;
             postJob("cancel");
+            if (tdFileId != 0) {
+                tdCancelled.set(true);
+                TdDirect.get(this).cancelDownload(tdFileId);
+            }
             finish("stopped", null, null);
             return START_NOT_STICKY;
         }
@@ -167,8 +188,107 @@ public class DownloadService extends Service {
         if (wakeLock != null) {
             wakeLock.acquire(60 * 60 * 1000L);
         }
-        worker = new Thread(this::resolveAndDownload, "vmore-download");
+        tdCancelled.set(false);
+        if (TdDirect.get(this).isReady()) {
+            //: Direct mode: the phone pulls straight from Telegram; the server
+            //: learns nothing about this download and spends nothing on it.
+            worker = new Thread(this::resolveAndDownloadDirect, "vmore-td-download");
+        } else {
+            worker = new Thread(this::resolveAndDownload, "vmore-download");
+        }
         worker.start();
+    }
+
+    /** Direct mode: resolve with the phone's own session, then stream. */
+    private void resolveAndDownloadDirect() {
+        try {
+            TdDirect direct = TdDirect.get(this);
+            TdDirect.Resolved resolved = direct.resolveBlocking(link);
+            tdFileId = resolved.fileId;
+            tdChatId = resolved.chatId;
+            tdMessageId = resolved.messageId;
+            jobId = "td:" + resolved.chatId + ":" + resolved.messageId;
+            String fileName = resolved.fileName == null || resolved.fileName.isEmpty()
+                    ? "Vmore.bin" : resolved.fileName;
+            target = new File(LocalStore.downloadsDir(this), fileName);
+            Live.PATH = target.getAbsolutePath();
+            Live.STATUS = "downloading";
+            streamDirect(resolved.fileSize);
+        } catch (Exception exc) {
+            if (stopped) {
+                finish("stopped", null, null);
+                return;
+            }
+            if (paused) {
+                post("paused");
+                worker = null;
+                return;
+            }
+            finish("error", exc.getMessage(), null);
+        }
+    }
+
+    private void streamDirect(long total) {
+        Live.TOTAL.set(total);
+        try {
+            String path = TdDirect.get(this).downloadBlocking(tdFileId,
+                    (done, full) -> {
+                        Live.WRITTEN.set(done);
+                        if (full > 0) {
+                            Live.TOTAL.set(full);
+                        }
+                        post("download");
+                    }, tdCancelled);
+            if (stopped) {
+                finish("stopped", null, null);
+                return;
+            }
+            if (paused) {
+                post("paused");
+                worker = null;
+                return;
+            }
+            moveIntoPlace(new File(path), target);
+            finish("done", null, null);
+        } catch (Exception exc) {
+            if (stopped) {
+                finish("stopped", null, null);
+                return;
+            }
+            if (paused) {
+                //: TDLib keeps the partial prefix, so a later resume continues.
+                post("paused");
+                worker = null;
+                return;
+            }
+            finish("error", exc.getMessage(), null);
+        }
+    }
+
+    /** The completed file lives in TDLib's directory; the app's flow wants it
+     *  named like every other download inside the Vmore folder. */
+    private void moveIntoPlace(File source, File destination) throws IOException {
+        if (source.equals(destination)) {
+            return;
+        }
+        if (destination.exists()) {
+            //noinspection ResultOfMethodCallIgnored
+            destination.delete();
+        }
+        if (source.renameTo(destination)) {
+            return;
+        }
+        try (FileInputStream in = new FileInputStream(source);
+             FileOutputStream out = new FileOutputStream(destination)) {
+            byte[] buffer = new byte[64 * 1024];
+            int read;
+            while ((read = in.read(buffer)) > 0) {
+                out.write(buffer, 0, read);
+            }
+            out.flush();
+        }
+        //noinspection ResultOfMethodCallIgnored
+        source.delete();
     }
 
     /** Ask the server what is behind the link, then start streaming it. */
@@ -254,6 +374,9 @@ public class DownloadService extends Service {
             item.name = target.getName();
             item.path = target.getAbsolutePath();
             item.link = link;
+            //: Server downloads carry the job id (the commit endpoint replays the
+            //: spool); direct downloads carry "td:<chat>:<message>" (the editor's
+            //: zero-byte forward target).
             item.kind = jobId;
             item.status = "done";
             item.size = target.length();
@@ -315,7 +438,8 @@ public class DownloadService extends Service {
 
     /** Tell the server about pause / resume / cancel (best effort, never blocking). */
     private void postJob(String suffix) {
-        if (jobId == null) {
+        if (jobId == null || jobId.startsWith("td:")) {
+            //: Direct-mode downloads have no server job to inform about.
             return;
         }
         final String id = jobId;

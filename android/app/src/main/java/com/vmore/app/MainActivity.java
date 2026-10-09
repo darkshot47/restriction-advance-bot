@@ -89,7 +89,11 @@ public class MainActivity extends Activity {
         version.setText("Vmore v" + Api.VERSION);
         showAccount();
         findViewById(R.id.actionEditor).setOnClickListener(v -> openEditor(null));
+        findViewById(R.id.tdButton).setOnClickListener(v ->
+                startActivity(new Intent(this, TdLoginActivity.class)));
         askForNotificationPermission();
+        loadAppInfo();
+        paintTd();
         handler.post(watcher);
     }
 
@@ -98,6 +102,8 @@ public class MainActivity extends Activity {
         super.onResume();
         showAccount();
         paintDownload();
+        loadAppInfo();
+        paintTd();
     }
 
     @Override
@@ -227,9 +233,9 @@ public class MainActivity extends Activity {
         new AlertDialog.Builder(this)
                 .setTitle("Download this link?")
                 .setMessage(message.replace("**", ""))
-                .setPositiveButton("⬇️ Download", (dialog, which) ->
+                .setPositiveButton("Download", (dialog, which) ->
                         DownloadService.start(this, link, name))
-                .setNeutralButton("📩 Send to DM", (dialog, which) -> sendToDm(link))
+                .setNeutralButton("Send to DM", (dialog, which) -> sendToDm(link))
                 .setNegativeButton("Cancel", null)
                 .show();
     }
@@ -252,7 +258,7 @@ public class MainActivity extends Activity {
             progress.setMax(1000);
             progress.setProgress(total > 0 ? (int) Math.min(1000, written * 1000 / total) : 0);
             boolean paused = DownloadService.Live.PAUSED.get();
-            ((Button) findViewById(R.id.pauseButton)).setText(paused ? "▶️ Resume" : "⏸ Pause");
+            ((Button) findViewById(R.id.pauseButton)).setText(paused ? "Resume" : "Pause");
             setStatus((paused ? "⏸ Paused — " : "⬇️ Downloading ")
                     + DownloadService.Live.NAME + " • "
                     + Notifications.human(written)
@@ -425,6 +431,53 @@ public class MainActivity extends Activity {
                 && checkSelfPermission("android.permission.POST_NOTIFICATIONS")
                 != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 601);
+        }
+    }
+
+    // ------------------------------------------------- Telegram Direct //
+
+    /** Cache the TDLib credentials + bot username the server hands out. */
+    private void loadAppInfo() {
+        String base = Prefs.baseUrl(this);
+        if (base.isEmpty()) {
+            return;
+        }
+        Api.get(base + "/api/v2/app", result -> {
+            if (result.ok && result.json != null) {
+                JSONObject json = result.json;
+                Prefs.saveTdConfig(this, json.optInt("td_api_id", 0),
+                        json.optString("td_api_hash", ""),
+                        json.optString("bot_username", ""));
+            }
+            paintTd();
+        });
+    }
+
+    private void paintTd() {
+        TextView tdStatus = findViewById(R.id.tdStatus);
+        Button tdButton = findViewById(R.id.tdButton);
+        if (tdStatus == null || tdButton == null) {
+            return;
+        }
+        TdDirect direct = TdDirect.get(this);
+        if (!direct.nativeAvailable()) {
+            tdStatus.setText("Direct mode needs the full build (this one ships no Telegram engine).");
+            tdButton.setEnabled(false);
+        } else if (direct.isReady()) {
+            tdStatus.setText("✅ Active — downloads and uploads ride this phone's data; "
+                    + "zero server bytes.");
+            tdButton.setText("Manage Telegram Direct");
+            tdButton.setEnabled(true);
+        } else if (Prefs.tdApiId(this) == 0 || Prefs.tdApiHash(this).isEmpty()) {
+            tdStatus.setText("⭐ Optional: sign in with Telegram once, and your downloads/"
+                    + "uploads stop touching the server altogether.");
+            tdButton.setText("Set up Telegram Direct");
+            tdButton.setEnabled(true);
+        } else {
+            tdStatus.setText("Downloads and uploads use your own data, the server spends "
+                    + "nothing. One sign-in away.");
+            tdButton.setText("Sign in to Telegram Direct");
+            tdButton.setEnabled(true);
         }
     }
 

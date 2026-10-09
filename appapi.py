@@ -580,6 +580,10 @@ def app_info():
         owner=bridge().owner_cached(),
         howto=ui.app_howto_text(base_url=base),
         app_users=int(users),
+        #: TDLib direct mode: the phone runs its own Telegram session, so both
+        #: downloads and uploads travel phone ↔ Telegram without touching the
+        #: server.  These three values are all it needs to start it.
+        **bridge().td_config(),
     )
 
 
@@ -716,7 +720,12 @@ def token_history(token):
 
 @blueprint.route("/token/<token>/upload", methods=["POST"])
 def token_upload(token):
-    """The edited file goes back through the user's own session."""
+    """The edited file goes back through the user's own session.
+
+    When the phone changed nothing but the words (caption — and at most the
+    thumbnail), no ``file`` field is attached at all: the server re-sends what
+    it already has and the biggest network leg of the whole app disappears.
+    """
     if not loop_ready():
         return fail("the bot is still starting", 503)
     row, error = authorize(token)
@@ -724,7 +733,7 @@ def token_upload(token):
         return error
     upload = request.files.get("file")
     if upload is None:
-        return fail("attach the file as the 'file' field", 400)
+        return _upload_reference(row)
 
     SPOOL_DIR.mkdir(parents=True, exist_ok=True)
     suffix = Path(upload.filename or "upload.bin").suffix[:12] or ".bin"
@@ -759,6 +768,68 @@ def token_upload(token):
         except OSError:
             pass
     return ok(**payload) if payload.get("ok", True) else fail(payload.get("error"), 400, **payload)
+
+
+def _upload_reference(row):
+    """Zero-transfer commit: the phone shipped words, not bytes.
+
+    Two server-side sources, cheapest first: the finished download job whose
+    spooled file is still warm, then the original message itself, which the
+    bridge re-sends through the user's session — either natively (Telegram
+    does it, zero bytes) or by pulling it down here and sending it straight
+    back.  Every failure is flagged ``needs_bytes`` so the app knows to fall
+    back to the classic upload on its own.
+    """
+    SPOOL_DIR.mkdir(parents=True, exist_ok=True)
+    thumb_path = None
+    try:
+        thumb = request.files.get("thumbnail")
+        if thumb is not None and thumb.filename:
+            thumb_path = SPOOL_DIR / f"th_{uuid.uuid4().hex[:12]}.jpg"
+            thumb.save(thumb_path)
+        job_id = (request.form.get("job_id") or "").strip()
+        if job_id:
+            job = JOBS.get(job_id, row["user_id"])
+            if job is not None and job.status == "ready" and job.path.exists():
+                #: The very bytes the phone downloaded still sit on the spool:
+                #: pushing *them* out skips the phone→server leg entirely and
+                #: no second Telegram download is needed either.
+                payload = bridge_call(
+                    "upload", row, str(job.path), timeout=3600,
+                    kind=(request.form.get("kind") or job.kind or "video"),
+                    file_name=(request.form.get("file_name") or job.file_name
+                               or "Vmore.bin"),
+                    caption=request.form.get("caption"),
+                    thumbnail=str(thumb_path) if thumb_path else None,
+                    link=job.link,
+                    duration=request.form.get("duration"),
+                    width=request.form.get("width"),
+                    height=request.form.get("height"))
+                payload.setdefault("via", "spool")
+                if payload.get("ok", True):
+                    return ok(**payload)
+                payload.setdefault("needs_bytes", True)
+                return fail(payload.get("error"), 400, **payload)
+        link = (request.form.get("link") or "").strip()
+        if link:
+            payload = bridge_call(
+                "upload_reference", row, link, timeout=3600,
+                caption=request.form.get("caption"),
+                thumbnail=str(thumb_path) if thumb_path else None,
+                kind=request.form.get("kind"),
+                file_name=request.form.get("file_name"),
+                duration=request.form.get("duration"),
+                width=request.form.get("width"),
+                height=request.form.get("height"))
+            return ok(**payload) if payload.get("ok", True) \
+                else fail(payload.get("error"), 400, **payload)
+        return fail("attach the file as the 'file' field", 400)
+    finally:
+        if thumb_path is not None:
+            try:
+                thumb_path.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 # --------------------------------------------------------------------------- #

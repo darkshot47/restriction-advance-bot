@@ -4172,13 +4172,10 @@ APP_API_PATH = "/api/v2"
 #: Mirrors ``database.APP_TOKEN_LIFETIME_DAYS`` — kept here (not imported) so this
 #: module stays free of database imports; the test suite pins the two together.
 APP_TOKEN_LIFETIME_DAYS = 30
-#: The **stable** APK link: the ``android`` workflow rewrites this GitHub Release
-#: on every build, so one URL works forever (the owner's build or a fork — set
-#: APP_RELEASE_URL to point elsewhere, or to "" to fall back to /apk delivery).
-APP_RELEASE_URL = os.environ.get(
-    "APP_RELEASE_URL",
-    "https://github.com/darkshot47/restriction-advance-bot/releases/latest/download/Vmore.apk",
-).strip()
+#: The APK is never handed out as a public link: the **Unlimited Download (App)**
+#: button fires ``app:apk`` and the bot sends the file the owner uploaded with
+#: ``/apk`` straight into the chat. No release URL — nothing about the owner's
+#: hosting or accounts — ever leaks to a user.
 
 
 def green_reply_button(text: str, **kwargs):
@@ -4217,22 +4214,13 @@ def app_footer_button() -> InlineKeyboardButton:
 
 def app_download_button(stored_base_url: str | None = None, *, has_apk: bool = True,
                         label: str = "♾️ Unlimited Download (App)"):
-    """Download-the-app button: a URL when the deployment is known, else a callback.
+    """Download-the-app button: the bot always sends the APK **in this chat**.
 
-    ``url=`` buttons open the browser straight at ``<base>/api/v2/app/apk``; when
-    no base URL has been stored yet (the owner has not run ``/apk`` with one) the
-    button instead asks the bot to send the APK file in the chat, so the option
-    is never a dead end.
+    One tap fires ``app:apk`` (``cb_app_apk``) and the file the owner connected
+    with ``/apk`` lands right here. No URL button is ever offered, so nothing
+    about the owner (a repository, a hosting account, anything) leaks to the
+    people asking for the app.
     """
-    if APP_RELEASE_URL:
-        #: The workflow keeps this release fresh, so the button never rots.
-        return button(label, url=APP_RELEASE_URL, style="success")
-    url = app_apk_url(stored_base_url)
-    if url:
-        #: No release link configured: open the deployment's own /api/v2/app/apk
-        #: (it answers with a clear JSON error when no APK was uploaded yet).
-        return button(label, url=url, style="success")
-    #: Nothing to link to: the bot sends the APK file itself in the chat.
     return button(label, callback_data="app:apk", style="success")
 
 
@@ -4259,10 +4247,6 @@ def app_details_text(*, base_url=None, apk=None, premium: bool = False,
         f"**Version:** `{version}`",
         f"**Build:** `{name}` • `{size_line}`",
     ]
-    if APP_RELEASE_URL:
-        #: The link the download button opens, written out so it can be copied
-        #: and shared even by people who never tap a button.
-        lines.append(f"**Download:** {APP_RELEASE_URL}")
     lines += [
         f"**Server:** `{base or 'not set yet — the owner runs /apk with the URL'}`",
         f"**Owner:** @{owner}",

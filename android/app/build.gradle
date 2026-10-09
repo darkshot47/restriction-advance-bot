@@ -13,6 +13,12 @@ android {
         versionCode 1
         versionName "1.0.0"
         resValue "string", "app_name", "Vmore"
+        ndk {
+            //: TDLib direct mode ships one libtdjni.so per ABI (built by
+            //: android/tdlib/build.sh in CI).  The two real-world phone ABIs
+            //: keep the APK lean; emulators simply use the server path.
+            abiFilters 'arm64-v8a', 'armeabi-v7a'
+        }
     }
 
     buildTypes {

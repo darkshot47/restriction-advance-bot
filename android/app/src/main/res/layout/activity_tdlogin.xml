@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/vmore_bg"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <TextView
+            style="@style/VmoreTitle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Telegram Direct" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Downloads and uploads travel straight between this phone and Telegram — the server moves zero bytes, only your own data does."
+            android:textColor="@color/vmore_text_dim"
+            android:textSize="13sp" />
+
+        <LinearLayout
+            style="@style/VmoreCard"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/tdStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Starting the Telegram engine…"
+                android:textColor="@color/vmore_text"
+                android:textSize="13sp" />
+
+            <EditText
+                android:id="@+id/tdInput"
+                style="@style/VmoreField"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:hint="+91 90000 00000"
+                android:importantForAutofill="no"
+                android:inputType="phone"
+                android:visibility="gone" />
+
+            <Button
+                android:id="@+id/tdSubmit"
+                style="@style/VmoreButtonAccent"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Continue"
+                android:visibility="gone" />
+
+            <Button
+                android:id="@+id/tdLogout"
+                style="@style/VmoreButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Sign out of Telegram Direct"
+                android:visibility="gone" />
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:text="This logs Telegram in on this phone (like the official app). The bot token login stays exactly as it is — direct mode is an upgrade, never a requirement."
+            android:textColor="@color/vmore_text_dim"
+            android:textSize="12sp" />
+    </LinearLayout>
+</ScrollView>
