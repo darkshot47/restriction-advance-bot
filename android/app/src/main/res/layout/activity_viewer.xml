@@ -51,21 +51,21 @@
             android:layout_height="wrap_content"
             android:drawableStart="@drawable/ic_save"
             android:drawablePadding="10dp"
-            android:text="📥 Save to device" />
+            android:text="Save to device" />
 
         <Button
             android:id="@+id/openExternalButton"
             style="@style/VmoreButton"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="📤 Open in another app" />
+            android:text="Open in another app" />
 
         <Button
             android:id="@+id/shareButton"
             style="@style/VmoreButton"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="🔗 Share" />
+            android:text="Share" />
 
         <Button
             android:id="@+id/editButton"
@@ -74,6 +74,6 @@
             android:layout_height="wrap_content"
             android:drawableStart="@drawable/ic_edit"
             android:drawablePadding="10dp"
-            android:text="✂️ Edit &amp; upload" />
+            android:text="Edit &amp; upload" />
     </LinearLayout>
 </ScrollView>

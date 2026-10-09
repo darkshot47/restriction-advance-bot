@@ -15,6 +15,7 @@ import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import org.drinkless.tdlib.TdApi;
 import org.json.JSONObject;
 
 import java.io.File;
@@ -42,6 +43,13 @@ public class EditorActivity extends Activity {
     private File thumbnail;
     private long durationMs = 0;
     private boolean trimming = false;
+    /** Where the file came from — lets an untouched file be re-sent server-side. */
+    private String link;
+    /** The download job id (the server may still hold the very same bytes). */
+    private String jobId;
+    /** Direct-mode origin of the file (chat/message), for the zero-byte forward. */
+    private long tdChatId;
+    private long tdMessageId;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -53,6 +61,31 @@ public class EditorActivity extends Activity {
             toast("Nothing to edit");
             finish();
             return;
+        }
+        link = getIntent().getStringExtra("link");
+        jobId = getIntent().getStringExtra("jobId");
+        if (link == null || link.isEmpty()) {
+            //: Every download lands in the history with its link and its job id —
+            //: find this file's entry so an unedited upload costs no new bytes.
+            for (LocalStore.Item item : LocalStore.all(this)) {
+                if (item.path != null && item.path.equals(path)) {
+                    link = item.link;
+                    jobId = item.kind;
+                    break;
+                }
+            }
+        }
+        if (jobId != null && jobId.startsWith("td:")) {
+            //: Direct downloads remember the source message — the key to a
+            //: zero-byte re-send (ForwardMessages) from the phone itself.
+            String[] parts = jobId.split(":");
+            if (parts.length == 3) {
+                try {
+                    tdChatId = Long.parseLong(parts[1]);
+                    tdMessageId = Long.parseLong(parts[2]);
+                } catch (NumberFormatException ignored) {
+                }
+            }
         }
         captionField = findViewById(R.id.captionField);
         fileLabel = findViewById(R.id.fileLabel);
@@ -210,8 +243,8 @@ public class EditorActivity extends Activity {
     }
 
     private void paintTrimSwitch() {
-        trimSwitch.setText(trimming ? "✂️ Trim: ON — tap to upload the full video"
-                : "✂️ Trim: OFF — tap to cut it here");
+        trimSwitch.setText(trimming ? "Trim: ON — tap to upload the full video"
+                : "Trim: OFF — tap to cut it here");
         startBar.setEnabled(trimming);
         endBar.setEnabled(trimming);
     }
@@ -264,15 +297,156 @@ public class EditorActivity extends Activity {
                 toUpload = file;
                 note = null;
             }
-            doUpload(toUpload, note);
+            doUpload(toUpload, note, toUpload != file);
         }).start();
     }
 
-    private void doUpload(File toUpload, String note) {
+    private void doUpload(File toUpload, String note, boolean bytesChanged) {
         String caption = captionField.getText().toString();
         String kind = uploadKind(toUpload);
         long[] meta = MediaUtils.isVideo(toUpload) || MediaUtils.isAudio(toUpload)
                 ? MediaUtils.videoMeta(toUpload) : new long[]{0, 0, 0};
+        if (TdDirect.get(this).isReady()) {
+            //: Direct mode wins whenever it can run: the bytes ride phone ↔
+            //: Telegram straight, so the host's bill is literally zero.
+            directUpload(toUpload, caption, kind, meta, bytesChanged);
+            return;
+        }
+        if (!bytesChanged && link != null && !link.isEmpty() && commitUpload(caption, kind)) {
+            return;
+        }
+        byteUpload(toUpload, note, caption, kind, meta);
+    }
+
+    /** Direct-mode upload: zero-byte forward when untouched, otherwise the
+     *  phone ships the (new) bytes itself.  The server never sees a byte. */
+    private void directUpload(final File toUpload, final String caption, final String kind,
+                              final long[] meta, boolean bytesChanged) {
+        runOnUiThread(() -> {
+            progress.setIndeterminate(true);
+            fileLabel.setText("⏳ Sending straight from this phone…");
+        });
+        TdDirect direct = TdDirect.get(this);
+        if (!bytesChanged && tdMessageId != 0 && (caption == null || caption.trim().isEmpty())) {
+            direct.forwardToBot(tdChatId, tdMessageId, new TdDirect.ResultCallback() {
+                @Override
+                public void onOk(TdApi.Object object) {
+                    directUploadDone(true);
+                }
+
+                @Override
+                public void onError(String message) {
+                    runOnUiThread(() -> toast("Zero-byte re-send refused — uploading directly…"));
+                    directSendBytes(toUpload, caption, kind, meta);
+                }
+            });
+            return;
+        }
+        directSendBytes(toUpload, caption, kind, meta);
+    }
+
+    private void directSendBytes(File toUpload, String caption, String kind, long[] meta) {
+        final long length = toUpload.length();
+        TdDirect.get(this).sendMediaToBot(toUpload.getAbsolutePath(), kind, caption,
+                (int) (meta[0] / 1000), (int) meta[1], (int) meta[2],
+                (done, total) -> runOnUiThread(() -> {
+                    long shown = total > 0 ? total : length;
+                    progress.setIndeterminate(false);
+                    progress.setMax(1000);
+                    progress.setProgress(shown > 0
+                            ? (int) Math.min(1000, done * 1000 / shown) : 0);
+                    fileLabel.setText("⬆️ Uploading " + Notifications.human(done)
+                            + (shown > 0 ? " / " + Notifications.human(shown) : ""));
+                }),
+                new TdDirect.ResultCallback() {
+                    @Override
+                    public void onOk(TdApi.Object object) {
+                        directUploadDone(false);
+                    }
+
+                    @Override
+                    public void onError(String message) {
+                        runOnUiThread(() -> {
+                            progress.setVisibility(View.GONE);
+                            uploadButton.setEnabled(true);
+                            toast("Upload failed: " + message);
+                        });
+                    }
+                });
+    }
+
+    private void directUploadDone(boolean zeroBytes) {
+        Prefs.setLastCaption(this, captionField.getText().toString());
+        runOnUiThread(() -> {
+            progress.setVisibility(View.GONE);
+            uploadButton.setEnabled(true);
+            fileLabel.setText(zeroBytes
+                    ? "✅ Sent — zero new bytes spent"
+                    : "✅ Uploaded from this phone");
+            new AlertDialog.Builder(this)
+                    .setTitle("Uploaded")
+                    .setMessage(zeroBytes
+                            ? "Telegram moved your file on its own servers — neither your "
+                              + "phone nor the host moved the bytes again."
+                            : "Your phone sent the file straight to Telegram — the server "
+                              + "spent nothing at all on it.")
+                    .setPositiveButton("OK", null)
+                    .show();
+        });
+    }
+
+    /**
+     * The zero-transfer commit: the phone ships only the caption (and maybe a
+     * thumbnail); the server re-sends the file it already has — by Telegram's
+     * own copy mechanics when possible, so neither phone nor host moves the
+     * media bytes again.
+     *
+     * @return true when the re-send was handled (success or a login demand);
+     *         false when the server needs the real bytes after all.
+     */
+    private boolean commitUpload(String caption, String kind) {
+        runOnUiThread(() -> fileLabel.setText("⏳ Asking Telegram to re-send it…"));
+        JSONObject body = null;
+        try {
+            body = Api.uploadMeta(Prefs.baseUrl(this), Prefs.token(this), link, jobId,
+                    caption, thumbnail, kind, file.getName());
+        } catch (Exception ignored) {
+        }
+        if (body != null && body.optBoolean("ok", false)) {
+            Prefs.setLastCaption(this, caption);
+            final String via = body.optString("via", "");
+            runOnUiThread(() -> {
+                progress.setVisibility(View.GONE);
+                uploadButton.setEnabled(true);
+                fileLabel.setText("✅ Uploaded — no new bytes spent");
+                new AlertDialog.Builder(this)
+                        .setTitle("Uploaded")
+                        .setMessage("copy".equals(via) || "reference".equals(via)
+                                ? "Telegram re-sent the file on its own servers — "
+                                  + "neither your phone nor the host moved the bytes again."
+                                : "The server re-sent its own copy through your Telegram "
+                                  + "account — your phone uploaded nothing.")
+                        .setPositiveButton("OK", null)
+                        .show();
+            });
+            return true;
+        }
+        if (body != null && body.optBoolean("needs_login", false)) {
+            //: The byte upload would hit the same missing session — say it now.
+            final String error = body.optString("error", "log in again");
+            runOnUiThread(() -> {
+                progress.setVisibility(View.GONE);
+                uploadButton.setEnabled(true);
+                toast(error);
+            });
+            return true;
+        }
+        runOnUiThread(() -> toast("The server couldn't re-send it — sending the file itself…"));
+        return false;
+    }
+
+    private void byteUpload(File toUpload, String note, String caption, String kind,
+                            long[] meta) {
         try {
             JSONObject body = Api.upload(Prefs.baseUrl(this), Prefs.token(this), toUpload,
                     caption, thumbnail, kind, toUpload.getName(), meta[0], (int) meta[1],

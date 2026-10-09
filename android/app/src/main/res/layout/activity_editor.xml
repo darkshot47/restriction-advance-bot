@@ -157,7 +157,7 @@
             android:layout_height="wrap_content"
             android:drawableStart="@drawable/ic_upload"
             android:drawablePadding="10dp"
-            android:text="⬆️ Upload with my own account" />
+            android:text="Upload with my own account" />
 
         <Button
             android:id="@+id/viewButton"
@@ -166,7 +166,7 @@
             android:layout_height="wrap_content"
             android:drawableStart="@drawable/ic_play"
             android:drawablePadding="10dp"
-            android:text="▶️ Watch / open it" />
+            android:text="Watch / open it" />
 
         <TextView
             android:layout_width="match_parent"

@@ -80,6 +80,34 @@
             android:textColor="@color/vmore_text_dim"
             android:textSize="11sp" />
 
+        <!-- Telegram Direct: downloads & uploads ride the phone's own data -->
+        <LinearLayout
+            style="@style/VmoreCard"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
+
+            <TextView style="@style/VmoreLabel"
+                android:layout_width="wrap_content" android:layout_height="wrap_content"
+                android:text="Telegram Direct — zero server bandwidth" />
+
+            <TextView
+                android:id="@+id/tdStatus"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Downloads and uploads use your own data, the server spends nothing."
+                android:textColor="@color/vmore_text"
+                android:textSize="13sp" />
+
+            <Button
+                android:id="@+id/tdButton"
+                style="@style/VmoreButtonAccent"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="Set up Telegram Direct" />
+        </LinearLayout>
+
         <!-- The link box -->
         <LinearLayout
             style="@style/VmoreCard"
@@ -113,7 +141,7 @@
                     android:layout_width="0dp"
                     android:layout_weight="1"
                     android:layout_height="wrap_content"
-                    android:text="📋 Paste" />
+                    android:text="Paste" />
 
                 <Button
                     android:id="@+id/openButton"
@@ -210,7 +238,7 @@
                 android:layout_height="wrap_content"
                 android:drawableStart="@drawable/ic_edit"
                 android:drawablePadding="8dp"
-                android:text="✂️ Edit (caption / thumbnail / trim)" />
+                android:text="Edit (caption / thumbnail / trim)" />
 
             <Button
                 android:id="@+id/openViewerButton"
@@ -219,7 +247,7 @@
                 android:layout_height="wrap_content"
                 android:drawableStart="@drawable/ic_play"
                 android:drawablePadding="8dp"
-                android:text="▶️ Watch / open it" />
+                android:text="Watch / open it" />
 
             <Button
                 android:id="@+id/saveDeviceButton"
@@ -228,7 +256,7 @@
                 android:layout_height="wrap_content"
                 android:drawableStart="@drawable/ic_save"
                 android:drawablePadding="8dp"
-                android:text="📥 Save to device" />
+                android:text="Save to device" />
         </LinearLayout>
 
         <LinearLayout
@@ -243,7 +271,7 @@
                 android:layout_width="0dp"
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
-                android:text="✂️ Editor" />
+                android:text="Editor" />
 
             <Button
                 android:id="@+id/actionHistory"
@@ -252,7 +280,7 @@
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="8dp"
-                android:text="🕓 Downloads" />
+                android:text="Downloads" />
         </LinearLayout>
 
         <LinearLayout
@@ -266,7 +294,7 @@
                 android:layout_width="0dp"
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
-                android:text="❓ How to use?" />
+                android:text="How to use?" />
 
             <Button
                 android:id="@+id/actionSettings"
@@ -275,7 +303,7 @@
                 android:layout_weight="1"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="8dp"
-                android:text="⚙️ Settings" />
+                android:text="Settings" />
         </LinearLayout>
 
         <Button

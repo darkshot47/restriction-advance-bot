@@ -154,13 +154,14 @@ final class Blogger {
     /** Load the owner's name + picture into the header (cached per launch). */
     static void loadOwner(Activity activity, ImageView photo, TextView nameView) {
         if (nameView != null) {
-            nameView.setText("@" + Prefs.ownerUsername(activity));
-        }
-        if (photo == null) {
-            return;
+            //: The corner chip shows the owner's display name, never the raw
+            //: username — the profile picture sits right next to it.
+            String cachedName = Prefs.ownerName(activity);
+            nameView.setText(cachedName == null || cachedName.isEmpty()
+                    ? "Owner" : cachedName);
         }
         String base = Prefs.baseUrl(activity);
-        if (base.isEmpty()) {
+        if (photo == null || base.isEmpty()) {
             return;
         }
         Api.get(Api.normalizeBase(base) + Api.API + "/owner", result -> {
@@ -168,9 +169,12 @@ final class Blogger {
                 JSONObject owner = result.optJson("owner");
                 if (owner != null) {
                     String username = owner.optString("username", Prefs.ownerUsername(activity));
-                    String display = owner.optString("name", username);
+                    String display = owner.optString("name", "").trim();
+                    if (display.isEmpty()) {
+                        display = username;
+                    }
                     Prefs.setOwner(activity, username, display);
-                    nameView.setText("@" + username);
+                    nameView.setText(display);
                 }
             }
         });

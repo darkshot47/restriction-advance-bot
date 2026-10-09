@@ -443,7 +443,20 @@ link.
 4. **Edit before uploading** — caption, thumbnail and a **front/back trim** that runs on the phone
    (`MediaExtractor` + `MediaMuxer`, no re-encode), then **Save to device**, watch the video, or
    **upload**. The upload goes back through the user's own session, so the bot spends no bandwidth on it.
-5. **While it downloads** — Pause and Stop buttons on screen *and* in the notification bar; the
+   When the file itself was not touched, the phone ships **no bytes at all**: the app sends only the
+   caption (and at most a thumbnail) and the server re-sends what it already has — the still-warm
+   spooled download, or a native Telegram copy / cached re-send (zero transfer), or a single
+   server-side re-download pushed out through the user's session. Only a *trimmed* file — whose bytes
+   genuinely changed on the phone — rides the classic phone → server → Telegram upload, and even then
+   the API answers `needs_bytes` first whenever a reference could have worked.
+5. **Telegram Direct (optional, zero server bandwidth)** — the *Telegram Direct* card on home logs a
+   real Telegram session **into the phone** (TDLib, phone number + code + optional 2FA).  From then on,
+   private downloads stream *Telegram → phone* and every upload rides *phone → Telegram*: the host
+   moves **zero media bytes either way**.  An untouched file sent back is a TDLib `ForwardMessages`
+   copy — zero data even on the phone — and restricted channels that refuse a forward fall back to a
+   straight phone upload automatically.  The app learns the Telegram app credentials and the bot's
+   username from `GET /api/v2/app`; without direct sign-in every legacy path keeps working untouched.
+6. **While it downloads** — Pause and Stop buttons on screen *and* in the notification bar; the
    download keeps running with the app closed (foreground service, `dataSync`), progress lives in the
    notification, and a second notification announces the finished file.
 
@@ -458,10 +471,10 @@ link.
 | `POST /api/v2/token/<TOKEN>/job` | start a private download (`downloads/app/` spool) |
 | `GET /api/v2/token/<TOKEN>/job/<ID>` · `/file` | progress · Range-aware byte stream (`206`) |
 | `POST …/job/<ID>/pause` · `/resume` · `/cancel` | the app's pause / stop |
-| `POST /api/v2/token/<TOKEN>/upload` | the edited file, sent through the user's own session |
+| `POST /api/v2/token/<TOKEN>/upload` | the edited file, sent through the user's own session — or, with `job_id`/`link` and **no file field**, a zero-transfer re-send of media the server already has |
 | `GET /api/v2/token/<TOKEN>/history` | bot downloads **and** app activity in one list |
 | `POST /api/v2/token/<TOKEN>/revoke` | switch the token off |
-| `GET /api/v2/app` · `/app/apk` · `/howto` · `/owner` · `/owner/photo` | app info, APK, help text, the owner card |
+| `GET /api/v2/app` · `/app/apk` · `/howto` · `/owner` · `/owner/photo` | app info (incl. the TDLib `td_api_id`/`td_api_hash`/`bot_username` for direct mode), APK, help text, the owner card |
 
 `/health` on the same service reports `{ok, app, api}`.
 
@@ -480,7 +493,11 @@ link.
 `.github/workflows/android.yml` builds `android/` (Java, no third-party dependencies) on every push that
 touches it, verifies the APK with `aapt2 dump badging`, packs it **into a zip** (the owner's
 requirement), uploads the zip as an artifact and (re)creates the **`vmore-latest` GitHub Release** with
-`Vmore.apk`, `Vmore-apk.zip` and `SHA256SUMS.txt`.
+`Vmore.apk`, `Vmore-apk.zip` and `SHA256SUMS.txt`.  Direct mode's TDLib engine (`TdApi.java` +
+`libtdjni.so` for `arm64-v8a` and `armeabi-v7a`) is generated deterministically from the single
+pinned commit in [`android/tdlib/TDLIB_COMMIT`](android/tdlib/TDLIB_COMMIT) — see
+[`android/tdlib/README.md`](android/tdlib/README.md) — cached across runs, and the workflow asserts
+both native libraries really landed inside the APK.
 
 Stable links — `APP_RELEASE_URL` in `ui.py` (override with the `APP_RELEASE_URL` env var):
 

@@ -304,6 +304,59 @@ public final class Api {
         }
     }
 
+    /**
+     * Commit an upload **without re-sending the bytes**: only the caption (and
+     * maybe a thumbnail) travel to the server, which re-sends what it already
+     * has — the still-warm download job, or the original message by reference
+     * through the user's own session.  When none of that is possible the reply
+     * says {@code needs_bytes} and the caller falls back to {@link #upload}.
+     */
+    public static JSONObject uploadMeta(String base, String token, String link, String jobId,
+                                        String caption, File thumbnail, String kind,
+                                        String fileName) throws IOException {
+        String boundary = "----Vmore" + System.currentTimeMillis();
+        String url = tokenUrl(base, token) + "/upload";
+        HttpURLConnection connection = (HttpURLConnection) new URL(url).openConnection();
+        connection.setRequestMethod("POST");
+        connection.setConnectTimeout(TIMEOUT_MS);
+        connection.setReadTimeout(30 * 60 * 1000);
+        connection.setDoOutput(true);
+        connection.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+        connection.setChunkedStreamingMode(64 * 1024);
+
+        try (OutputStream out = connection.getOutputStream()) {
+            if (kind != null && !kind.isEmpty()) {
+                writeField(out, boundary, "kind", kind);
+            }
+            if (fileName != null && !fileName.isEmpty()) {
+                writeField(out, boundary, "file_name", fileName);
+            }
+            writeField(out, boundary, "caption", caption == null ? "" : caption);
+            if (link != null && !link.isEmpty()) {
+                writeField(out, boundary, "link", link);
+            }
+            if (jobId != null && !jobId.isEmpty()) {
+                writeField(out, boundary, "job_id", jobId);
+            }
+            if (thumbnail != null && thumbnail.exists()) {
+                writeFile(out, boundary, "thumbnail", thumbnail, "thumb.jpg", "image/jpeg",
+                        thumbnail.length(), null);
+            }
+            out.write(("--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8));
+            out.flush();
+        }
+
+        int code = connection.getResponseCode();
+        InputStream stream = code >= 400 ? connection.getErrorStream() : connection.getInputStream();
+        String text = readAll(stream);
+        connection.disconnect();
+        try {
+            return new JSONObject(text);
+        } catch (Exception exc) {
+            throw new IOException(text.isEmpty() ? "HTTP " + code : text);
+        }
+    }
+
     private static void writeField(OutputStream out, String boundary, String name, String value)
             throws IOException {
         String head = "--" + boundary + "\r\n"

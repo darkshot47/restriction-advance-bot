@@ -64,9 +64,33 @@ jobs:
           fi
           yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
           "$SDKMANAGER" "platforms;android-34" "build-tools;34.0.0" "platform-tools" 2>&1 | tail -20
+          #: TDLib's Android build wants exactly these two (see android/tdlib/build.sh).
+          "$SDKMANAGER" "ndk;23.2.8568313" "cmake;3.22.1" 2>&1 | tail -6
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
           echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
           ls "$SDK/platforms"
+
+      - name: TDLib host prerequisites (the code generator's toolchain)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gperf ninja-build 2>&1 | tail -3
+          gperf --version | head -1
+
+      - name: Cache the heavy TDLib / OpenSSL build (only the pinned commit rebuilds)
+        uses: actions/cache@v4
+        with:
+          path: |
+            android/tdlib/td
+            android/tdlib/third-party
+          #: Any change to the pinned commit or to the build recipe fully regenerates.
+          key: tdlib-${{ hashFiles('android/tdlib/TDLIB_COMMIT', 'android/tdlib/build.sh') }}
+
+      - name: Build TDLib (Java bindings + libtdjni.so for both phone ABIs)
+        run: |
+          bash android/tdlib/build.sh "$ANDROID_SDK_ROOT" 2>&1 | tee tdlib-build.log
+          #: The result the app actually ships — assert it loudly.
+          ls -lh android/app/src/main/jniLibs/*/libtdjni.so
+          ls -lh android/app/src/main/java/org/drinkless/tdlib/
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -143,6 +167,10 @@ jobs:
           grep -q "launchable-activity: name='com.vmore.app.LoginActivity'" badging.txt
           grep -q "sdkVersion:'26'" badging.txt
           grep -q "application-label:'Vmore'" badging.txt
+          #: Direct mode must really be inside: one libtdjni.so per phone ABI.
+          unzip -l Vmore.apk | grep -q "lib/arm64-v8a/libtdjni.so"
+          unzip -l Vmore.apk | grep -q "lib/armeabi-v7a/libtdjni.so"
+          echo "::notice::TDLib libs inside APK: $(unzip -l Vmore.apk | grep libtdjni | awk '{print $1, $4}')"
           while IFS= read -r line; do
             echo "::notice::$(printf '%s' "$line" | cut -c1-900)"
           done < <(grep -E "^(package|application-label:|launchable-activity:|sdkVersion|targetSdkVersion)" badging.txt)
