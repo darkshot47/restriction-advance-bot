@@ -99,6 +99,26 @@ jobs:
           ls -lh android/app/src/main/jniLibs/*/libtdjni.so
           ls -lh android/app/src/main/java/org/drinkless/tdlib/
 
+      - name: Surface the TDLib build error (job annotations)
+        if: failure()
+        run: |
+          #: Same idea as the APK step: the raw log is not always readable, so
+          #: the compiler/linker/download lines are re-emitted as annotations.
+          (grep -aE "error|Error|ERROR|failed|FAILED|undefined reference|No such file|fatal|Caused by|not found|Permission denied|exit code|Killed" \
+              tdlib-build.log 2>/dev/null || true) | tr -d "\r" | tail -60 | while IFS= read -r line; do
+            echo "::error::$(printf '%s' "$line" | cut -c1-900)"
+          done
+          echo "--- last 60 lines of the TDLib build log ---"
+          tail -n 60 tdlib-build.log 2>/dev/null || echo "no tdlib-build.log"
+
+      - name: Upload the TDLib build log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tdlib-build-log
+          path: tdlib-build.log
+          if-no-files-found: warn
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:

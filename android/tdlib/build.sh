@@ -23,6 +23,10 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+#: Name the exact failing command. A "::error::" line becomes a job annotation,
+#: so the reason is visible through the API even when the raw step log is not.
+trap 'rc=$?; echo "::error::android/tdlib/build.sh failed (exit $rc) at line $LINENO: $BASH_COMMAND"' ERR
+
 TDLIB_COMMIT="$(tr -d '[:space:]' < TDLIB_COMMIT)"
 ANDROID_SDK_ROOT="${1:-${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}}"
 TDLIB_NDK_VERSION="${TDLIB_NDK_VERSION:-23.2.8568313}"
