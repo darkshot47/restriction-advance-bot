@@ -34,6 +34,13 @@ TDLIB_ABIS="${TDLIB_ABIS:-arm64-v8a armeabi-v7a}"
 OPENSSL_VERSION="${OPENSSL_VERSION:-OpenSSL_1_1_1w}"
 TDLIB_JOBS="${TDLIB_JOBS:-$(nproc 2>/dev/null || echo 4)}"
 
+#: Android API floors per ABI. OpenSSL is built against these, and its ARM
+#: capability probe calls getauxval (only declared from API 18 on), so libtdjni
+#: must link against the same floor. Linking it at a lower platform (it was
+#: android-16) fails with "undefined symbol: getauxval" on armeabi-v7a.
+ANDROID_API32=19     # armeabi-v7a floor (NDK 23+)
+ANDROID_API64=21     # 64-bit minimum
+
 if [ -z "$ANDROID_SDK_ROOT" ] || [ ! -d "$ANDROID_SDK_ROOT" ]; then
     echo "::error::pass the Android SDK root as the first argument (or set ANDROID_SDK_ROOT/ANDROID_HOME)"
     exit 1
@@ -109,8 +116,6 @@ if [ ! -f third-party/openssl/arm64-v8a/lib/libcrypto.a ]; then
     rm "$OPENSSL_VERSION.tar.gz"
     cd "openssl-$OPENSSL_VERSION"
 
-    ANDROID_API32=19     # armeabi-v7a floor (NDK 23+)
-    ANDROID_API64=21     # 64-bit minimum
     for ABI in $TDLIB_ABIS; do
         case "$ABI" in
             armeabi-v7a) CONFIG_ABI="android-arm";  API=$ANDROID_API32 ;;
@@ -141,12 +146,16 @@ fi
 # ── 4. libtdjni.so per ABI ───────────────────────────────────────────────────
 for ABI in $TDLIB_ABIS; do
     BUILD_DIR="td/example/android/build-$ABI-Java"
+    case "$ABI" in
+        arm64-v8a|x86_64) PLATFORM_API=$ANDROID_API64 ;;
+        *)                PLATFORM_API=$ANDROID_API32 ;;
+    esac
     if [ ! -f td/tdlib/libs/$ABI/libtdjni.so ]; then
-        echo ":: Building libtdjni.so for $ABI"
+        echo ":: Building libtdjni.so for $ABI (android-$PLATFORM_API, same floor as its OpenSSL)"
         cmake -S td/example/android -B "$BUILD_DIR" \
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake" \
             -DOPENSSL_ROOT_DIR="$(pwd -P)/third-party/openssl/$ABI" \
-            -DANDROID_ABI="$ABI" -DANDROID_STL="c++_static" -DANDROID_PLATFORM=android-16 \
+            -DANDROID_ABI="$ABI" -DANDROID_STL="c++_static" -DANDROID_PLATFORM="android-$PLATFORM_API" \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo -GNinja
         cmake --build "$BUILD_DIR" --target tdjni -j "$TDLIB_JOBS"
         mkdir -p td/tdlib/libs/"$ABI"
