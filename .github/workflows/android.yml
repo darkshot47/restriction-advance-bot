@@ -47,6 +47,7 @@ jobs:
 
       - name: Android SDK packages
         run: |
+          set -o pipefail
           SDK="${ANDROID_HOME:-$ANDROID_SDK_ROOT}"
           if [ -z "$SDK" ]; then
             echo "::error::no Android SDK found on the runner"
@@ -72,6 +73,9 @@ jobs:
 
       - name: TDLib host prerequisites (the code generator's toolchain)
         run: |
+          #: Steps with `| tail`/`| tee` need pipefail, or a failing apt/sdkmanager
+          #: is hidden behind the pipe. (GitHub's default `bash -e` does not set it.)
+          set -o pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq gperf ninja-build 2>&1 | tail -3
           gperf --version | head -1
@@ -87,6 +91,9 @@ jobs:
 
       - name: Build TDLib (Java bindings + libtdjni.so for both phone ABIs)
         run: |
+          #: Without pipefail the step's status is tee's, so a failed build.sh
+          #: would be reported as success here and only fail later, obscurely.
+          set -o pipefail
           bash android/tdlib/build.sh "$ANDROID_SDK_ROOT" 2>&1 | tee tdlib-build.log
           #: The result the app actually ships — assert it loudly.
           ls -lh android/app/src/main/jniLibs/*/libtdjni.so
@@ -193,6 +200,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.release_tag || 'vmore-latest' }}
         run: |
+          #: pipefail: the group pipes into tee, so without it a failed
+          #: `gh release upload` would be silently reported as a green publish.
+          set -o pipefail
           {
             cat > release-notes.md <<'NOTES'
           Automated build of the Vmore Android app.

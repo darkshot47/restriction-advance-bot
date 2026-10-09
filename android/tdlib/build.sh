@@ -66,8 +66,15 @@ fi
 # ── 2. Java bindings (host build, generation only) ──────────────────────────
 if [ ! -s td/example/android/org/drinkless/tdlib/TdApi.java ]; then
     echo ":: Generating the TDLib Java API (prepare_cross_compiling + tl_generate_java)"
+    #: PHP_EXECUTABLE= is not optional. CMake's td/generate/CMakeLists.txt runs
+    #: find_program(PHP_EXECUTABLE php), and the GitHub runner ships PHP, so
+    #: without this the upstream Javadoc + AddIntDef passes run and inject
+    #: "import androidx.annotation.{IntDef,Nullable}" into TdApi.java. The app
+    #: deliberately has no androidx.annotation dependency, so javac fails there.
+    #: An empty cache value makes CMake skip the PHP passes (verified: no
+    #: androidx lines in the output). The guard below keeps this from regressing.
     cmake -S td/example/android -B td/example/android/build-native-Java \
-        -DTD_GENERATE_SOURCE_FILES=ON
+        -DTD_GENERATE_SOURCE_FILES=ON -DPHP_EXECUTABLE=
     cmake --build td/example/android/build-native-Java -j "$TDLIB_JOBS"
     cmake --build td/example/android/build-native-Java --target tl_generate_java
 fi
@@ -76,6 +83,11 @@ fi
 mkdir -p "$APP_JAVA"
 cp -f td/example/android/org/drinkless/tdlib/TdApi.java "$APP_JAVA/TdApi.java"
 cp -f td/example/java/org/drinkless/tdlib/Client.java   "$APP_JAVA/Client.java"
+if grep -q 'androidx' "$APP_JAVA/TdApi.java"; then
+    echo "::error::TdApi.java references androidx.annotation (PHP passes ran?). The app has no androidx dependency."
+    echo "::error::Delete android/tdlib/td (stale generated sources) and rebuild."
+    exit 1
+fi
 echo ":: Java bindings ready ($(wc -l < "$APP_JAVA/TdApi.java") lines of TdApi.java)"
 
 # ── 3. OpenSSL for Android (static, once) ────────────────────────────────────
