@@ -126,7 +126,7 @@ async def test_private_link_single_message_and_buttons(db, monkeypatch):
     assert sc("Private / Restricted Link") in message.shown_text
     assert sc("Unlimited Download (App)") in message.shown_text
     rows = message.shown_markup.inline_keyboard
-    assert rows[0][0].url == ui.APP_RELEASE_URL          # no base URL stored yet
+    assert rows[0][0].callback_data == "app:apk" and rows[0][0].url is None  # APK → this chat, never a link
     assert [b.callback_data for b in rows[1]] == ["cmd_premium", "cmd_refer"]
     assert [b.text for b in rows[1]] == [sc("💎 Buy Premium"), sc("🎁 Earn Points")]
 
@@ -143,7 +143,7 @@ async def test_private_links_inside_bulk_and_range_get_the_same_screen(db, monke
         assert sc("Private / Restricted Link") in message.shown_text, text
         assert sc("Unlimited Download (App)") in message.shown_text, text
         rows = message.shown_markup.inline_keyboard
-        assert rows[0][0].url == ui.APP_RELEASE_URL, text
+        assert rows[0][0].callback_data == "app:apk" and rows[0][0].url is None, text
         assert [b.callback_data for b in rows[1]] == ["cmd_premium", "cmd_refer"], text
 
 
@@ -154,7 +154,7 @@ async def test_fetch_and_send_private_gate_shows_upsell(db):
     result = await main.fetch_and_send(message, status, main.bot, -1001234, 5)
     assert result is False
     assert sc("Private / Restricted Link") in status.shown_text
-    assert status.shown_markup.inline_keyboard[0][0].url == ui.APP_RELEASE_URL
+    assert status.shown_markup.inline_keyboard[0][0].callback_data == "app:apk"
     assert status.shown_markup.inline_keyboard[1][0].callback_data == "cmd_premium"
 
 
@@ -721,7 +721,7 @@ async def test_channel_extraction_applies_the_private_channel_rules(db, fake_bot
     fetch.assert_not_called()
     assert sc("Private / Restricted Link") in post.shown_text
     assert post.button("cmd_premium")
-    assert post.shown_markup.inline_keyboard[0][0].url == ui.APP_RELEASE_URL
+    assert post.shown_markup.inline_keyboard[0][0].callback_data == "app:apk"
 
 
 @pytest.mark.asyncio
