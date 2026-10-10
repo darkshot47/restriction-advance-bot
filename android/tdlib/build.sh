@@ -23,12 +23,23 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+#: Name the exact failing command. A "::error::" line becomes a job annotation,
+#: so the reason is visible through the API even when the raw step log is not.
+trap 'rc=$?; echo "::error::android/tdlib/build.sh failed (exit $rc) at line $LINENO: $BASH_COMMAND"' ERR
+
 TDLIB_COMMIT="$(tr -d '[:space:]' < TDLIB_COMMIT)"
 ANDROID_SDK_ROOT="${1:-${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}}"
 TDLIB_NDK_VERSION="${TDLIB_NDK_VERSION:-23.2.8568313}"
 TDLIB_ABIS="${TDLIB_ABIS:-arm64-v8a armeabi-v7a}"
 OPENSSL_VERSION="${OPENSSL_VERSION:-OpenSSL_1_1_1w}"
 TDLIB_JOBS="${TDLIB_JOBS:-$(nproc 2>/dev/null || echo 4)}"
+
+#: Android API floors per ABI. OpenSSL is built against these, and its ARM
+#: capability probe calls getauxval (only declared from API 18 on), so libtdjni
+#: must link against the same floor. Linking it at a lower platform (it was
+#: android-16) fails with "undefined symbol: getauxval" on armeabi-v7a.
+ANDROID_API32=19     # armeabi-v7a floor (NDK 23+)
+ANDROID_API64=21     # 64-bit minimum
 
 if [ -z "$ANDROID_SDK_ROOT" ] || [ ! -d "$ANDROID_SDK_ROOT" ]; then
     echo "::error::pass the Android SDK root as the first argument (or set ANDROID_SDK_ROOT/ANDROID_HOME)"
@@ -66,8 +77,15 @@ fi
 # ── 2. Java bindings (host build, generation only) ──────────────────────────
 if [ ! -s td/example/android/org/drinkless/tdlib/TdApi.java ]; then
     echo ":: Generating the TDLib Java API (prepare_cross_compiling + tl_generate_java)"
+    #: PHP_EXECUTABLE= is not optional. CMake's td/generate/CMakeLists.txt runs
+    #: find_program(PHP_EXECUTABLE php), and the GitHub runner ships PHP, so
+    #: without this the upstream Javadoc + AddIntDef passes run and inject
+    #: "import androidx.annotation.{IntDef,Nullable}" into TdApi.java. The app
+    #: deliberately has no androidx.annotation dependency, so javac fails there.
+    #: An empty cache value makes CMake skip the PHP passes (verified: no
+    #: androidx lines in the output). The guard below keeps this from regressing.
     cmake -S td/example/android -B td/example/android/build-native-Java \
-        -DTD_GENERATE_SOURCE_FILES=ON
+        -DTD_GENERATE_SOURCE_FILES=ON -DPHP_EXECUTABLE=
     cmake --build td/example/android/build-native-Java -j "$TDLIB_JOBS"
     cmake --build td/example/android/build-native-Java --target tl_generate_java
 fi
@@ -76,6 +94,11 @@ fi
 mkdir -p "$APP_JAVA"
 cp -f td/example/android/org/drinkless/tdlib/TdApi.java "$APP_JAVA/TdApi.java"
 cp -f td/example/java/org/drinkless/tdlib/Client.java   "$APP_JAVA/Client.java"
+if grep -q 'androidx' "$APP_JAVA/TdApi.java"; then
+    echo "::error::TdApi.java references androidx.annotation (PHP passes ran?). The app has no androidx dependency."
+    echo "::error::Delete android/tdlib/td (stale generated sources) and rebuild."
+    exit 1
+fi
 echo ":: Java bindings ready ($(wc -l < "$APP_JAVA/TdApi.java") lines of TdApi.java)"
 
 # ── 3. OpenSSL for Android (static, once) ────────────────────────────────────
@@ -93,8 +116,6 @@ if [ ! -f third-party/openssl/arm64-v8a/lib/libcrypto.a ]; then
     rm "$OPENSSL_VERSION.tar.gz"
     cd "openssl-$OPENSSL_VERSION"
 
-    ANDROID_API32=19     # armeabi-v7a floor (NDK 23+)
-    ANDROID_API64=21     # 64-bit minimum
     for ABI in $TDLIB_ABIS; do
         case "$ABI" in
             armeabi-v7a) CONFIG_ABI="android-arm";  API=$ANDROID_API32 ;;
@@ -125,12 +146,16 @@ fi
 # ── 4. libtdjni.so per ABI ───────────────────────────────────────────────────
 for ABI in $TDLIB_ABIS; do
     BUILD_DIR="td/example/android/build-$ABI-Java"
+    case "$ABI" in
+        arm64-v8a|x86_64) PLATFORM_API=$ANDROID_API64 ;;
+        *)                PLATFORM_API=$ANDROID_API32 ;;
+    esac
     if [ ! -f td/tdlib/libs/$ABI/libtdjni.so ]; then
-        echo ":: Building libtdjni.so for $ABI"
+        echo ":: Building libtdjni.so for $ABI (android-$PLATFORM_API, same floor as its OpenSSL)"
         cmake -S td/example/android -B "$BUILD_DIR" \
             -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_ROOT/build/cmake/android.toolchain.cmake" \
             -DOPENSSL_ROOT_DIR="$(pwd -P)/third-party/openssl/$ABI" \
-            -DANDROID_ABI="$ABI" -DANDROID_STL="c++_static" -DANDROID_PLATFORM=android-16 \
+            -DANDROID_ABI="$ABI" -DANDROID_STL="c++_static" -DANDROID_PLATFORM="android-$PLATFORM_API" \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo -GNinja
         cmake --build "$BUILD_DIR" --target tdjni -j "$TDLIB_JOBS"
         mkdir -p td/tdlib/libs/"$ABI"

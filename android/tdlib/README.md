@@ -37,6 +37,9 @@ Notes:
   only — that is what CI uses, and what the build assumes.
 * No PHP is needed: the upstream Javadoc/IntDef pass is skipped on purpose,
   so the generated `TdApi.java` needs no androidx annotation stubs and the
-  app stays free of third-party Java dependencies.
+  app stays free of third-party Java dependencies. CMake would enable that
+  pass automatically whenever `php` is on `PATH` (the GitHub runner has it),
+  so `build.sh` passes `-DPHP_EXECUTABLE=` to turn it off, and it fails fast
+  if `TdApi.java` still mentions `androidx`.
 * Cache-size sanity: a full from-scratch build is heavy (OpenSSL + TDLib for
   two ABIs), the cache limits it to one such run per pinned commit.
