@@ -115,6 +115,8 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
                 startActivity(new Intent(this, QueueActivity.class)));
         findViewById(R.id.historyButton).setOnClickListener(v ->
                 startActivity(new Intent(this, HistoryActivity.class)));
+        findViewById(R.id.filesButton).setOnClickListener(v ->
+                startActivity(new Intent(this, FilesActivity.class)));
         findViewById(R.id.destCard).setOnClickListener(v -> pickDestination());
         findViewById(R.id.destButton).setOnClickListener(v -> pickDestination());
         findViewById(R.id.pasteButton).setOnClickListener(v -> paste());
@@ -557,7 +559,7 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         job.onlyKinds = Prefs.filterKinds(this);
         job.minSize = Prefs.filterMinSize(this);
         job.maxSize = Prefs.filterMaxSize(this);
-        job.skipDuplicates = true;
+        job.skipDuplicates = Prefs.skipDuplicates(this);
         return job;
     }
 

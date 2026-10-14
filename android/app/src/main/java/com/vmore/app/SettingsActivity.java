@@ -119,6 +119,9 @@ public class SettingsActivity extends Activity {
         }
 
         box.addView(Ui.section(this, getString(R.string.filters_title)));
+        addSwitch(R.string.settings_skip_duplicates, Prefs.skipDuplicates(this),
+                value -> Prefs.setSkipDuplicates(this, value),
+                R.string.settings_skip_duplicates_hint);
         addRow(R.drawable.ic_folder, filterSummary(),
                 getString(R.string.filters_hint), v -> Filters.show(this, this::render));
 

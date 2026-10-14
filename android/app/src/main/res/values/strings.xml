@@ -144,6 +144,8 @@
     <string name="settings_data">Data saving</string>
     <string name="settings_wifi_only">Only on Wi-Fi</string>
     <string name="settings_wifi_hint">The queue waits, and picks up by itself, the moment Wi-Fi is back.</string>
+    <string name="settings_skip_duplicates">Skip files already uploaded</string>
+    <string name="settings_skip_duplicates_hint">The same file (Telegram file id and size) is never sent to the same chat twice.</string>
     <string name="settings_speed">Download speed cap</string>
     <string name="settings_speed_full">Full speed</string>
     <string name="settings_speed_hint">Telegram keeps the part it already downloaded, so the cap only slows the transfer down, and changing it takes effect on the next job.</string>

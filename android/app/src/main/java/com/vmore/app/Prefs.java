@@ -442,6 +442,15 @@ public final class Prefs {
         prefs(context).edit().putString(KEY_CAPTION, value == null ? "" : value).apply();
     }
 
+    /** Leave out a file that was uploaded before (same file id and size). */
+    public static boolean skipDuplicates(Context context) {
+        return prefs(context).getBoolean("skip_duplicates", true);
+    }
+
+    public static void setSkipDuplicates(Context context, boolean value) {
+        prefs(context).edit().putBoolean("skip_duplicates", value).apply();
+    }
+
     public static boolean keepScreenOn(Context context) {
         return prefs(context).getBoolean(KEY_KEEP_SCREEN, true);
     }

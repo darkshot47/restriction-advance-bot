@@ -130,6 +130,14 @@
                     android:contentDescription="@string/home_nav_history" />
 
                 <ImageView
+                    android:id="@+id/filesButton"
+                    android:layout_width="42dp"
+                    android:layout_height="42dp"
+                    android:padding="9dp"
+                    android:src="@drawable/ic_folder"
+                    android:contentDescription="@string/files_title" />
+
+                <ImageView
                     android:id="@+id/settingsButton"
                     android:layout_width="42dp"
                     android:layout_height="42dp"
