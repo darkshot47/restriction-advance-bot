@@ -272,17 +272,13 @@ def premium_upsell_keyboard() -> InlineKeyboardMarkup:
 upsell_keyboard = premium_upsell_keyboard
 
 
-def private_access_keyboard(base_url: str | None = None, *, has_apk: bool = True) -> InlineKeyboardMarkup:
-    """Two options for a private link, exactly as the owner asked for.
+def private_access_keyboard() -> InlineKeyboardMarkup:
+    """What a private link offers here: premium delivery in the DM.
 
-    Row 1 — **♾️ Unlimited Download** → the Vmore app (the APK comes straight
-    from this deployment; without a known base URL the button asks the bot to
-    send the same APK in the chat instead).
-    Row 2 — the premium upsell: premium is what unlocks delivery **in the DM**.
+    The phone app runs with the user's own Telegram session and needs nothing
+    from this deployment, so the premium upsell is the whole keyboard.
     """
-    rows = [[app_download_button(base_url, has_apk=has_apk)]]
-    rows.extend(premium_upsell_keyboard().inline_keyboard)
-    return keyboard(rows)
+    return premium_upsell_keyboard()
 
 
 def daily_limit_keyboard() -> InlineKeyboardMarkup:
@@ -370,11 +366,6 @@ def start_keyboard(show_admin: bool = False) -> InlineKeyboardMarkup:
          if show_admin else
          [button("🌐 Language", callback_data="cmd_language", style="primary"),
           button("📤 Share Bot", callback_data="cmd_share", style="success")]),
-        # ── The app ───────────────────────────────────────────────────────
-        # One full-width button at the very bottom: the Vmore app, its details
-        # and its download.  The red 🧠 Models Architecture page (the dual
-        # engine explainer) moved one tap deeper, into 📖 Help.
-        [app_footer_button()],
     ]
     return keyboard(rows)
 
@@ -463,14 +454,12 @@ def refer_keyboard(link: str) -> InlineKeyboardMarkup:
 
 
 def help_keyboard() -> InlineKeyboardMarkup:
-    """The help screen carries the red engines page — /start owns the app button."""
+    """The help screen carries the red engines page."""
     return keyboard([
         [button("🔐 Login", callback_data="cmd_login", style="success"),
          button("💎 Premium", callback_data="cmd_premium", style="success")],
         [button("⚙️ Settings", callback_data="cmd_settings", style="primary"),
          button("💬 Feedback", callback_data="cmd_feedback", style="primary")],
-        [button("📱 Vmore App", callback_data="cmd_app", style="success"),
-         button("🔑 My Access Token", callback_data="cmd_gentoken", style="primary")],
         [models_architecture_button()],
         [home_button()],
     ])
@@ -1534,8 +1523,7 @@ def batch_done_text(success: int, failed: int) -> str:
 def private_login_text() -> str:
     """A private link arrived but the user has no session logged in."""
     return ("🔒 **Private link!**\n\n"
-            "Please /login first — or take it through the "
-            f"{APP_NAME} app, where private links are unlimited.")
+            "Please /login first so this account can read it.")
 
 
 def range_preflight_text(start: int, end: int, media: int, text_only: int,
@@ -2846,9 +2834,6 @@ ADMIN_COMMAND_LABELS = {
     "giveaway": "Giveaway Control",
     "participants": "Giveaway Participants",
     "endgiveaway": "End Giveaway & Draw",
-    # The Vmore app: who really uses it, and the APK the bot serves.
-    "appusers": "Vmore App Users (Real Logins)",
-    "apk": "Connect the App APK + Server URL",
 }
 
 #: Emoji shown in front of each command in the panel text.
@@ -2866,7 +2851,6 @@ ADMIN_COMMAND_ICONS = {
     "redeem": "🎁", "pin": "📌", "pinned": "📍", "setdump": "🗄", "deldump": "🗑️",
     "dump": "📊", "post": "📰", "native": "⚡", "giveaway": "🎁",
     "participants": "👥", "endgiveaway": "🏆",
-    "appusers": "📱", "apk": "📦",
 }
 
 
@@ -2926,10 +2910,6 @@ USER_MENU = (
     ("favorite", "⭐", "Add a channel to your favorites"),
     ("favorites", "🌟", "Show your favorite channels"),
     ("feedback", "💬", "Send feedback to the owner"),
-    # The app: the details page, the access token and its revoke switch.
-    ("app", "📱", "Open the Vmore app page"),
-    ("gentoken", "🔑", "Create your app access token"),
-    ("revoketoken", "🚫", "Revoke your app access token"),
 )
 
 #: Owner / admin commands whose menu line is written here instead of being
@@ -4154,28 +4134,13 @@ def giveaway_end_invalid_text() -> str:
             "from now). Nothing was scheduled yet.")
 
 
+
 # --------------------------------------------------------------------------- #
-#  Vmore app — access tokens, the APK and the in-app experience
-#
-#  The app is the bandwidth saver: a private link's content is downloaded and
-#  uploaded with the **user's own Telegram data** straight from the phone, so
-#  nothing is ever re-uploaded to Telegram by the bot.  The app never asks for a
-#  session string — one access token (``HPSEG9``) is the whole login.
+#  Product name
 # --------------------------------------------------------------------------- #
 
-#: Product name.  Kept here so every screen, button and the APK agree.
+#: Product name.  Kept here so every screen and button agree.
 APP_NAME = "Vmore"
-#: Shown on the app screen; the workflow stamps the same version into the APK.
-APP_VERSION = "1.0.0"
-#: Where the app talks to this deployment.
-APP_API_PATH = "/api/v2"
-#: Mirrors ``database.APP_TOKEN_LIFETIME_DAYS`` — kept here (not imported) so this
-#: module stays free of database imports; the test suite pins the two together.
-APP_TOKEN_LIFETIME_DAYS = 30
-#: The APK is never handed out as a public link: the **Unlimited Download (App)**
-#: button fires ``app:apk`` and the bot sends the file the owner uploaded with
-#: ``/apk`` straight into the chat. No release URL — nothing about the owner's
-#: hosting or accounts — ever leaks to a user.
 
 
 def green_reply_button(text: str, **kwargs):
@@ -4190,469 +4155,3 @@ def green_reply_button(text: str, **kwargs):
     if styles_enabled():
         kwargs.setdefault("style", _ENUM_BY_NAME.get("success"))
     return KeyboardButton(text, **kwargs)
-
-
-def app_base_url(stored: str | None = None) -> str | None:
-    """The deployment URL, normalised (``https://host`` — never a trailing slash)."""
-    url = (stored or "").strip()
-    if not url:
-        return None
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
-    return url.rstrip("/")
-
-
-def app_apk_url(stored_base_url: str | None = None) -> str | None:
-    base = app_base_url(stored_base_url)
-    return f"{base}{APP_API_PATH}/app/apk" if base else None
-
-
-def app_footer_button() -> InlineKeyboardButton:
-    """The full-width **big** app button that owns the last row of ``/start``."""
-    return button("📱 Vmore App", callback_data="cmd_app", style="success")
-
-
-def app_download_button(stored_base_url: str | None = None, *, has_apk: bool = True,
-                        label: str = "♾️ Unlimited Download (App)"):
-    """Download-the-app button: the bot always sends the APK **in this chat**.
-
-    One tap fires ``app:apk`` (``cb_app_apk``) and the file the owner connected
-    with ``/apk`` lands right here. No URL button is ever offered, so nothing
-    about the owner (a repository, a hosting account, anything) leaks to the
-    people asking for the app.
-    """
-    return button(label, callback_data="app:apk", style="success")
-
-
-def app_details_text(*, base_url=None, apk=None, premium: bool = False,
-                     token: str | None = None, session: bool = False,
-                     app_users: int | None = None, owner: str = "XyrDeveloper") -> str:
-    """The **full** app page behind the big button of ``/start``."""
-    apk = apk or {}
-    size = apk.get("size")
-    size_line = f"{size / (1024 * 1024):.1f} MB" if size else "—"
-    version = apk.get("version") or APP_VERSION
-    name = apk.get("file_name") or f"{APP_NAME}.apk"
-    base = app_base_url(base_url)
-    token_line = (f"🔑 Your access token: `{token}`" if token
-                  else "🔑 Generate your access token with /gentoken")
-    session_line = ("🔓 Telegram session: **connected** — private downloads are ready."
-                    if session else
-                    "🔒 Telegram session: **not connected** — run /login once so the "
-                    "app can download private content with your own data.")
-    plan_line = "💎 Plan: **Premium**" if premium else "💎 Plan: **Free**"
-    lines = [
-        f"📱 **{APP_NAME} — UNLIMITED DOWNLOAD APP**",
-        "",
-        f"**Version:** `{version}`",
-        f"**Build:** `{name}` • `{size_line}`",
-    ]
-    lines += [
-        f"**Server:** `{base or 'not set yet — the owner runs /apk with the URL'}`",
-        f"**Owner:** @{owner}",
-        "",
-        "━━━━━━━━━━━━━━━━━━━━━━━━",
-        "",
-        "**Why the app saves your bandwidth**",
-        "• Private links download **with your own Telegram data** — the server "
-        "never re-uploads a file to Telegram.",
-        "• Unlimited private downloads, no premium required.",
-        "• Pause / stop any download, resume it later.",
-        "• Download notification with live progress in the notification bar.",
-        "",
-        "**What you can do inside**",
-        "• Paste a public link → it lands in your Telegram DM directly.",
-        "• Paste a private link → download it in the app, then edit: caption, "
-        "thumbnail, and trim the video from the front or the back.",
-        "• Watch videos and open documents / PDFs right in the app.",
-        "• Save anything to your device, and see downloads + history together.",
-        "• Revoke your access token whenever you want.",
-        "",
-        "**Your account**",
-        token_line,
-        session_line,
-        plan_line,
-    ]
-    if app_users is not None:
-        lines.append(f"👥 App users: `{int(app_users)}`")
-    lines += [
-        "",
-        "Tap **⬇️ Download App** below, then open the file and install it.",
-        f"🔐 Login inside {APP_NAME} = only your access token, never a session.",
-    ]
-    return "\n".join(lines)
-
-
-def app_details_keyboard(*, base_url=None, has_apk: bool = True,
-                         token: str | None = None) -> InlineKeyboardMarkup:
-    """The buttons of the app page — download is always first."""
-    rows = [
-        [app_download_button(base_url, has_apk=has_apk,
-                             label="⬇️ Download App (Unlimited)")],
-        [
-            button("📩 Send APK in chat", callback_data="app:apk", style="primary"),
-            button("❓ How to use?", callback_data="app:howto", style="primary"),
-        ],
-        [
-            button("🔑 My Access Token", callback_data="cmd_gentoken", style="success"),
-            button("🚫 Revoke Token", callback_data="app:revoke", style="danger"),
-        ],
-        [owner_contact_button()],
-        [home_button()],
-    ]
-    return keyboard(rows)
-
-
-def app_missing_text() -> str:
-    return (f"⚠️ **The {APP_NAME} APK is not uploaded yet**\n\n"
-            "The owner adds it with `/apk` — send the APK file with the deployment "
-            "URL as the caption. Nothing else is needed.")
-
-
-def app_howto_text(*, base_url=None) -> str:
-    """The in-bot version of the app's own **How to use?** screen."""
-    base = app_base_url(base_url) or "https://your-app-url.onrender.com"
-    return (
-        f"❓ **HOW TO USE {APP_NAME}**\n\n"
-        "**1. Install the app**\n"
-        "Tap the download button on the app page and install the APK (allow "
-        "\"Install unknown apps\" once).\n\n"
-        "**2. Get your access token**\n"
-        "Send /gentoken here. You get a short code like `HPSEG9` — that is your "
-        "whole login. No phone number, no session, no OTP.\n\n"
-        "**3. Open the app and log in**\n"
-        "Enter the server address and the token — or paste the whole line below, "
-        "the app keeps the part it needs:\n"
-        f"`{base}{APP_API_PATH}/token/HPSEG9`\n"
-        "(it is the same link /gentoken shows for your own token).\n\n"
-        "**4. Paste a link**\n"
-        "• **Public link** → the app asks the bot to send it to your Telegram DM. "
-        "Nothing downloads on your phone.\n"
-        "• **Private link** → the app downloads it with **your own Telegram "
-        "data**, so it is unlimited and free.\n\n"
-        "**5. Edit before uploading**\n"
-        "Change the caption, set your thumbnail, trim the video from the front or "
-        "the back — then upload. The finished file is uploaded from your account "
-        "into your chat with the bot.\n\n"
-        "**6. Keep or watch**\n"
-        "Save to device, play the video, open documents — and see every download "
-        "and its history in one list.\n\n"
-        "**Buttons in the notification**\n"
-        "Pause / Stop while downloading, and a notification the moment it "
-        "finishes.\n\n"
-        "**Not working?**\n"
-        "• Private download needs one `/login` in this bot first — the app uses "
-        "that session for you.\n"
-        "• Token lost or leaked? Send /gentoken and regenerate it, or /revoketoken "
-        "to switch it off."
-    )
-
-
-def app_token_text(user_row=None, row=None, *, base_url=None) -> str:
-    """The /gentoken screen — the token, its 30-day life and how to reset it."""
-    row = row or {}
-    token = row.get("token")
-    active = bool(token) and not row.get("revoked")
-    base = app_base_url(base_url)
-    lines = [
-        "🔑 **YOUR APP ACCESS TOKEN**",
-        "",
-    ]
-    if active:
-        lines += [
-            f"`{token}`",
-            "",
-            "Enter this token in the app once — it is your only login. No phone "
-            "number, no OTP, no session string.",
-            "",
-        ]
-        lines += _token_life_lines(row)
-        lines.append("")
-    else:
-        expired = bool(token) and app_token_expired(row)
-        lines += [
-            ("Your token **expired** — the 30 days are over."
-             if expired else "You do not have a live token right now."),
-            "",
-            "Tap **🆕 Generate Token** below and the bot hands you a fresh short "
-            "code like `HPSEG9`.",
-            "",
-        ]
-    if base:
-        lines += [
-            "**Server address in the app**",
-            f"`{base}{APP_API_PATH}/token/{token or 'YOUR-TOKEN'}`",
-            "",
-        ]
-    lines += [
-        "**How it works**",
-        "• One account = one active token. Regenerating kills the old one.",
-        f"• A token lives `{APP_TOKEN_LIFETIME_DAYS}` days, then the app asks for "
-        "a new one — /gentoken hands it over in one tap.",
-        "• The token only ever touches your own account: it is the key to your "
-        "downloads, history and uploads.",
-        "• Revoke it any time with 🚫 **Revoke Token** or /revoketoken.",
-        "",
-        f"Generate it here, use it inside {APP_NAME}.",
-    ]
-    return "\n".join(lines)
-
-
-def app_token_keyboard(*, active: bool = True) -> InlineKeyboardMarkup:
-    """Token screen buttons — generate / regenerate, revoke, open the app page."""
-    if active:
-        first = button("🔄 Regenerate Token", callback_data="app:newtoken",
-                       style="success")
-    else:
-        first = button("🆕 Generate Token", callback_data="app:newtoken",
-                       style="success")
-    return keyboard([
-        [first],
-        [button("🚫 Revoke Token", callback_data="app:revoke", style="danger"),
-         button("📱 Vmore App", callback_data="cmd_app", style="primary")],
-        [home_button()],
-    ])
-
-
-def _token_life_lines(row) -> list[str]:
-    """``🕒 valid for 12 more days (until 2026-11-07)`` for the token screen."""
-    from database import app_token_days_left
-    expiry = row.get("expires_at")
-    days = app_token_days_left(row)
-    if expiry is None:
-        return []
-    if days <= 0:
-        return [f"🕒 **Expired** on `{expiry:%Y-%m-%d}` — regenerate to keep using "
-                f"{APP_NAME}."]
-    return [f"🕒 **Valid for {days} more day{'s' if days != 1 else ''}** "
-            f"(until `{expiry:%Y-%m-%d}`)."]
-
-
-def app_token_confirm_text() -> str:
-    return ("🔄 **Regenerate your access token?**\n\n"
-            "The token you have now stops working immediately — every app that is "
-            "signed in with it will be signed out. A new one is created right away.")
-
-
-def app_token_revoke_confirm_text() -> str:
-    return ("🚫 **Revoke your access token?**\n\n"
-            "The app can no longer reach your account until you generate a new "
-            "token with /gentoken. Your download history stays.")
-
-
-def app_token_created_text(token: str, *, base_url=None) -> str:
-    base = app_base_url(base_url)
-    lines = [
-        "✅ **TOKEN READY**",
-        "",
-        f"`{token}`",
-        "",
-        f"Open {APP_NAME} and paste it — that is the whole login.",
-    ]
-    if base:
-        lines += ["", f"Server: `{base}{APP_API_PATH}/token/{token}`"]
-    return "\n".join(lines)
-
-
-def app_token_revoked_text() -> str:
-    return ("🚫 **Token revoked**\n\n"
-            "The app is signed out. Send /gentoken whenever you want a new one.")
-
-
-def app_token_invalid_text() -> str:
-    return ("❌ **This token is not active**\n\n"
-            "It was revoked or never existed. Send /gentoken here to get a fresh "
-            "one from the bot.")
-
-
-def app_token_expired_text() -> str:
-    return ("⌛ **This access token has expired**\n\n"
-            f"A token is valid for `{APP_TOKEN_LIFETIME_DAYS}` days. Send /gentoken "
-            f"in the bot and paste the new code into {APP_NAME} — it takes a second.")
-
-
-def app_login_dm_text(*, device=None, version=None) -> str:
-    """The DM the bot sends the moment the app logs in with a token."""
-    lines = [
-        "✅ **LOGIN IN APP SUCCESSFUL**",
-        "",
-        f"📱 {APP_NAME}" + (f" • `{version}`" if version else ""),
-    ]
-    if device:
-        lines.append(f"📲 Device: `{device}`")
-    lines += [
-        "",
-        "Your access token is active. Paste any Telegram link inside the app:",
-        "• **Public** → straight to this DM.",
-        "• **Private** → downloaded with your own data, unlimited.",
-        "",
-        "Send /revoketoken any time to sign the app out.",
-    ]
-    return "\n".join(lines)
-
-
-def app_revoked_dm_text() -> str:
-    return ("🚫 **App access token revoked**\n\n"
-            f"{APP_NAME} is signed out. Send /gentoken to create a new token.")
-
-
-def app_users_text(users, *, tokens: int = 0, total: int | None = None) -> str:
-    """Owner/admin view: the people who really **use** the app."""
-    users = list(users or [])
-    total = len(users) if total is None else int(total)
-    lines = [
-        "📱 **VMORE APP USERS**",
-        "",
-        f"👥 App users: `{total}` • 🔑 Live tokens: `{int(tokens)}`",
-        "",
-        "Only accounts that actually logged in from the app are listed here — "
-        "generating a token alone never counts.",
-        "",
-    ]
-    if not users:
-        lines.append("No app logins yet.")
-        return "\n".join(lines)
-    for index, row in enumerate(users, 1):
-        name = row.get("name") or "User"
-        username = row.get("username")
-        handle = f" @{username}" if username else ""
-        device = row.get("device") or "—"
-        version = row.get("app_version") or "—"
-        last = row.get("last_seen")
-        last_text = last.strftime("%Y-%m-%d %H:%M") if hasattr(last, "strftime") else "—"
-        lines += [
-            f"{index}. **{name}**{handle} (`{row.get('user_id')}`)",
-            f"   ⬇️ {int(row.get('downloads', 0))} • ⬆️ {int(row.get('uploads', 0))} "
-            f"• 🚀 {int(row.get('sends', 0))} • 🔐 {int(row.get('logins', 0))}",
-            f"   📲 {device} • `v{version}` • 🕛 {last_text}",
-            "",
-        ]
-    return "\n".join(lines)
-
-
-def app_users_keyboard() -> InlineKeyboardMarkup:
-    return keyboard([
-        [button("🔄 Refresh", callback_data="appusers:refresh", style="primary"),
-         button("🔑 Tokens", callback_data="appusers:tokens", style="primary")],
-        [home_button()],
-    ])
-
-
-def app_users_tokens_text(rows, *, total: int = 0) -> str:
-    """Owner view of token holders — deliberately separate from app users."""
-    rows = list(rows or [])
-    lines = [
-        "🔑 **ACCESS TOKENS**",
-        "",
-        f"Generated: `{int(total or len(rows))}`",
-        "",
-        "Having a token is **not** the same as using the app — /appusers lists the "
-        "people who signed in.",
-        "",
-    ]
-    if not rows:
-        lines.append("No tokens yet.")
-        return "\n".join(lines)
-    for index, row in enumerate(rows, 1):
-        state = "🚫 revoked" if row.get("revoked") else "✅ active"
-        used = row.get("last_used")
-        used_text = used.strftime("%Y-%m-%d %H:%M") if hasattr(used, "strftime") else "never"
-        lines += [
-            f"{index}. `{row.get('token')}` — {state}",
-            f"   👤 `{row.get('user_id')}` • 🔐 {int(row.get('calls', 0))} calls "
-            f"• 🕛 {used_text}",
-            "",
-        ]
-    return "\n".join(lines)
-
-
-def apk_status_text(apk=None, *, base_url=None) -> str:
-    """``/apk`` — what the bot currently serves, and how to change it."""
-    apk = apk or {}
-    base = app_base_url(base_url)
-    lines = [
-        "📦 **VMORE APK**",
-        "",
-    ]
-    if apk.get("file_id"):
-        size = apk.get("size")
-        lines += [
-            "✅ An APK is connected.",
-            "",
-            f"📄 File: `{apk.get('file_name') or 'Vmore.apk'}`",
-            f"📦 Size: {f'{size / (1024 * 1024):.1f} MB' if size else '—'}",
-            f"🏷 Version: `{apk.get('version') or APP_VERSION}`",
-            f"🌐 Server: `{base or 'not set'}`",
-            "",
-        ]
-    else:
-        lines += [
-            "⚠️ No APK is connected yet.",
-            "",
-        ]
-    lines += [
-        "**How to update it**",
-        "1️⃣ Send the APK file to this chat with the server URL as the caption:",
-        f"`{base or 'https://your-app.onrender.com'}`",
-        "2️⃣ Or reply `/apk` to an APK you already sent.",
-        "",
-        "The same file is served at "
-        f"`{(base or 'https://your-app.onrender.com')}{APP_API_PATH}/app/apk` and the "
-        "⬇️ button on every app screen points there.",
-    ]
-    return "\n".join(lines)
-
-
-def apk_saved_text(apk, *, base_url=None) -> str:
-    size = (apk or {}).get("size")
-    base = app_base_url(base_url)
-    lines = [
-        "✅ **APK CONNECTED**",
-        "",
-        f"📄 {apk.get('file_name') or 'Vmore.apk'}",
-        f"📦 {f'{size / (1024 * 1024):.1f} MB' if size else '—'} "
-        f"• 🏷 `{apk.get('version') or APP_VERSION}`",
-        f"🌐 Server: `{base or 'not set'}`",
-    ]
-    if base:
-        lines += ["", f"⬇️ Direct download: `{base}{APP_API_PATH}/app/apk`"]
-    lines += ["", "Every app button in the bot now points at this file."]
-    return "\n".join(lines)
-
-
-def apk_not_owner_text() -> str:
-    return "🚫 **Owner only**\n\nOnly the owner can replace the app file."
-
-
-def apk_bad_file_text() -> str:
-    return ("❌ **That is not an APK**\n\nSend the `.apk` file itself (as a "
-            "document) — the caption may carry the server URL.")
-
-
-def app_private_link_text() -> str:
-    """The private-link screen: two options, app first."""
-    return (
-        "🔒 **PRIVATE / RESTRICTED LINK**\n\n"
-        "Pick how you want it:\n\n"
-        "♾️ **Unlimited Download (App)** — the Vmore app downloads it with your "
-        "own Telegram data. Unlimited, free, no DM delivery needed.\n\n"
-        "💎 **Premium** — the bot delivers it right here in this DM, up to 2 GB "
-        "per file."
-    )
-
-
-def app_offline_text() -> str:
-    return (f"⚠️ **{APP_NAME} is not reachable**\n\n"
-            "The owner has not published a server URL yet. Use the second option, "
-            "or try again after the owner runs `/apk` with the URL.")
-
-
-def app_session_missing_text() -> str:
-    """A private link needs one /login in the bot — the app reuses that session."""
-    return (f"🔓 **One step first: `/login` in this bot**\n\n"
-            f"{APP_NAME} downloads private content with **your own Telegram data**, "
-            "so it needs the session you connect with `/login` here — once. The app "
-            "itself never asks for a phone number, an OTP or a session string: your "
-            "access token is the whole login.\n\n"
-            "After that, every private link is unlimited in the app.")
-

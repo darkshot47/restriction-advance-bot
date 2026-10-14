@@ -155,6 +155,59 @@ final class MediaUtils {
         }
     }
 
+    /** A cover taken from the video and squeezed into Telegram's small size. */
+    static File thumbnailFor(File video, File target) {
+        File frame = thumbnailFrom(video, target);
+        return frame == null ? null : shrink(frame, target);
+    }
+
+    /** The same treatment for an image the user picked as the cover. */
+    static File thumbnailOf(File image, File target) {
+        return shrink(image, target);
+    }
+
+    /** Telegram refuses covers larger than 320 pixels, so every cover is scaled. */
+    private static File shrink(File source, File target) {
+        android.graphics.BitmapFactory.Options bounds = new android.graphics.BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        android.graphics.BitmapFactory.decodeFile(source.getAbsolutePath(), bounds);
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) {
+            return null;
+        }
+        int sample = 1;
+        while (bounds.outWidth / (sample * 2) >= 320 && bounds.outHeight / (sample * 2) >= 320) {
+            sample *= 2;
+        }
+        android.graphics.BitmapFactory.Options options = new android.graphics.BitmapFactory.Options();
+        options.inSampleSize = sample;
+        android.graphics.Bitmap bitmap =
+                android.graphics.BitmapFactory.decodeFile(source.getAbsolutePath(), options);
+        if (bitmap == null) {
+            return null;
+        }
+        int longest = Math.max(bitmap.getWidth(), bitmap.getHeight());
+        if (longest > 320) {
+            float scale = 320f / longest;
+            bitmap = android.graphics.Bitmap.createScaledBitmap(bitmap,
+                    Math.max(1, Math.round(bitmap.getWidth() * scale)),
+                    Math.max(1, Math.round(bitmap.getHeight() * scale)), true);
+        }
+        try (FileOutputStream out = new FileOutputStream(target)) {
+            bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 85, out);
+            return target;
+        } catch (Exception error) {
+            return null;
+        }
+    }
+
+    /** Pixel size of an image file, or {0, 0} when it cannot be read. */
+    static int[] imageSize(File file) {
+        android.graphics.BitmapFactory.Options bounds = new android.graphics.BitmapFactory.Options();
+        bounds.inJustDecodeBounds = true;
+        android.graphics.BitmapFactory.decodeFile(file.getAbsolutePath(), bounds);
+        return new int[]{Math.max(0, bounds.outWidth), Math.max(0, bounds.outHeight)};
+    }
+
     private static long parseLong(String value) {
         try {
             return value == null ? 0L : Long.parseLong(value);

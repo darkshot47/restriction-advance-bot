@@ -1,51 +1,64 @@
 package com.vmore.app;
 
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.content.Intent;
-import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.text.InputType;
-import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
-import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
-import android.widget.ScrollView;
 import android.widget.TextView;
-import android.widget.Toast;
-
-import org.json.JSONObject;
 
 import java.io.File;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
 /**
- * The home screen: paste a link and everything the bot promised happens here.
+ * The home screen: paste links, pick the chat, tap Start.
  *
- * Public link → straight to the Telegram DM (the phone downloads nothing).
- * Private link → download in the app (pause / stop, notification progress),
- * then edit (caption, thumbnail, trim) and upload through the user's own
- * session.
+ * Everything the bot used to do in a chat happens here — one link or a whole
+ * batch, a public channel or a private one, straight from this phone.
  */
-public class MainActivity extends Activity {
+public class MainActivity extends Activity implements Jobs.Listener, History.Listener {
+
+    private static final int REQUEST_DESTINATION = 101;
+    private static final int REQUEST_SCAN = 102;
 
     private EditText linkField;
-    private TextView statusText;
-    private LinearLayout actions;
-    private ProgressBar progress;
-    private boolean busy;
-    /** The last download event the screen already reacted to. */
-    private String consumed;
+    private TextView destTitle;
+    private TextView accountText;
+    private Button startButton;
+    private Button chipUpload;
+    private Button chipDelete;
+    private Button chipForward;
+    private View progressCard;
+    private TextView progressName;
+    private TextView progressStage;
+    private TextView progressPercent;
+    private ProgressBar progressBar;
+    private Button pauseButton;
+    private LinearLayout recentList;
+    private android.widget.ImageView avatarView;
+    private TextView profileName;
+    private TextView profileUser;
+    private TextView emptyText;
+    private boolean forwardBatch;
+
+    /** Jobs waiting for a destination (the picker is open for them). */
+    private final List<QJob> pending = new ArrayList<>();
+
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable watcher = new Runnable() {
         @Override
         public void run() {
-            paintDownload();
+            paintLive();
+            if (!avatarPainted()) {
+                paintProfile();
+            }
             handler.postDelayed(this, 500);
         }
     };
@@ -53,100 +66,289 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        if (!Prefs.loggedIn(this)) {
+        Skin.prepare(this);
+        if (!Tg.get(this).isReady()) {
             startActivity(new Intent(this, LoginActivity.class));
             finish();
             return;
         }
         setContentView(R.layout.activity_main);
+        askForNotifications();
+
         linkField = findViewById(R.id.linkField);
-        statusText = findViewById(R.id.statusText);
-        actions = findViewById(R.id.actions);
-        progress = findViewById(R.id.downloadProgress);
+        destTitle = findViewById(R.id.destTitle);
+        accountText = findViewById(R.id.accountText);
+        startButton = findViewById(R.id.startButton);
+        chipUpload = findViewById(R.id.chipUpload);
+        chipDelete = findViewById(R.id.chipDelete);
+        chipForward = findViewById(R.id.chipForward);
+        progressCard = findViewById(R.id.progressCard);
+        progressName = findViewById(R.id.progressName);
+        progressStage = findViewById(R.id.progressStage);
+        progressPercent = findViewById(R.id.progressPercent);
+        progressBar = findViewById(R.id.progressBar);
+        pauseButton = findViewById(R.id.pauseButton);
+        recentList = findViewById(R.id.recentList);
+        avatarView = findViewById(R.id.profileAvatar);
+        profileName = findViewById(R.id.profileName);
+        profileUser = findViewById(R.id.profileUser);
+        emptyText = findViewById(R.id.emptyText);
 
-        findViewById(R.id.ownerCard).setOnClickListener(v -> Blogger.openOwner(this));
-        findViewById(R.id.actionHowTo).setOnClickListener(v ->
-                startActivity(new Intent(this, HowToActivity.class)));
-        findViewById(R.id.actionHistory).setOnClickListener(v ->
+        findViewById(R.id.themeButton).setOnClickListener(v -> Skin.toggle(this));
+        findViewById(R.id.profileBox).setOnClickListener(v ->
+                startActivity(new Intent(this, SettingsActivity.class)));
+        findViewById(R.id.settingsButton).setOnClickListener(v ->
+                startActivity(new Intent(this, SettingsActivity.class)));
+        findViewById(R.id.queueButton).setOnClickListener(v ->
+                startActivity(new Intent(this, QueueActivity.class)));
+        findViewById(R.id.historyButton).setOnClickListener(v ->
                 startActivity(new Intent(this, HistoryActivity.class)));
-        findViewById(R.id.actionSettings).setOnClickListener(v -> showSettings());
-        findViewById(R.id.pasteButton).setOnClickListener(v -> pasteFromClipboard());
-        findViewById(R.id.openButton).setOnClickListener(v -> handleLink());
-        findViewById(R.id.actionLogout).setOnClickListener(v -> confirmLogout());
-        //: Pause / stop work from the screen exactly like the notification buttons.
-        findViewById(R.id.pauseButton).setOnClickListener(v -> {
-            if (DownloadService.Live.PAUSED.get()) {
-                DownloadService.command(this, DownloadService.ACTION_RESUME);
-            } else {
-                DownloadService.command(this, DownloadService.ACTION_PAUSE);
-            }
+        findViewById(R.id.destCard).setOnClickListener(v -> pickDestination());
+        findViewById(R.id.destButton).setOnClickListener(v -> pickDestination());
+        findViewById(R.id.pasteButton).setOnClickListener(v -> paste());
+        findViewById(R.id.clearButton).setOnClickListener(v -> linkField.setText(""));
+        findViewById(R.id.scanButton).setOnClickListener(v -> scanChat());
+        findViewById(R.id.viewAllButton).setOnClickListener(v ->
+                startActivity(new Intent(this, HistoryActivity.class)));
+        startButton.setOnClickListener(v -> start());
+        chipUpload.setOnClickListener(v -> {
+            Prefs.setAutoUpload(this, !Prefs.autoUpload(this));
+            paintOptions();
         });
-        findViewById(R.id.stopButton).setOnClickListener(v ->
-                DownloadService.command(this, DownloadService.ACTION_STOP));
+        chipDelete.setOnClickListener(v -> {
+            Prefs.setAutoDeleteLocal(this, !Prefs.autoDeleteLocal(this));
+            paintOptions();
+        });
+        chipForward.setOnClickListener(v -> {
+            forwardBatch = !forwardBatch;
+            paintOptions();
+        });
+        findViewById(R.id.stopQueueButton).setOnClickListener(v ->
+                QueueService.stopJob(this, null));
+        pauseButton.setOnClickListener(v -> {
+            if (Jobs.get(this).pausedAll()) {
+                QueueService.resumeAll(this);
+            } else {
+                QueueService.pauseAll(this);
+            }
+            paintLive();
+        });
 
-        Blogger.loadOwner(this, findViewById(R.id.ownerPhoto), findViewById(R.id.ownerName));
-        TextView version = findViewById(R.id.versionText);
-        version.setText("Vmore v" + Api.VERSION);
-        showAccount();
-        findViewById(R.id.actionEditor).setOnClickListener(v -> openEditor(null));
-        findViewById(R.id.tdButton).setOnClickListener(v ->
-                startActivity(new Intent(this, TdLoginActivity.class)));
-        askForNotificationPermission();
-        loadAppInfo();
-        paintTd();
-        handler.post(watcher);
+        for (View view : new View[]{startButton, chipUpload, chipDelete, chipForward,
+                pauseButton}) {
+            Anim.pressible(view);
+        }
+        Anim.pageIn(findViewById(R.id.header));
+        Anim.pageIn(findViewById(R.id.destCard));
+        Anim.pageIn(findViewById(R.id.inputCard));
+        Anim.stagger(recentList);
+    }
+
+    /** Android 13 and newer only show the queue row once this is allowed. */
+    private void askForNotifications() {
+        if (android.os.Build.VERSION.SDK_INT < 33) {
+            return;
+        }
+        if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                == android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+        requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 71);
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        showAccount();
-        paintDownload();
-        loadAppInfo();
-        paintTd();
+        if (!Tg.get(this).isReady()) {
+            startActivity(new Intent(this, LoginActivity.class));
+            finish();
+            return;
+        }
+        Tg.get(this).start(null);
+        Jobs.get(this).addListener(this);
+        History.get(this).addListener(this);
+        paintAccount();
+        paintProfile();
+        Skin.paintToggle(this, findViewById(R.id.themeButton));
+        paintDestination();
+        paintOptions();
+        paintRecent();
+        paintLive();
+        handler.post(watcher);
     }
 
     @Override
-    protected void onDestroy() {
+    protected void onPause() {
         handler.removeCallbacks(watcher);
-        super.onDestroy();
+        Jobs.get(this).removeListener(this);
+        History.get(this).removeListener(this);
+        super.onPause();
     }
 
-    private void showAccount() {
-        TextView account = findViewById(R.id.accountText);
+    // ------------------------------------------------------------- painting //
+
+    private void paintAccount() {
+        String phone = Prefs.phone(this);
+        accountText.setText(phone.isEmpty() ? getString(R.string.settings_session) : phone);
+    }
+
+    /**
+     * The corner block: the account name and the profile picture Telegram gave
+     * us.  Both are stored on the phone, so this only reads local data — the
+     * picture is downloaded exactly once, when the session comes up.
+     */
+    private boolean avatarPainted() {
+        String path = Prefs.avatarPath(this);
+        return path != null && !path.isEmpty() && new File(path).exists();
+    }
+
+    private void paintProfile() {
         String name = Prefs.accountName(this);
-        long id = Prefs.accountId(this);
-        account.setText(name == null || name.isEmpty()
-                ? "Logged in" + (id > 0 ? " • id " + id : "")
-                : name + (id > 0 ? " • id " + id : "") + " • token …"
-                        + Prefs.token(this).substring(Math.max(0, Prefs.token(this).length() - 2)));
-        Api.get(Api.tokenUrl(Prefs.baseUrl(this), Prefs.token(this)), result -> {
-            if (!result.ok) {
-                if (result.json != null && result.json.optBoolean("expired", false)) {
-                    setStatus("⌛ Your token expired. Get a new one with /gentoken in the bot, "
-                            + "then tap Settings → change token.");
-                } else if (result.code == 401) {
-                    setStatus("🔑 This token no longer works. Get a fresh one from the bot.");
-                }
-                return;
-            }
-            JSONObject info = result.optJson("account");
-            if (info != null) {
-                Prefs.saveAccount(this, info.optString("name", ""),
-                        info.optLong("user_id", 0L));
-                TextView view = findViewById(R.id.accountText);
-                String label = info.optString("name", "");
-                String plan = info.optBoolean("premium", false) ? "Premium" : "Free";
-                String session = info.optBoolean("session", false)
-                        ? "private downloads ready" : "run /login in the bot for private links";
-                view.setText((label.isEmpty() ? "Logged in" : label) + " • " + plan + " • " + session);
-            }
-        });
+        String username = Prefs.accountUsername(this);
+        profileName.setText(name == null || name.isEmpty()
+                ? getString(R.string.home_profile_guest) : name);
+        profileUser.setText(username == null || username.isEmpty() ? "" : "@" + username);
+        String path = Prefs.avatarPath(this);
+        android.graphics.Bitmap picture = path == null || path.isEmpty()
+                ? null : android.graphics.BitmapFactory.decodeFile(path);
+        if (picture != null) {
+            avatarView.setPadding(0, 0, 0, 0);
+            avatarView.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
+            avatarView.setImageBitmap(Ui.circle(this, picture, 42));
+        } else {
+            avatarView.setImageResource(R.drawable.ic_person);
+            avatarView.setPadding(Ui.dp(this, 9), Ui.dp(this, 9), Ui.dp(this, 9), Ui.dp(this, 9));
+        }
     }
 
-    // ---------------------------------------------------------------- link //
+    private void paintDestination() {
+        long chatId = Prefs.destChatId(this);
+        String title = Prefs.destTitle(this);
+        if (chatId == 0L || title.isEmpty()) {
+            destTitle.setText(R.string.home_no_destination);
+        } else {
+            destTitle.setText(title);
+        }
+    }
 
-    private void pasteFromClipboard() {
+    private void paintOptions() {
+        boolean upload = Prefs.autoUpload(this);
+        boolean delete = Prefs.autoDeleteLocal(this);
+        chipUpload.setText(getString(R.string.home_option_upload)
+                + (upload ? " • on" : " • off"));
+        chipUpload.setBackgroundResource(upload
+                ? R.drawable.bg_chip_active : R.drawable.bg_chip);
+        chipDelete.setText(getString(R.string.home_option_delete)
+                + (delete ? " • on" : " • off"));
+        chipDelete.setBackgroundResource(delete
+                ? R.drawable.bg_chip_active : R.drawable.bg_chip);
+        chipForward.setText(getString(R.string.home_option_forward)
+                + (forwardBatch ? " • on" : " • off"));
+        chipForward.setBackgroundResource(forwardBatch
+                ? R.drawable.bg_chip_active : R.drawable.bg_chip);
+    }
+
+    private void paintRecent() {
+        recentList.removeAllViews();
+        List<History.Entry> entries = History.get(this).all();
+        if (entries.isEmpty()) {
+            emptyText.setVisibility(View.VISIBLE);
+            recentList.setVisibility(View.GONE);
+            return;
+        }
+        emptyText.setVisibility(View.GONE);
+        recentList.setVisibility(View.VISIBLE);
+        int shown = Math.min(3, entries.size());
+        for (int index = 0; index < shown; index++) {
+            History.Entry entry = entries.get(index);
+            View row = historyRow(entry);
+            recentList.addView(row);
+            Anim.itemIn(row, index);
+        }
+    }
+
+    private View historyRow(History.Entry entry) {
+        LinearLayout row = Ui.row(this, Ui.iconForKind(entry.kind),
+                entry.name.isEmpty() ? "Job" : entry.name,
+                historySubtitle(entry));
+        row.setOnClickListener(v -> openEntry(entry));
+        Anim.pressible(row);
+        return row;
+    }
+
+    private String historySubtitle(History.Entry entry) {
+        StringBuilder builder = new StringBuilder();
+        if (entry.size > 0) {
+            builder.append(Format.size(entry.size)).append(" • ");
+        }
+        builder.append(Format.when(entry.when));
+        if (!entry.destTitle.isEmpty()) {
+            builder.append(" • ").append(entry.destTitle);
+        }
+        if (History.STATUS_FAILED.equals(entry.status)) {
+            builder.append(" • ").append(entry.error.isEmpty() ? "failed" : entry.error);
+        } else if (!entry.local) {
+            builder.append(" • local copy removed");
+        }
+        return builder.toString();
+    }
+
+    private void openEntry(History.Entry entry) {
+        if (entry.local && LocalFiles.exists(entry.path)) {
+            Intent intent = new Intent(this, ViewerActivity.class);
+            intent.putExtra("path", entry.path);
+            startActivity(intent);
+            return;
+        }
+        Ui.toast(this, getString(R.string.viewer_missing));
+    }
+
+    private void paintLive() {
+        boolean running = QueueService.Live.RUNNING.get()
+                || !QueueService.Live.STAGE.isEmpty();
+        QJob active = Jobs.get(this).active();
+        boolean paused = Jobs.get(this).pausedAll();
+        if (!running && active == null) {
+            progressCard.setVisibility(View.GONE);
+            return;
+        }
+        progressCard.setVisibility(View.VISIBLE);
+        String name = QueueService.Live.NAME;
+        progressName.setText(name == null || name.isEmpty()
+                ? getString(R.string.home_title) : name);
+        String stage = QueueService.Live.STAGE;
+        String error = QueueService.Live.ERROR;
+        progressStage.setText(error == null || error.isEmpty()
+                ? Ui.stageLabel(stage) : Ui.stageLabel(stage) + ": " + error);
+        long done = QueueService.Live.DONE.get();
+        long total = QueueService.Live.TOTAL.get();
+        int percent = Format.percent(done, total);
+        progressBar.setProgress(total > 0 ? percent : 0);
+        progressBar.setIndeterminate(total <= 0);
+        StringBuilder builder = new StringBuilder();
+        if (total > 0) {
+            builder.append(percent).append("% • ")
+                    .append(Format.size(done)).append(" / ").append(Format.size(total));
+        } else if (done > 0) {
+            builder.append(Format.size(done));
+        }
+        if (QueueService.Live.SPEED > 0 && QJob.DOWNLOADING.equals(stage)) {
+            builder.append(" • ").append(Format.speed(QueueService.Live.SPEED));
+            String eta = Format.eta(done, total, QueueService.Live.SPEED);
+            if (!eta.isEmpty()) {
+                builder.append(" • ").append(eta);
+            }
+        }
+        if (paused) {
+            builder.append(" • paused");
+        }
+        progressPercent.setText(builder.toString());
+        pauseButton.setText(paused ? R.string.queue_resume_all : R.string.queue_pause_all);
+    }
+
+    // -------------------------------------------------------------- actions //
+
+    private void paste() {
         android.content.ClipboardManager clipboard =
                 (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
         if (clipboard != null && clipboard.hasPrimaryClip()
@@ -155,343 +357,226 @@ public class MainActivity extends Activity {
             CharSequence text = clipboard.getPrimaryClip().getItemAt(0).coerceToText(this);
             if (text != null) {
                 linkField.setText(text.toString().trim());
+                Anim.fadeIn(linkField, 160);
             }
         } else {
-            toast("Clipboard is empty");
+            Ui.toast(this, getString(R.string.home_clipboard_empty));
         }
     }
 
-    private void handleLink() {
-        String link = linkField.getText().toString().trim();
-        if (link.isEmpty()) {
-            toast("Paste a Telegram link first");
+    private void start() {
+        String text = linkField.getText().toString().trim();
+        if (text.isEmpty()) {
+            Ui.toast(this, getString(R.string.home_no_link));
             return;
         }
-        if (busy) {
-            return;
-        }
-        consumed = null;
-        setBusy(true);
-        setStatus("🔍 Checking the link…");
-        JSONObject body = new JSONObject();
-        try {
-            body.put("link", link);
-        } catch (Exception ignored) {
-        }
-        Api.post(Api.tokenUrl(Prefs.baseUrl(this), Prefs.token(this)) + "/resolve", body,
-                result -> {
-                    setBusy(false);
-                    if (!result.ok) {
-                        setStatus("⚠️ " + (result.error == null ? "Could not read that link"
-                                : result.error));
-                        return;
-                    }
-                    boolean isPrivate = "private".equals(result.optString("type", ""));
-                    if (isPrivate) {
-                        JSONObject media = result.optJson("media");
-                        //: optString, not getString: org.json throws a checked
-                        //: JSONException for a missing key and this is a UI path.
-                        String name = media == null ? "" : media.optString("file_name", "");
-                        if (name.isEmpty()) {
-                            name = null;
-                        }
-                        askPrivateDownload(link, name, result.optBoolean("needs_login", false));
-                    } else {
-                        sendToDm(link);
-                    }
-                });
-    }
-
-    private void sendToDm(String link) {
-        setBusy(true);
-        setStatus("📩 Asking the bot to send it to your Telegram DM…");
-        JSONObject body = new JSONObject();
-        try {
-            body.put("link", link);
-        } catch (Exception ignored) {
-        }
-        Api.post(Api.tokenUrl(Prefs.baseUrl(this), Prefs.token(this)) + "/send", body, result -> {
-            setBusy(false);
-            if (result.ok) {
-                setStatus("✅ Sent to your Telegram DM — nothing downloaded on this phone.");
+        List<TgLink> parsed = TgLink.parseAll(text);
+        List<TgLink> usable = new ArrayList<>();
+        StringBuilder notes = new StringBuilder();
+        for (TgLink link : parsed) {
+            if (link.valid) {
+                usable.add(link);
+                if (!link.note.isEmpty()) {
+                    notes.append(link.note).append("\n");
+                }
             } else {
-                setStatus("⚠️ " + (result.error == null ? "Delivery failed" : result.error));
+                notes.append(link.raw).append(": ")
+                        .append(link.error.isEmpty() ? "not understood" : link.error)
+                        .append("\n");
             }
-        });
-    }
-
-    private void askPrivateDownload(String link, String name, boolean needsLogin) {
-        String message = "⬇️ **Private link**\n\n"
-                + "This content lives in a private chat, so it downloads **with your own "
-                + "Telegram data** — that is what makes it unlimited.\n\n"
-                + "Download it into the app, then edit (caption, thumbnail, trim) and "
-                + "upload it back from your own account.";
-        if (needsLogin) {
-            message += "\n\n⚠️ The bot has no session for you yet — send /login in the bot "
-                    + "once, then try again.";
         }
-        new AlertDialog.Builder(this)
-                .setTitle("Download this link?")
-                .setMessage(message.replace("**", ""))
-                .setPositiveButton("Download", (dialog, which) ->
-                        DownloadService.start(this, link, name))
-                .setNeutralButton("Send to DM", (dialog, which) -> sendToDm(link))
-                .setNegativeButton("Cancel", null)
-                .show();
-    }
-
-    // ------------------------------------------------------------ download //
-
-    /** Mirror the service's progress on screen (the notification does the rest). */
-    private void paintDownload() {
-        String status = DownloadService.Live.STATUS;
-        boolean active = DownloadService.running()
-                && ("preparing".equals(status) || "downloading".equals(status)
-                    || "paused".equals(status));
-        progress.setVisibility(active ? View.VISIBLE : View.GONE);
-        findViewById(R.id.pauseButton).setVisibility(active ? View.VISIBLE : View.GONE);
-        findViewById(R.id.stopButton).setVisibility(active ? View.VISIBLE : View.GONE);
-        if (active) {
-            long total = DownloadService.Live.TOTAL.get();
-            long written = DownloadService.Live.WRITTEN.get();
-            progress.setIndeterminate(total <= 0);
-            progress.setMax(1000);
-            progress.setProgress(total > 0 ? (int) Math.min(1000, written * 1000 / total) : 0);
-            boolean paused = DownloadService.Live.PAUSED.get();
-            ((Button) findViewById(R.id.pauseButton)).setText(paused ? "Resume" : "Pause");
-            setStatus((paused ? "⏸ Paused — " : "⬇️ Downloading ")
-                    + DownloadService.Live.NAME + " • "
-                    + Notifications.human(written)
-                    + (total > 0 ? " / " + Notifications.human(total) : ""));
-        } else if ("done".equals(status) && !"done".equals(consumed)) {
-            String path = DownloadService.Live.PATH;
-            consumed = "done";
-            setStatus("✅ Download finished — edit it, watch it, or save it to your device.");
-            offerTools(path);
-        } else if ("error".equals(status) && !"error".equals(consumed)) {
-            consumed = "error";
-            setStatus("⚠️ Download failed: " + DownloadService.Live.ERROR);
-        } else if ("stopped".equals(status) && !"stopped".equals(consumed)) {
-            consumed = "stopped";
-            setStatus("⏹ Download stopped");
-        }
-    }
-
-    /** After a download the editing tools (and viewer) are one tap away. */
-    private void offerTools(String path) {
-        File file = path == null ? null : new File(path);
-        if (file == null || !file.exists()) {
+        if (usable.isEmpty()) {
+            Ui.toast(this, notes.length() == 0 ? getString(R.string.home_no_link)
+                    : notes.toString().trim());
             return;
         }
-        actions.setVisibility(View.VISIBLE);
-        ((TextView) findViewById(R.id.readyText))
-                .setText("Ready: " + file.getName() + " • " + Notifications.human(file.length()));
-        findViewById(R.id.openEditorButton).setOnClickListener(v -> openEditor(path));
-        findViewById(R.id.openViewerButton).setOnClickListener(v ->
-                openViewer(path));
-        findViewById(R.id.saveDeviceButton).setOnClickListener(v -> saveToDevice(file));
-    }
-
-    private void openEditor(String path) {
-        String target = path;
-        if (target == null) {
-            List<LocalStore.Item> items = LocalStore.all(this);
-            if (items.isEmpty()) {
-                toast("Download something first");
-                return;
-            }
-            target = items.get(0).path;
+        if (!notes.toString().trim().isEmpty()) {
+            Ui.toast(this, notes.toString().trim());
         }
-        Intent intent = new Intent(this, EditorActivity.class);
-        intent.putExtra("path", target);
-        startActivity(intent);
-    }
 
-    private void openViewer(String path) {
-        Intent intent = new Intent(this, ViewerActivity.class);
-        intent.putExtra("path", path);
-        startActivity(intent);
-    }
+        List<QJob> jobs = new ArrayList<>();
+        String batchId = UUID.randomUUID().toString();
+        String label = usable.size() == 1 ? usable.get(0).raw : usable.size() + " links";
+        for (TgLink link : usable) {
+            if (link.isRange()) {
+                for (long id = link.messageId; id <= link.endMessageId; id++) {
+                    jobs.add(jobFor(link, id, batchId, label));
+                }
+            } else {
+                jobs.add(jobFor(link, link.messageId, batchId, label));
+            }
+        }
 
-    private void saveToDevice(File file) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
-                && checkSelfPermission("android.permission.WRITE_EXTERNAL_STORAGE")
-                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{"android.permission.WRITE_EXTERNAL_STORAGE"}, 602);
-            toast("Allow storage access, then tap Save to device again");
+        long dest = Prefs.destChatId(this);
+        if (dest == 0L || Prefs.askDestination(this)) {
+            pending.clear();
+            pending.addAll(jobs);
+            pickDestination();
             return;
         }
-        try {
-            String where = MediaUtils.saveToDevice(this, file);
-            setStatus("📥 Saved to " + where);
-            toast("Saved to " + where);
-        } catch (Exception exc) {
-            setStatus("⚠️ Could not save: " + exc.getMessage());
+        applyDestination(jobs, dest, Prefs.destTitle(this));
+        enqueue(jobs);
+    }
+
+    private QJob jobFor(TgLink link, long messageId, String batchId, String label) {
+        QJob job = new QJob();
+        job.batchId = batchId;
+        job.batchLabel = label;
+        job.raw = link.raw;
+        job.chatId = link.privateLink ? link.privateChatId() : link.chatId;
+        job.messageId = messageId;
+        job.username = link.username;
+        job.inviteHash = link.inviteHash;
+        job.privateLink = link.privateLink;
+        job.internalId = link.internalId;
+        job.method = forwardBatch ? QJob.METHOD_FORWARD : QJob.METHOD_DOWNLOAD;
+        job.sendAs = Prefs.sendAs(this);
+        job.uploadAfter = Prefs.autoUpload(this);
+        job.deleteLocal = Prefs.autoDeleteLocal(this);
+        return job;
+    }
+
+    private void applyDestination(List<QJob> jobs, long chatId, String title) {
+        for (QJob job : jobs) {
+            job.destChatId = chatId;
+            job.destTitle = title == null ? "" : title;
+            //: Forwarding needs the chat and the message id — never a download.
+            if (job.method == null || job.method.isEmpty()) {
+                job.method = QJob.METHOD_DOWNLOAD;
+            }
         }
     }
 
-    // ------------------------------------------------------------ settings //
-
-    private void showSettings() {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        int pad = (int) (16 * getResources().getDisplayMetrics().density);
-        box.setPadding(pad, pad, pad, pad);
-
-        TextView baseLabel = new TextView(this);
-        baseLabel.setText("Server address");
-        EditText base = new EditText(this);
-        base.setInputType(InputType.TYPE_TEXT_VARIATION_URI);
-        base.setText(Prefs.baseUrl(this));
-
-        TextView tokenLabel = new TextView(this);
-        tokenLabel.setText("Access token");
-        EditText token = new EditText(this);
-        token.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS);
-        token.setText(Prefs.token(this));
-
-        box.addView(baseLabel);
-        box.addView(base);
-        box.addView(tokenLabel);
-        box.addView(token);
-
-        TextView hint = new TextView(this);
-        hint.setText("Both values are editable any time. The token is your only login.");
-        hint.setTextSize(12f);
-        box.addView(hint);
-
-        ScrollView scroll = new ScrollView(this);
-        scroll.addView(box);
-
-        new AlertDialog.Builder(this)
-                .setTitle("Settings")
-                .setView(scroll)
-                .setPositiveButton("Save", (dialog, which) -> {
-                    Prefs.setBaseUrl(this, base.getText().toString());
-                    Prefs.setToken(this, token.getText().toString());
-                    toast("Saved");
-                    showAccount();
-                })
-                .setNeutralButton("Revoke token", (dialog, which) -> revokeToken())
-                .setNegativeButton("Close", null)
-                .show();
+    private void enqueue(List<QJob> jobs) {
+        if (jobs.isEmpty()) {
+            return;
+        }
+        Jobs.get(this).addBatch(jobs);
+        QueueService.run(this);
+        Ui.toast(this, jobs.size() + " " + getString(R.string.home_links_added));
+        linkField.setText("");
+        forwardBatch = false;
+        paintOptions();
+        paintLive();
+        paintRecent();
     }
 
-    private void revokeToken() {
-        Api.post(Api.tokenUrl(Prefs.baseUrl(this), Prefs.token(this)) + "/revoke",
-                new JSONObject(), result -> {
-                    Prefs.logout(this);
-                    toast(result.ok ? "Token revoked — the app is signed out"
-                            : "Token revoked locally");
-                    startActivity(new Intent(this, LoginActivity.class));
-                    finish();
-                });
+    private void pickDestination() {
+        Intent intent = new Intent(this, ChatPickerActivity.class);
+        intent.putExtra("mode", "destination");
+        startActivityForResult(intent, REQUEST_DESTINATION);
     }
 
-    private void confirmLogout() {
-        new AlertDialog.Builder(this)
-                .setTitle("Sign out?")
-                .setMessage("The token stays valid on the server until you revoke it with "
-                        + "/revoketoken. You can sign back in with the same token.")
-                .setPositiveButton("Sign out", (dialog, which) -> {
-                    Prefs.logout(this);
-                    startActivity(new Intent(this, LoginActivity.class));
-                    finish();
-                })
-                .setNegativeButton("Stay", null)
-                .show();
+    private void scanChat() {
+        Intent intent = new Intent(this, ChatPickerActivity.class);
+        intent.putExtra("mode", "scan");
+        startActivityForResult(intent, REQUEST_SCAN);
     }
-
-    // --------------------------------------------------------------- helpers //
 
     @Override
-    public void onRequestPermissionsResult(int requestCode, String[] permissions,
-                                          int[] grantResults) {
-        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
-        if (requestCode == 602) {
-            toast("Storage permission — tap Save to device again");
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (resultCode != RESULT_OK || data == null) {
+            pending.clear();
             return;
         }
-        if (requestCode != 601) {
-            return;
-        }
-        boolean granted = grantResults.length > 0
-                && grantResults[0] == android.content.pm.PackageManager.PERMISSION_GRANTED;
-        if (!granted) {
-            //: Say it out loud: downloads still work, the progress notification
-            //: just stays quiet until the permission is given in Settings.
-            setStatus("ℹ️ Notification permission is off, so download progress stays inside "
-                    + "the app. Downloads keep running in the background either way.");
-        }
-    }
-
-    /** Android 13+ needs this once, otherwise no progress notification appears. */
-    private void askForNotificationPermission() {
-        if (Build.VERSION.SDK_INT >= 33
-                && checkSelfPermission("android.permission.POST_NOTIFICATIONS")
-                != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 601);
-        }
-    }
-
-    // ------------------------------------------------- Telegram Direct //
-
-    /** Cache the TDLib credentials + bot username the server hands out. */
-    private void loadAppInfo() {
-        String base = Prefs.baseUrl(this);
-        if (base.isEmpty()) {
-            return;
-        }
-        Api.get(base + "/api/v2/app", result -> {
-            if (result.ok && result.json != null) {
-                JSONObject json = result.json;
-                Prefs.saveTdConfig(this, json.optInt("td_api_id", 0),
-                        json.optString("td_api_hash", ""),
-                        json.optString("bot_username", ""));
+        long chatId = data.getLongExtra("chat_id", 0L);
+        String title = data.getStringExtra("chat_title");
+        if (requestCode == REQUEST_DESTINATION) {
+            if (chatId == 0L) {
+                return;
             }
-            paintTd();
+            if (data.getBooleanExtra("remember", false)) {
+                Prefs.saveDestination(this, chatId, title);
+                paintDestination();
+            }
+            List<QJob> jobs = new ArrayList<>(pending);
+            pending.clear();
+            applyDestination(jobs, chatId, title);
+            enqueue(jobs);
+            return;
+        }
+        if (requestCode == REQUEST_SCAN) {
+            scanAndQueue(chatId, title);
+        }
+    }
+
+    /** Take the last media messages of a chat and queue them all. */
+    private void scanAndQueue(long chatId, String title) {
+        long dest = Prefs.destChatId(this);
+        String destTitle = Prefs.destTitle(this);
+        if (dest == 0L) {
+            Ui.toast(this, getString(R.string.home_need_destination));
+            pickDestination();
+            return;
+        }
+        Ui.toast(this, getString(R.string.chats_loading));
+        Tg.get(this).scanChat(chatId, Vmore.SCAN_LIMIT, new Tg.Cb<List<Tg.Media>>() {
+            @Override
+            public void ok(List<Tg.Media> media) {
+                if (media == null || media.isEmpty()) {
+                    Ui.toast(MainActivity.this,
+                            getString(R.string.home_no_media) + " " + title);
+                    return;
+                }
+                List<QJob> jobs = new ArrayList<>();
+                String batchId = UUID.randomUUID().toString();
+                for (Tg.Media item : media) {
+                    QJob job = new QJob();
+                    job.batchId = batchId;
+                    job.batchLabel = title;
+                    job.raw = item.chatTitle.isEmpty() ? title : item.chatTitle;
+                    job.chatId = item.chatId;
+                    job.messageId = item.messageId;
+                    job.privateLink = item.chatId < -1000000000000L;
+                    job.internalId = TgLink.internalFromChatId(item.chatId);
+                    job.destChatId = dest;
+                    job.destTitle = destTitle;
+                    job.method = forwardBatch ? QJob.METHOD_FORWARD : QJob.METHOD_DOWNLOAD;
+                    job.sendAs = Prefs.sendAs(MainActivity.this);
+                    job.uploadAfter = Prefs.autoUpload(MainActivity.this);
+                    job.deleteLocal = Prefs.autoDeleteLocal(MainActivity.this);
+                    jobs.add(job);
+                }
+                enqueue(jobs);
+            }
+
+            @Override
+            public void fail(String message) {
+                Ui.toast(MainActivity.this, message);
+            }
         });
     }
 
-    private void paintTd() {
-        TextView tdStatus = findViewById(R.id.tdStatus);
-        Button tdButton = findViewById(R.id.tdButton);
-        if (tdStatus == null || tdButton == null) {
+    // ------------------------------------------------------------- listeners //
+
+    @Override
+    public void onJobsChanged() {
+        paintLive();
+    }
+
+    @Override
+    public void onHistoryChanged() {
+        paintRecent();
+    }
+
+    /** Nothing here needs a file list; kept for the editor's "open latest". */
+    static File newestDownload(android.content.Context context) {
+        List<History.Entry> entries = History.get(context).all();
+        for (History.Entry entry : entries) {
+            if (entry.local && LocalFiles.exists(entry.path)) {
+                return new File(entry.path);
+            }
+        }
+        return null;
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (linkField != null && !linkField.getText().toString().isEmpty()) {
+            linkField.setText("");
             return;
         }
-        TdDirect direct = TdDirect.get(this);
-        if (!direct.nativeAvailable()) {
-            tdStatus.setText("Direct mode needs the full build (this one ships no Telegram engine).");
-            tdButton.setEnabled(false);
-        } else if (direct.isReady()) {
-            tdStatus.setText("✅ Active — downloads and uploads ride this phone's data; "
-                    + "zero server bytes.");
-            tdButton.setText("Manage Telegram Direct");
-            tdButton.setEnabled(true);
-        } else if (Prefs.tdApiId(this) == 0 || Prefs.tdApiHash(this).isEmpty()) {
-            tdStatus.setText("⭐ Optional: sign in with Telegram once, and your downloads/"
-                    + "uploads stop touching the server altogether.");
-            tdButton.setText("Set up Telegram Direct");
-            tdButton.setEnabled(true);
-        } else {
-            tdStatus.setText("Downloads and uploads use your own data, the server spends "
-                    + "nothing. One sign-in away.");
-            tdButton.setText("Sign in to Telegram Direct");
-            tdButton.setEnabled(true);
-        }
-    }
-
-    private void setStatus(String text) {
-        statusText.setText(text);
-        statusText.setVisibility(View.VISIBLE);
-    }
-
-    private void setBusy(boolean value) {
-        busy = value;
-        findViewById(R.id.openButton).setEnabled(!value);
-    }
-
-    private void toast(String text) {
-        Toast.makeText(this, text, Toast.LENGTH_SHORT).show();
+        super.onBackPressed();
     }
 }

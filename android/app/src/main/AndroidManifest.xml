@@ -1,18 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!-- Telegram itself is the only network Vmore talks to. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <!-- Saving into the phone's Downloads folder on Android 8 (API 26–28). -->
+    <!-- Saving into the phone's Downloads folder on Android 8 (API 26-28). -->
     <uses-permission
         android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="28" />
 
     <application
+        android:name=".VmoreApp"
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher"
@@ -20,10 +22,11 @@
         android:fullBackupContent="@xml/backup_rules"
         android:label="@string/app_name"
         android:supportsRtl="true"
-        android:usesCleartextTraffic="true"
+        android:usesCleartextTraffic="false"
         android:extractNativeLibs="false"
         android:theme="@style/VmoreTheme">
 
+        <!-- The one and only login: the user's own Telegram account. -->
         <activity
             android:name=".LoginActivity"
             android:exported="true"
@@ -41,15 +44,14 @@
             android:label="@string/app_name" />
 
         <activity
-            android:name=".EditorActivity"
+            android:name=".ChatPickerActivity"
             android:exported="false"
-            android:label="@string/editor_title" />
+            android:label="@string/chats_title" />
 
         <activity
-            android:name=".ViewerActivity"
+            android:name=".QueueActivity"
             android:exported="false"
-            android:label="@string/app_name"
-            android:configChanges="orientation|screenSize|keyboardHidden" />
+            android:label="@string/queue_title" />
 
         <activity
             android:name=".HistoryActivity"
@@ -57,14 +59,25 @@
             android:label="@string/history_title" />
 
         <activity
-            android:name=".HowToActivity"
+            android:name=".EditorActivity"
             android:exported="false"
-            android:label="@string/howto_title" />
+            android:label="@string/editor_title" />
 
         <activity
-            android:name=".TdLoginActivity"
+            android:name=".SettingsActivity"
             android:exported="false"
-            android:label="Telegram Direct" />
+            android:label="@string/settings_title" />
+
+        <activity
+            android:name=".HelpActivity"
+            android:exported="false"
+            android:label="@string/help_title" />
+
+        <activity
+            android:name=".ViewerActivity"
+            android:exported="false"
+            android:label="@string/app_name"
+            android:configChanges="orientation|screenSize|keyboardHidden" />
 
         <provider
             android:name=".VmoreFiles"
@@ -72,8 +85,10 @@
             android:exported="false"
             android:grantUriPermissions="true" />
 
+        <!-- The queue: downloads, uploads and the automatic cleanup continue
+             while the app is in the background. -->
         <service
-            android:name=".DownloadService"
+            android:name=".QueueService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
 

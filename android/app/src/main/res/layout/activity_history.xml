@@ -1,48 +1,109 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/vmore_bg"
-    android:fillViewport="true">
+    android:background="@color/vmore_black"
+    android:orientation="vertical">
 
     <LinearLayout
+        android:id="@+id/historyHeader"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="16dp">
+        android:paddingLeft="12dp"
+        android:paddingRight="18dp"
+        android:paddingTop="16dp">
 
-        <TextView style="@style/VmoreTitle"
-            android:layout_width="wrap_content" android:layout_height="wrap_content"
-            android:text="Downloads &amp; history" />
-
-        <TextView
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:text="What this phone downloaded and what your account did — in one list."
-            android:textColor="@color/vmore_text_dim"
-            android:textSize="12sp" />
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
 
-        <Button
-            android:id="@+id/refreshButton"
-            style="@style/VmoreButton"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Refresh" />
+            <ImageView
+                android:id="@+id/backButton"
+                android:layout_width="44dp"
+                android:layout_height="44dp"
+                android:padding="10dp"
+                android:src="@drawable/ic_back"
+                android:contentDescription="@string/common_back" />
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginLeft="4dp"
+                style="@style/VmoreTitle"
+                android:text="@string/history_title" />
+
+            <Button
+                android:id="@+id/clearButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                style="@style/VmoreButtonFlat"
+                android:text="@string/history_clear" />
+        </LinearLayout>
 
         <TextView
-            android:id="@+id/historyEmpty"
+            android:id="@+id/historySummary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            style="@style/VmoreSubtitle"
+            android:layout_marginLeft="4dp" />
+
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="10dp"
-            android:textColor="@color/vmore_text_dim"
-            android:textSize="13sp"
-            android:visibility="gone" />
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/filterAll"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                style="@style/VmoreChip"
+                android:text="@string/history_all" />
+
+            <Button
+                android:id="@+id/filterUploaded"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginLeft="8dp"
+                style="@style/VmoreChip"
+                android:text="@string/history_uploaded" />
+
+            <Button
+                android:id="@+id/filterFailed"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginLeft="8dp"
+                style="@style/VmoreChip"
+                android:text="@string/history_failed" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/historyEmpty"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        style="@style/VmoreSubtitle"
+        android:padding="22dp"
+        android:visibility="gone"
+        android:text="@string/history_empty" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:layout_marginTop="8dp"
+        android:paddingLeft="16dp"
+        android:paddingRight="16dp">
 
         <LinearLayout
             android:id="@+id/historyList"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="vertical" />
-    </LinearLayout>
-</ScrollView>
+            android:orientation="vertical"
+            android:paddingBottom="20dp" />
+    </ScrollView>
+</LinearLayout>

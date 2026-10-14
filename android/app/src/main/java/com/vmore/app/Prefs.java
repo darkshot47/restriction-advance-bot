@@ -4,30 +4,42 @@ import android.content.Context;
 import android.content.SharedPreferences;
 
 /**
- * Everything the app remembers between launches: the server address, the access
- * token and the last local download.
+ * Everything Vmore remembers between launches.
  *
- * The token is the whole login — there is no session string, no phone number and
- * no Telegram account data stored on the phone.
+ * There is no server and no access token in this app: the login is the user's
+ * own Telegram account (kept by TDLib on this phone), and every setting below
+ * lives in this one preferences file.
  */
 public final class Prefs {
 
-    /** The owner of the bot — the account behind the top-right corner. */
-    public static final String DEFAULT_OWNER = "XyrDeveloper";
-
     private static final String FILE = "vmore";
-    private static final String KEY_BASE = "base_url";
-    private static final String KEY_TOKEN = "token";
-    private static final String KEY_NAME = "account_name";
-    private static final String KEY_USER_ID = "account_id";
-    private static final String KEY_CAPTION = "last_caption";
-    private static final String KEY_THUMB = "thumbnail_path";
-    private static final String KEY_TRIM = "trim_enabled";
-    private static final String KEY_OWNER = "owner_username";
-    private static final String KEY_OWNER_NAME = "owner_name";
-    private static final String KEY_TD_API_ID = "td_api_id";
-    private static final String KEY_TD_API_HASH = "td_api_hash";
-    private static final String KEY_BOT_USERNAME = "bot_username";
+
+    private static final String KEY_API_ID = "tg_api_id";
+    private static final String KEY_API_HASH = "tg_api_hash";
+    private static final String KEY_PHONE = "tg_phone";
+    private static final String KEY_NAME = "tg_name";
+    private static final String KEY_USER_ID = "tg_user_id";
+
+    private static final String KEY_DEST_ID = "dest_chat_id";
+    private static final String KEY_DEST_TITLE = "dest_title";
+    private static final String KEY_ASK_DEST = "ask_destination";
+
+    private static final String KEY_AUTO_UPLOAD = "auto_upload";
+    private static final String KEY_AUTO_DELETE = "auto_delete_local";
+    private static final String KEY_SEND_AS = "send_as";
+    private static final String KEY_CAPTION = "caption_template";
+    private static final String KEY_KEEP_SCREEN = "keep_screen";
+    private static final String KEY_SPEED = "playback_speed";
+    private static final String KEY_SETUP_DONE = "setup_done";
+    private static final String KEY_NIGHT = "night_skin";
+    private static final String KEY_USERNAME = "tg_username";
+    private static final String KEY_AVATAR = "tg_avatar_path";
+    private static final String KEY_AVATAR_ID = "tg_avatar_file";
+
+    /** Send mode: keep the original file, or let Telegram show it inline. */
+    public static final String SEND_FILE = "document";
+    public static final String SEND_VIDEO = "video";
+    public static final String SEND_PHOTO = "photo";
 
     private Prefs() {
     }
@@ -36,37 +48,31 @@ public final class Prefs {
         return context.getSharedPreferences(FILE, Context.MODE_PRIVATE);
     }
 
-    /** The owner's Telegram handle shown in the top-right corner. */
-    public static String ownerUsername(Context context) {
-        return prefs(context).getString(KEY_OWNER, DEFAULT_OWNER);
+    // ------------------------------------------------- Telegram credentials //
+
+    public static int apiId(Context context) {
+        return prefs(context).getInt(KEY_API_ID, 0);
     }
 
-    public static String ownerName(Context context) {
-        return prefs(context).getString(KEY_OWNER_NAME, DEFAULT_OWNER);
+    public static String apiHash(Context context) {
+        return prefs(context).getString(KEY_API_HASH, "");
     }
 
-    public static void setOwner(Context context, String username, String name) {
+    public static boolean hasCredentials(Context context) {
+        return apiId(context) != 0 && !apiHash(context).isEmpty();
+    }
+
+    public static void saveCredentials(Context context, int apiId, String apiHash) {
         prefs(context).edit()
-                .putString(KEY_OWNER, username == null || username.isEmpty() ? DEFAULT_OWNER : username)
-                .putString(KEY_OWNER_NAME, name == null ? "" : name)
+                .putInt(KEY_API_ID, apiId)
+                .putString(KEY_API_HASH, apiHash == null ? "" : apiHash.trim())
                 .apply();
     }
 
-    public static String baseUrl(Context context) {
-        return prefs(context).getString(KEY_BASE, "");
-    }
+    // ------------------------------------------------------------ account //
 
-    public static void setBaseUrl(Context context, String value) {
-        prefs(context).edit().putString(KEY_BASE, Api.normalizeBase(value)).apply();
-    }
-
-    public static String token(Context context) {
-        return prefs(context).getString(KEY_TOKEN, "");
-    }
-
-    public static void setToken(Context context, String value) {
-        prefs(context).edit().putString(KEY_TOKEN, value == null ? "" : value.trim().toUpperCase())
-                .apply();
+    public static String phone(Context context) {
+        return prefs(context).getString(KEY_PHONE, "");
     }
 
     public static String accountName(Context context) {
@@ -77,68 +83,134 @@ public final class Prefs {
         return prefs(context).getLong(KEY_USER_ID, 0L);
     }
 
-    public static void saveAccount(Context context, String name, long userId) {
-        prefs(context).edit().putString(KEY_NAME, name).putLong(KEY_USER_ID, userId).apply();
+    public static void saveAccount(Context context, long userId, String name, String phone) {
+        prefs(context).edit()
+                .putLong(KEY_USER_ID, userId)
+                .putString(KEY_NAME, name == null ? "" : name)
+                .putString(KEY_PHONE, phone == null ? "" : phone)
+                .putBoolean(KEY_SETUP_DONE, true)
+                .apply();
     }
 
-    public static boolean loggedIn(Context context) {
-        return !token(context).isEmpty() && !baseUrl(context).isEmpty();
+    public static boolean setupDone(Context context) {
+        return prefs(context).getBoolean(KEY_SETUP_DONE, false);
     }
 
-    public static void logout(Context context) {
-        SharedPreferences p = prefs(context);
-        p.edit().remove(KEY_TOKEN).remove(KEY_NAME).remove(KEY_USER_ID).apply();
+    public static String accountUsername(Context context) {
+        return prefs(context).getString(KEY_USERNAME, "");
     }
 
-    public static String lastCaption(Context context) {
+    public static void saveProfile(Context context, String name, String username) {
+        prefs(context).edit()
+                .putString(KEY_NAME, name == null ? "" : name)
+                .putString(KEY_USERNAME, username == null ? "" : username)
+                .apply();
+    }
+
+    /** Where the profile picture was copied to, once, on this phone. */
+    public static String avatarPath(Context context) {
+        return prefs(context).getString(KEY_AVATAR, "");
+    }
+
+    public static int avatarFileId(Context context) {
+        return prefs(context).getInt(KEY_AVATAR_ID, 0);
+    }
+
+    public static void saveAvatar(Context context, String path, int fileId) {
+        prefs(context).edit()
+                .putString(KEY_AVATAR, path == null ? "" : path)
+                .putInt(KEY_AVATAR_ID, fileId)
+                .apply();
+    }
+
+    public static void forgetAvatar(Context context) {
+        prefs(context).edit().remove(KEY_AVATAR).remove(KEY_AVATAR_ID).apply();
+    }
+
+    // ---------------------------------------------------------------- skin //
+
+    /** True once the user asked for the night skin; the day skin is default. */
+    public static boolean night(Context context) {
+        return prefs(context).getBoolean(KEY_NIGHT, false);
+    }
+
+    public static void setNight(Context context, boolean value) {
+        prefs(context).edit().putBoolean(KEY_NIGHT, value).apply();
+    }
+
+    // -------------------------------------------------------- destination //
+
+    public static long destChatId(Context context) {
+        return prefs(context).getLong(KEY_DEST_ID, 0L);
+    }
+
+    public static String destTitle(Context context) {
+        return prefs(context).getString(KEY_DEST_TITLE, "");
+    }
+
+    public static void saveDestination(Context context, long chatId, String title) {
+        prefs(context).edit()
+                .putLong(KEY_DEST_ID, chatId)
+                .putString(KEY_DEST_TITLE, title == null ? "" : title)
+                .apply();
+    }
+
+    public static boolean askDestination(Context context) {
+        return prefs(context).getBoolean(KEY_ASK_DEST, false);
+    }
+
+    public static void setAskDestination(Context context, boolean value) {
+        prefs(context).edit().putBoolean(KEY_ASK_DEST, value).apply();
+    }
+
+    // ----------------------------------------------------------- behaviour //
+
+    public static boolean autoUpload(Context context) {
+        return prefs(context).getBoolean(KEY_AUTO_UPLOAD, true);
+    }
+
+    public static void setAutoUpload(Context context, boolean value) {
+        prefs(context).edit().putBoolean(KEY_AUTO_UPLOAD, value).apply();
+    }
+
+    /** Delete the phone copy as soon as the file is safely in the chat. */
+    public static boolean autoDeleteLocal(Context context) {
+        return prefs(context).getBoolean(KEY_AUTO_DELETE, true);
+    }
+
+    public static void setAutoDeleteLocal(Context context, boolean value) {
+        prefs(context).edit().putBoolean(KEY_AUTO_DELETE, value).apply();
+    }
+
+    public static String sendAs(Context context) {
+        return prefs(context).getString(KEY_SEND_AS, SEND_FILE);
+    }
+
+    public static void setSendAs(Context context, String value) {
+        prefs(context).edit().putString(KEY_SEND_AS, value == null ? SEND_FILE : value).apply();
+    }
+
+    public static String captionTemplate(Context context) {
         return prefs(context).getString(KEY_CAPTION, "");
     }
 
-    public static void setLastCaption(Context context, String caption) {
-        prefs(context).edit().putString(KEY_CAPTION, caption == null ? "" : caption).apply();
+    public static void setCaptionTemplate(Context context, String value) {
+        prefs(context).edit().putString(KEY_CAPTION, value == null ? "" : value).apply();
     }
 
-    public static String thumbnailPath(Context context) {
-        return prefs(context).getString(KEY_THUMB, "");
+    public static boolean keepScreenOn(Context context) {
+        return prefs(context).getBoolean(KEY_KEEP_SCREEN, true);
     }
 
-    public static void setThumbnailPath(Context context, String path) {
-        prefs(context).edit().putString(KEY_THUMB, path == null ? "" : path).apply();
+    public static void setKeepScreenOn(Context context, boolean value) {
+        prefs(context).edit().putBoolean(KEY_KEEP_SCREEN, value).apply();
     }
 
-    public static boolean trimEnabled(Context context) {
-        return prefs(context).getBoolean(KEY_TRIM, false);
+    public static float playbackSpeed(Context context) {
+        return prefs(context).getFloat(KEY_SPEED, 1.0f);
     }
 
-    public static void setTrimEnabled(Context context, boolean value) {
-        prefs(context).edit().putBoolean(KEY_TRIM, value).apply();
-    }
-
-    // ------------------------------------------------- TDLib direct mode //
-
-    /** The Telegram application credentials the server vends on /api/v2/app —
-     *  TDLib on the phone logs in with the very same ones the bot's sessions
-     *  use, so both Telegram sessions ride one app identity. */
-    public static int tdApiId(Context context) {
-        return prefs(context).getInt(KEY_TD_API_ID, 0);
-    }
-
-    public static String tdApiHash(Context context) {
-        return prefs(context).getString(KEY_TD_API_HASH, "");
-    }
-
-    /** The bot's Telegram username — where direct uploads land (the same
-     *  chat the server-mode upload sends into). */
-    public static String botUsername(Context context) {
-        return prefs(context).getString(KEY_BOT_USERNAME, "");
-    }
-
-    public static void saveTdConfig(Context context, int apiId, String apiHash,
-                                    String botUsername) {
-        prefs(context).edit()
-                .putInt(KEY_TD_API_ID, apiId)
-                .putString(KEY_TD_API_HASH, apiHash == null ? "" : apiHash)
-                .putString(KEY_BOT_USERNAME, botUsername == null ? "" : botUsername)
-                .apply();
+    public static void setPlaybackSpeed(Context context, float value) {
+        prefs(context).edit().putFloat(KEY_SPEED, value).apply();
     }
 }

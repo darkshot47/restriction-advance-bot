@@ -28,7 +28,6 @@ from pyrogram.errors import (
 
 import ui
 import database
-import appapi
 import engines
 import telemetry
 import native_engine
@@ -98,13 +97,6 @@ from database import (
     cleanup_old_records, add_stars_payment, get_stars_payment, complete_stars_payment,
     get_stars_payments,
     purge_created_bot_data,
-    app_token_expired, app_token_days_left, expire_stale_app_tokens,
-    create_app_token, get_app_token, get_active_app_token, revoke_app_token,
-    list_app_tokens, count_app_tokens, mark_app_token_login, touch_app_token,
-    register_app_user, increment_app_user_usage, get_app_user, list_app_users,
-    count_app_users, add_app_activity, update_app_activity, get_app_activity,
-    count_app_activity, cleanup_app_activity,
-    set_app_apk, get_app_apk, get_app_config, set_app_base_url,
 )  # noqa: F401
 
 API_ID = int(os.environ.get("API_ID"))
@@ -832,21 +824,18 @@ async def add_copy_attribution(message, fetch_client, copied, source):
 # --------------------------------------------------------------------------- #
 
 async def private_link_keyboard():
-    """The two options for a private link: unlimited in the app, or premium DM."""
-    config = await get_app_config()
-    apk = config.get("apk") or {}
-    return ui.private_access_keyboard(config.get("base_url"),
-                                      has_apk=bool(apk.get("file_id")))
+    """What a private link offers: premium delivery in the DM."""
+    return ui.private_access_keyboard()
 
 
 async def reply_private_access(message):
-    """Private link without access → app download first, premium DM second."""
-    await say(message, ui.app_private_link_text(),
+    """Private link without access → the premium route."""
+    await say(message, ui.private_access_text(),
               reply_markup=await private_link_keyboard())
 
 
 async def edit_private_access(status):
-    await say_edit(status, ui.app_private_link_text(),
+    await say_edit(status, ui.private_access_text(),
                    reply_markup=await private_link_keyboard())
 
 
@@ -2559,7 +2548,7 @@ NEW_COMMAND_NAMES = [
     "setdump", "deldump", "dump", "post", "native",
     "giveaway", "participants", "endgiveaway", "giveawaystatus",
 ]
-COMMAND_NAMES = NEW_COMMAND_NAMES + ["start", "help", "login", "logout", "status", "cancel", "setcaption", "delcaption", "setthumb", "delthumb", "setprefix", "setsuffix", "mystats", "myinfo", "history", "settings", "language", "refer", "bookmark", "bookmarks", "favorite", "favorites", "share", "feedback", "invite", "premium", "stats", "users", "loggedusers", "activeusers", "newusers", "topusers", "broadcast", "botcast", "superbroadcast", "menu", "cmsg", "unpin", "ban", "unban", "banlist", "finduser", "userinfo", "addpremium", "removepremium", "premiumlist", "addadmin", "removeadmin", "adminlist", "setfsub", "fsublist", "delfsub", "fsublabel", "fsubcheck", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export", "adminhelp", "admin", "admins", "addqr", "delqr", "removeqr", "payments", "redeem", "setchat", "delchat", "models", "engine", "mychannels", "setengine", "app", "gentoken", "revoketoken", "appusers", "apk"]
+COMMAND_NAMES = NEW_COMMAND_NAMES + ["start", "help", "login", "logout", "status", "cancel", "setcaption", "delcaption", "setthumb", "delthumb", "setprefix", "setsuffix", "mystats", "myinfo", "history", "settings", "language", "refer", "bookmark", "bookmarks", "favorite", "favorites", "share", "feedback", "invite", "premium", "stats", "users", "loggedusers", "activeusers", "newusers", "topusers", "broadcast", "botcast", "superbroadcast", "menu", "cmsg", "unpin", "ban", "unban", "banlist", "finduser", "userinfo", "addpremium", "removepremium", "premiumlist", "addadmin", "removeadmin", "adminlist", "setfsub", "fsublist", "delfsub", "fsublabel", "fsubcheck", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export", "adminhelp", "admin", "admins", "addqr", "delqr", "removeqr", "payments", "redeem", "setchat", "delchat", "models", "engine", "mychannels", "setengine"]
 ABORT_GROUP = -1
 #: Runs before everything else: the one-time clean-up of a leftover picker keyboard.
 SWEEP_GROUP = -3
@@ -5472,7 +5461,7 @@ async def run_private_batch(message, items, *, heading: str | None = None,
             status = await say(message, ui.batch_item_text(label))
             if is_private:
                 if not await private_access(user_id):
-                    await say_edit(status, ui.app_private_link_text(),
+                    await say_edit(status, ui.private_access_text(),
                                    reply_markup=await private_link_keyboard())
                     return False
                 fetch_client = await get_user_client(user_id)
@@ -5854,7 +5843,7 @@ async def extract_channel_links(message, user_row, *, sleeper=asyncio.sleep):
         status = await say(message,
                            f"⏳ Fetching {index}/{len(links)}… {ui.engine_icon(decision.engine)}")
         if is_private and not await private_access(user_id):
-            await say_edit(status, ui.app_private_link_text(),
+            await say_edit(status, ui.private_access_text(),
                            reply_markup=await private_link_keyboard())
             return False
         fetch_client = bot
@@ -8265,8 +8254,6 @@ ADMIN_PAGES = [
     ("⚙️ Administration",
      ["addadmin", "removeadmin", "adminlist", "maintenance",
       "clearlogs", "adminhelp"]),
-    ("📱 Vmore App",
-     ["appusers", "apk"]),
     ("🎁 Owner Tools",
      ["pin", "pinned", "setdump", "deldump", "dump", "post"]),
     ("⚡ Advanced & Giveaways",
@@ -8308,8 +8295,6 @@ ADMIN_OWNER_COMMANDS = {
     "pin", "pinned", "unpin", "menu", "cmsg", "botcast", "superbroadcast",
     "setdump", "deldump", "dump", "post", "native",
     "giveaway", "participants", "endgiveaway", "giveawaystatus",
-    # The app: who uses it, and the APK it is served from.
-    "appusers", "apk",
 }
 
 
@@ -8527,24 +8512,16 @@ async def publish_menu_on_start(client):
     ensure_command_registration()
     # Start auto-delete background task for old history/payments
     ensure_history_cleanup()
-    # Bind the app API to this event loop so the HTTP worker can reach Telegram.
-    try:
-        appapi.bind_loop(asyncio.get_running_loop())
-    except RuntimeError:  # pragma: no cover - only outside a running loop
-        pass
-    spawn_app_startup_tasks()
+    spawn_startup_tasks()
 
 
-def spawn_app_startup_tasks():
-    """Kick off the app's startup errands.
+def spawn_startup_tasks():
+    """Kick off the bot's startup errands.
 
-    None of them is worth losing the bot over: the /CreateBot purge, retiring
-    tokens whose 30 days ran out, and caching the owner card the app shows in
-    its top-right corner.  A failure is logged and the bot keeps running.
+    Nothing here is worth losing the bot over: the ``/CreateBot`` purge is the
+    only one left, and a failure is logged while the bot keeps running.
     """
-    for label, factory in (("purge", purge_created_bot_data),
-                           ("expired-tokens", expire_stale_app_tokens),
-                           ("owner-card", APP_BRIDGE.refresh_owner)):
+    for label, factory in (("purge", purge_created_bot_data),):
         try:
             spawn_background(_run_startup_errand(label, factory))
         except Exception as exc:
@@ -8564,6 +8541,7 @@ async def _run_startup_errand(label, factory):
     except Exception as exc:
         print(f"[APP] startup task {label} failed: {type(exc).__name__}: {exc}",
               flush=True)
+
 
 
 def command_name_of(message) -> str | None:
@@ -9750,821 +9728,12 @@ async def superbroadcast_handler(client, message):
         f"✅ Sent: {sent}\n❌ Failed: {failed}")
 
 
-# --------------------------------------------------------------------------- #
-#  Vmore app — the bot side of the HTTP API
-#
-#  Everything the app asks for lands here through :class:`VmoreAppBridge`, which
-#  runs on the bot's own event loop.  Private content travels **through the
-#  user's stored session** in both directions (download and upload), so the bot
-#  itself never re-uploads a byte to Telegram — that is the bandwidth saving the
-#  app exists for.
-# --------------------------------------------------------------------------- #
-
-#: Cache of the owner's profile (name, username, photo) for the app's corner.
-OWNER_PROFILE_CACHE: dict = {}
-#: Where the APK handed over with /apk is cached on disk before streaming.
-APK_CACHE_NAME = "vmore_app.apk"
-
-
-class AppMessage:
-    """A stand-in *message* so an app request can reuse the DM delivery pipeline.
-
-    ``fetch_and_send`` expects a message it can reply to and a chat to deliver
-    into; for an app request that chat is the user's own DM with the bot.
-    """
-
-    def __init__(self, user_id: int, user_row: dict | None = None):
-        user_row = user_row or {}
-        self.id = 0
-        self.chat = SimpleNamespace(id=int(user_id), type="private",
-                                    title=user_row.get("name"))
-        self.from_user = SimpleNamespace(
-            id=int(user_id),
-            first_name=user_row.get("name") or "User",
-            last_name=None,
-            username=user_row.get("username"),
-            is_bot=False,
-            is_self=False,
-        )
-        self.sender_chat = None
-        self.text = ""
-        self.caption = None
-        self.media = None
-        self.reply_to_message = None
-
-    async def reply(self, text, reply_markup=None, **kwargs):
-        return await bot.send_message(self.chat.id, text, reply_markup=reply_markup, **kwargs)
-
-
-def app_spool_dir():
-    from pathlib import Path
-    path = Path(appapi.SPOOL_DIR)
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-class VmoreAppBridge:
-    """The whole app API surface, executed on the bot's event loop."""
-
-    def __init__(self):
-        self._owner = None
-        self._owner_photo = None
-        self._apk_id = None
-        self._apk_path = None
-
-    # ── owner card (top-right corner of the app) ───────────────────────────
-    def owner_cached(self) -> dict:
-        cached = dict(OWNER_PROFILE_CACHE) or dict(self._owner or {})
-        cached.setdefault("id", OWNER_ID)
-        cached.setdefault("username", PAYMENT_CONTACT)
-        cached.setdefault("name", PAYMENT_CONTACT)
-        cached.setdefault("photo", f"{appapi.API_ROOT}/owner/photo")
-        cached.setdefault("url", OWNER_CONTACT_URL)
-        return cached
-
-    # ── TDLib config: what the app's direct mode needs ─────────────────────
-    def td_config(self) -> dict:
-        """The api_id/api_hash the app needs to run its own Telegram session
-        (TDLib on the phone) — the exact same application credentials the
-        bot's server-side user sessions already use, so a phone login lands on
-        the same Telegram "app".  These are not secrets: every Telegram client
-        ships its pair in the binary."""
-        return {"td_api_id": int(API_ID or 0), "td_api_hash": API_HASH or "",
-                "bot_username": BOT_USERNAME or ""}
-
-    async def refresh_owner(self) -> dict:
-        """Read the owner's Telegram name/username/photo once and cache them."""
-        card = {"id": OWNER_ID, "username": PAYMENT_CONTACT, "name": PAYMENT_CONTACT,
-                "photo": f"{appapi.API_ROOT}/owner/photo", "url": OWNER_CONTACT_URL}
-        try:
-            user = await bot.get_users(OWNER_ID)
-            name = get_user_display_name(user, default=None)
-            if name:
-                card["name"] = name
-            card["username"] = getattr(user, "username", None) or PAYMENT_CONTACT
-            card["first_name"] = getattr(user, "first_name", None)
-        except Exception as exc:
-            print(f"[APP] owner profile lookup failed: {type(exc).__name__}: {exc}", flush=True)
-        try:
-            photos = await bot.get_profile_photos(OWNER_ID, limit=1)
-            photo = photos[0] if photos else None
-            if photo is not None:
-                data = await bot.download_media(photo.file_id, in_memory=True)
-                raw = data.getvalue() if hasattr(data, "getvalue") else bytes(data)
-                if raw:
-                    self._owner_photo = raw
-                    card["has_photo"] = True
-        except Exception as exc:
-            print(f"[APP] owner photo lookup failed: {type(exc).__name__}: {exc}", flush=True)
-        if self._owner_photo:
-            card["has_photo"] = True
-        self._owner = card
-        OWNER_PROFILE_CACHE.update(card)
-        return card
-
-    async def owner(self) -> dict:
-        return await self.refresh_owner()
-
-    async def owner_photo(self):
-        if self._owner_photo is None:
-            await self.refresh_owner()
-        return self._owner_photo
-
-    # ── the APK the owner handed over with /apk ────────────────────────────
-    async def apk_file(self):
-        """``(path, file_name)`` of the APK, downloading it from Telegram once."""
-        info = await get_app_apk()
-        if not info or not info.get("file_id"):
-            return None
-        target = app_spool_dir() / APK_CACHE_NAME
-        if (self._apk_id != info["file_id"] or self._apk_path != target
-                or not target.exists() or target.stat().st_size == 0):
-            await bot.download_media(info["file_id"], file_name=str(target))
-            self._apk_id = info["file_id"]
-            self._apk_path = target
-        if not target.exists() or target.stat().st_size == 0:
-            return None
-        return (str(target), info.get("file_name") or "Vmore.apk")
-
-    # ── account snapshot ───────────────────────────────────────────────────
-    async def _account_payload(self, row) -> dict:
-        uid = int(row["user_id"])
-        user = await get_user(uid) or {}
-        config = await get_app_config()
-        apk = config.get("apk") or {}
-        premium = uid == OWNER_ID or bool(await is_premium(uid))
-        session = bool(user.get("session_string"))
-        base = config.get("base_url")
-        token = row.get("token")
-        return {
-            "account": {
-                "user_id": uid,
-                "name": user.get("name") or getattr(row, "get", lambda *_: None)("name"),
-                "username": user.get("username") or row.get("username"),
-                "premium": premium,
-                "private_access": premium or bool(await has_private_access(uid)),
-                "session": session,
-                "daily_downloads": int(user.get("daily_downloads", 0) or 0),
-                "free_limit": FREE_DAILY_LIMIT,
-                "token": token,
-                "token_created": row.get("created_at").isoformat() if row.get("created_at") else None,
-                "calls": int(row.get("calls", 0) or 0),
-                "device": row.get("device"),
-            },
-            "owner": self.owner_cached(),
-            "app": {
-                "name": ui.APP_NAME,
-                "version": apk.get("version") or ui.APP_VERSION,
-                "base_url": base,
-                "apk_available": bool(apk.get("file_id")),
-                "apk_url": f"{ui.app_base_url(base)}{appapi.API_ROOT}/app/apk" if base else None,
-                "login_url": f"{ui.app_base_url(base)}{appapi.API_ROOT}/token/{token}" if base else None,
-                "howto": ui.app_howto_text(base_url=base),
-            },
-            "server": {
-                "app_users": await count_app_users(),
-                "downloads": await count_app_activity(),
-                "time": utcnow().isoformat(),
-            },
-        }
-
-    async def account(self, row) -> dict:
-        return await self._account_payload(row)
-
-    # ── login ──────────────────────────────────────────────────────────────
-    async def login(self, row, *, device=None, version=None, ip=None) -> dict:
-        uid = int(row["user_id"])
-        first = await mark_app_token_login(row["token"], device=device,
-                                           app_version=version, ip=ip)
-        user = await get_user(uid) or {}
-        await register_app_user(uid, name=user.get("name"), username=user.get("username"),
-                                device=device, app_version=version, ip=ip)
-        if not first:
-            await increment_app_user_usage(uid, logins=1)
-        payload = await self._account_payload(row)
-        #: The DM the owner asked for: "login in app successful".
-        if first or not row.get("last_login_dm"):
-            try:
-                await bot.send_message(
-                    uid, ui_text(ui.app_login_dm_text(device=device, version=version)),
-                    reply_markup=ui.app_token_keyboard(active=True))
-                await db_touch_login_dm(row["token"])
-            except Exception as exc:
-                print(f"[APP] login DM failed for {uid}: {type(exc).__name__}: {exc}",
-                      flush=True)
-        print(f"[APP] login user={uid} device={device!r} version={version!r} first={first}",
-              flush=True)
-        return {"first_login": bool(first), **payload}
-
-    async def revoke(self, row) -> dict:
-        uid = int(row["user_id"])
-        await revoke_app_token(token=row["token"], reason="app")
-        try:
-            await bot.send_message(uid, ui_text(ui.app_revoked_dm_text()))
-        except Exception:
-            pass
-        return {"revoked": True, "token": row.get("token")}
-
-    # ── link resolution ────────────────────────────────────────────────────
-    async def resolve(self, row, link: str) -> dict:
-        uid = int(row["user_id"])
-        chat_target, msg_id, is_private = parse_link(link or "")
-        if chat_target is None:
-            return {"ok": False, "error": "Send a Telegram message link (t.me/...)."}
-        premium = uid == OWNER_ID or bool(await is_premium(uid))
-        user = await get_user(uid) or {}
-        session = bool(user.get("session_string"))
-        client = bot
-        if is_private:
-            client = await get_user_client(uid)
-            if client is None:
-                return {"ok": False, "type": "private", "error": ui.app_session_missing_text(),
-                        "needs_login": True, "delivery": ["app"]}
-        try:
-            msg = await client.get_messages(chat_target, msg_id)
-        except Exception as exc:
-            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-        if not msg or getattr(msg, "empty", False):
-            return {"ok": False, "error": "Message not found."}
-        media = msg.video or msg.document or msg.audio or msg.photo or msg.voice or msg.animation
-        chat = getattr(msg, "chat", None)
-        kind = media_type_guess(msg) if media is not None else ("text" if msg.text else "unknown")
-        size = int(getattr(media, "file_size", 0) or 0) if media is not None else 0
-        delivery = ["app"] if is_private else ["dm"]
-        if is_private and premium:
-            delivery.append("dm")
-        return {
-            "ok": True,
-            "type": "private" if is_private else "public",
-            "delivery": delivery,
-            "needs_login": bool(is_private and not session),
-            "premium": premium,
-            "chat": {"id": getattr(chat, "id", None), "title": getattr(chat, "title", None),
-                     "username": getattr(chat, "username", None)},
-            "message_id": int(getattr(msg, "id", msg_id) or msg_id),
-            "media": {
-                "kind": kind,
-                "file_name": getattr(media, "file_name", None) if media is not None else None,
-                "size": size,
-                "mime": getattr(media, "mime_type", None) if media is not None else None,
-                "duration": getattr(media, "duration", None) if media is not None else None,
-                "has_thumb": bool(getattr(media, "thumbs", None) or getattr(media, "thumbnail", None))
-                             if media is not None else False,
-            },
-            "caption": msg.caption or None,
-            "text": msg.text if (media is None and msg.text) else None,
-        }
-
-    # ── delivery into the DM (the public-link path) ────────────────────────
-    async def send_to_dm(self, row, link: str, *, caption=None) -> dict:
-        uid = int(row["user_id"])
-        chat_target, msg_id, is_private = parse_link(link or "")
-        if chat_target is None:
-            return {"ok": False, "error": "Send a Telegram message link (t.me/...)."}
-        premium = uid == OWNER_ID or bool(await is_premium(uid))
-        if is_private and not premium:
-            return {"ok": False, "needs_premium": True,
-                    "error": "Private links are unlimited in the app. Premium unlocks "
-                             "delivery in the DM."}
-        user = await get_user(uid) or {}
-        if is_private:
-            client = await get_user_client(uid)
-            if client is None:
-                return {"ok": False, "needs_login": True, "error": ui.app_session_missing_text()}
-        else:
-            client = bot
-        proxy = AppMessage(uid, user)
-        try:
-            status = await proxy.reply(ui_text("⏳ Fetching..."))
-        except Exception as exc:
-            return {"ok": False, "error": f"could not reach the chat: {exc}"}
-        try:
-            delivered = await fetch_and_send(proxy, status, client, chat_target, msg_id)
-        except Exception as exc:
-            print(f"[APP] delivery failed for {uid}: {type(exc).__name__}: {exc}", flush=True)
-            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-        if delivered:
-            await add_app_activity(uid, kind="send", link=link, status="done",
-                                   caption=caption)
-            await increment_app_user_usage(uid, sends=1)
-            return {"ok": True, "message": "Sent to your Telegram DM."}
-        return {"ok": False, "error": "The content could not be delivered."}
-
-    # ── the private download job ───────────────────────────────────────────
-    async def start_job(self, row, link: str, jobs) -> dict:
-        uid = int(row["user_id"])
-        chat_target, msg_id, is_private = parse_link(link or "")
-        if chat_target is None:
-            return {"ok": False, "error": "Send a Telegram message link (t.me/...)."}
-        client = await get_user_client(uid)
-        if client is None:
-            return {"ok": False, "needs_login": True, "error": ui.app_session_missing_text()}
-        try:
-            msg = await client.get_messages(chat_target, msg_id)
-        except Exception as exc:
-            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-        if not msg or getattr(msg, "empty", False):
-            return {"ok": False, "error": "Message not found."}
-        media = msg.video or msg.document or msg.audio or msg.photo or msg.voice or msg.animation
-        if media is None:
-            return {"ok": False, "error": "That message has no media to download."}
-        kind = media_type_guess(msg)
-        file_name = getattr(media, "file_name", None) or f"{ui.APP_NAME}_{msg_id}.{kind}"
-        job = appapi.Job(uid, link, kind=kind, file_name=file_name,
-                         size=int(getattr(media, "file_size", 0) or 0))
-        jobs.add(job)
-        job.task = spawn_background(job.run(client, msg))
-        await add_app_activity(uid, kind="download", link=link, status="started",
-                               file_name=file_name, size=job.total)
-        await increment_app_user_usage(uid, downloads=1)
-        return {"ok": True, "job": job.snapshot(),
-                "chat": {"id": getattr(getattr(msg, "chat", None), "id", None),
-                         "title": getattr(getattr(msg, "chat", None), "title", None)}}
-
-    # ── upload through the user's own session ──────────────────────────────
-    async def upload(self, row, path: str, *, kind="video", file_name=None, caption=None,
-                     thumbnail=None, link=None, duration=None, width=None, height=None,
-                     **_) -> dict:
-        uid = int(row["user_id"])
-        client = await get_user_client(uid)
-        if client is None:
-            return {"ok": False, "needs_login": True, "error": ui.app_session_missing_text()}
-        caption = caption or ""
-        if not BOT_USERNAME:
-            return {"ok": False, "error": "The bot has no username configured."}
-        try:
-            kind = (kind or "video").lower()
-            if kind == "video":
-                sent = await client.send_video(
-                    BOT_USERNAME, path, caption=caption,
-                    thumb=thumbnail, duration=int(float(duration or 0)),
-                    width=int(float(width or 0)), height=int(float(height or 0)),
-                    supports_streaming=True)
-            elif kind == "photo":
-                sent = await client.send_photo(BOT_USERNAME, path, caption=caption)
-            elif kind == "audio":
-                sent = await client.send_audio(BOT_USERNAME, path, caption=caption,
-                                               thumb=thumbnail,
-                                               duration=int(float(duration or 0)))
-            else:
-                sent = await client.send_document(BOT_USERNAME, path, caption=caption,
-                                                  file_name=file_name,
-                                                  thumb=thumbnail)
-        except Exception as exc:
-            print(f"[APP] upload failed for {uid}: {type(exc).__name__}: {exc}", flush=True)
-            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-        await add_download(uid, link or "app_upload", kind)
-        await add_app_activity(uid, kind="upload", link=link, status="done",
-                               file_name=file_name, caption=caption,
-                               detail=f"sent as {kind}")
-        await increment_app_user_usage(uid, uploads=1)
-        try:
-            await bot.send_message(
-                uid,
-                ui_text("✅ **Upload complete**\n\n"
-                        f"Your edited file is in this chat"
-                        + (f" (caption: `{caption}`)" if caption else "") +
-                        ". It was uploaded with **your own Telegram account**, so the "
-                        "bot did not spend a byte of bandwidth on it."))
-        except Exception:
-            pass
-        return {"ok": True, "message_id": int(getattr(sent, "id", 0) or 0), "kind": kind}
-
-    # ── zero-transfer upload: the file never crosses the phone again ──────
-    async def upload_reference(self, row, link: str, *, caption=None, thumbnail=None,
-                               file_name=None, kind=None, duration=None, width=None,
-                               height=None, **_) -> dict:
-        """Re-send an already-fetched message without the phone round-trip.
-
-        The app only ships the caption (and possibly a thumbnail).  Telegram's
-        own servers do the work first: ``copy_message`` — and a cached re-send
-        by ``file_id`` — finish **server-side**, so not a single byte of media
-        leaves this machine.  Only when every reference is refused (restricted
-        content) or a new thumbnail must be burned in do we pull the media
-        down here and push it straight back out through the user's session —
-        the phone, whose bill this is all about, still moves nothing.
-
-        ``needs_bytes`` in the failure payload tells the app to fall back to
-        the classic byte upload itself.
-        """
-        import uuid
-        from pathlib import Path
-
-        uid = int(row["user_id"])
-        chat_target, msg_id, is_private = parse_link(link or "")
-        if chat_target is None:
-            return {"ok": False, "needs_bytes": True,
-                    "error": "Send a Telegram message link (t.me/...)."}
-        client = bot
-        if is_private:
-            client = await get_user_client(uid)
-            if client is None:
-                return {"ok": False, "needs_login": True,
-                        "error": ui.app_session_missing_text()}
-        if not BOT_USERNAME:
-            return {"ok": False, "needs_bytes": True,
-                    "error": "The bot has no username configured."}
-        try:
-            msg = await client.get_messages(chat_target, msg_id)
-        except Exception as exc:
-            return {"ok": False, "needs_bytes": True,
-                    "error": f"{type(exc).__name__}: {exc}"}
-        if not msg or getattr(msg, "empty", False):
-            return {"ok": False, "needs_bytes": True, "error": "Message not found."}
-        media = (getattr(msg, "video", None) or getattr(msg, "document", None)
-                 or getattr(msg, "audio", None) or getattr(msg, "photo", None)
-                 or getattr(msg, "voice", None) or getattr(msg, "animation", None))
-        if media is None:
-            return {"ok": False, "needs_bytes": True,
-                    "error": "That message has no media to re-send."}
-        kind = kind or media_type_guess(msg)
-        file_name = (file_name or getattr(media, "file_name", None) or "Vmore.bin")
-        #: An empty caption from the app means "don't touch the words".
-        caption = caption if caption else (getattr(msg, "caption", None) or "")
-
-        sent = None
-        via = None
-        if thumbnail is None:
-            from_chat = getattr(getattr(msg, "chat", None), "id", None) or chat_target
-            #: Zero bytes: Telegram copies the media server-side — neither the
-            #: phone nor this server moves the media at all.
-            try:
-                sent = await client.copy_message(BOT_USERNAME, from_chat, msg.id,
-                                                 caption=caption)
-                via = "copy"
-            except Exception as exc:
-                print(f"[APP] copy re-send failed for {uid}: "
-                      f"{type(exc).__name__}: {exc}", flush=True)
-            if sent is None:
-                file_id = getattr(media, "file_id", None)
-                if file_id:
-                    try:
-                        sent = await client.send_cached_media(BOT_USERNAME, file_id,
-                                                              caption=caption)
-                        via = "reference"
-                    except Exception as exc:
-                        print(f"[APP] cached re-send failed for {uid}: "
-                              f"{type(exc).__name__}: {exc}", flush=True)
-        if sent is None:
-            #: Every reference was refused (restricted media, a new thumbnail
-            #: to attach…): pull the bytes down here once and push them back
-            #: out through the user's session.  The server sees the file
-            #: twice, the phone never again.
-            appapi.SPOOL_DIR.mkdir(parents=True, exist_ok=True)
-            suffix = Path(str(getattr(media, "file_name", "") or "")).suffix[:12] or ".bin"
-            staged = appapi.SPOOL_DIR / f"ref_{uuid.uuid4().hex[:16]}{suffix}"
-            try:
-                fetched = await client.download_media(msg, file_name=str(staged))
-                if not fetched:
-                    raise RuntimeError("download_media returned nothing")
-                payload = await self.upload(
-                    row, str(staged), kind=kind, file_name=file_name,
-                    caption=caption, thumbnail=thumbnail, link=link,
-                    duration=duration, width=width, height=height)
-                if payload.get("ok"):
-                    payload["via"] = "download"
-                return payload
-            except Exception as exc:
-                print(f"[APP] reference download failed for {uid}: "
-                      f"{type(exc).__name__}: {exc}", flush=True)
-                return {"ok": False, "needs_bytes": True,
-                        "error": f"{type(exc).__name__}: {exc}"}
-            finally:
-                staged.unlink(missing_ok=True)
-
-        await add_download(uid, link, kind)
-        await add_app_activity(uid, kind="upload", link=link, status="done",
-                               file_name=file_name, caption=caption,
-                               detail=f"re-sent ({via}, zero transfer)")
-        await increment_app_user_usage(uid, uploads=1)
-        try:
-            await bot.send_message(
-                uid,
-                ui_text("✅ **Upload complete**\n\n"
-                        "Your file was re-sent **without moving a single byte** — "
-                        "Telegram handled it on its own servers, so neither the "
-                        "bot nor your phone spent any data on it."))
-        except Exception:
-            pass
-        return {"ok": True, "message_id": int(getattr(sent, "id", 0) or 0),
-                "kind": kind, "via": via}
-
-    # ── history: the bot's downloads and the app's activity, in one list ───
-    async def history(self, row, *, limit: int = 50) -> dict:
-        uid = int(row["user_id"])
-        items = []
-        for entry in await get_history(uid, limit=limit):
-            date = entry.get("date")
-            items.append({
-                "source": "bot",
-                "kind": entry.get("type") or "download",
-                "link": entry.get("link"),
-                "status": "done",
-                "file_name": None,
-                "size": None,
-                "date": date.isoformat() if hasattr(date, "isoformat") else str(date or ""),
-            })
-        for entry in await get_app_activity(uid, limit=limit):
-            date = entry.get("date")
-            items.append({
-                "source": "app",
-                "kind": entry.get("kind") or "download",
-                "link": entry.get("link"),
-                "status": entry.get("status") or "done",
-                "file_name": entry.get("file_name"),
-                "size": entry.get("size"),
-                "caption": entry.get("caption"),
-                "detail": entry.get("detail"),
-                "date": date.isoformat() if hasattr(date, "isoformat") else str(date or ""),
-            })
-        items.sort(key=lambda item: item.get("date") or "", reverse=True)
-        return {"items": items[:limit], "count": len(items)}
-
-
-APP_BRIDGE = VmoreAppBridge()
-
-
-async def db_touch_login_dm(token):
-    """Remember when the "login in app successful" DM went out."""
-    await database.app_tokens_col.update_one(
-        {"_id": str(token).upper()}, {"$set": {"last_login_dm": utcnow()}})
-
-
-# --------------------------------------------------------------------------- #
-#  App screens — /app, /gentoken, /revoketoken, /apk, /appusers
-# --------------------------------------------------------------------------- #
-
-async def app_config_snapshot():
-    config = await get_app_config()
-    return config, (config.get("apk") or {})
-
-
-async def show_app(source, *, uid=None):
-    """The full app page behind the big button of /start."""
-    uid = uid or getattr(getattr(source, "from_user", None), "id", None)
-    config, apk = await app_config_snapshot()
-    token_row = await get_active_app_token(uid) if uid else None
-    user = await get_user(uid) or {}
-    premium = uid == OWNER_ID or bool(await is_premium(uid))
-    text = ui.app_details_text(
-        base_url=config.get("base_url"),
-        apk=apk,
-        premium=premium,
-        token=(token_row or {}).get("token"),
-        session=bool(user.get("session_string")),
-        app_users=await count_app_users(),
-    )
-    keyboard = ui.app_details_keyboard(base_url=config.get("base_url"),
-                                       has_apk=bool(apk.get("file_id")))
-    await render(source, text, keyboard)
-
-
-async def show_app_token(source, *, uid=None):
-    uid = uid or getattr(getattr(source, "from_user", None), "id", None)
-    config, _apk = await app_config_snapshot()
-    row = await get_active_app_token(uid)
-    user = await get_user(uid) if uid else {}
-    text = ui.app_token_text(user, row, base_url=config.get("base_url"))
-    await render(source, text, ui.app_token_keyboard(active=bool(row)))
-
-
-async def show_app_howto(source):
-    config, _apk = await app_config_snapshot()
-    await render(source, ui.app_howto_text(base_url=config.get("base_url")),
-                 ui.keyboard([[ui.button("📱 Vmore App", callback_data="cmd_app",
-                                         style="success")],
-                              [ui.home_button()]]))
-
-
-async def show_app_users(source, *, page: int = 0):
-    """Owner/admin: only the people who really logged in from the app."""
-    users = await list_app_users(limit=200)
-    tokens = await count_app_tokens(active_only=True)
-    await render(source, ui.app_users_text(users, tokens=tokens, total=len(users)),
-                 ui.app_users_keyboard())
-
-
-async def show_app_tokens(source):
-    rows = await list_app_tokens(limit=100)
-    await render(source, ui.app_users_tokens_text(rows, total=len(rows)),
-                 ui.keyboard([[ui.button("📱 App users", callback_data="appusers:refresh",
-                                         style="primary")],
-                              [ui.home_button()]]))
-
-
-@bot.on_message(filters.command("app") & filters.private)
-async def app_handler(client, message):
-    await ensure_user(message.from_user)
-    await show_app(message)
-
-
-@bot.on_message(filters.command("gentoken") & filters.private)
-async def gentoken_handler(client, message):
-    """/gentoken hands the account its access token, generating it once."""
-    user = message.from_user
-    await ensure_user(user)
-    row = await get_active_app_token(user.id)
-    if row is None:
-        await create_app_token(user.id, name=get_user_display_name(user, default=None),
-                               username=getattr(user, "username", None))
-    await show_app_token(message)
-
-
-@bot.on_message(filters.command("revoketoken") & filters.private)
-async def revoketoken_handler(client, message):
-    uid = message.from_user.id
-    row = await get_active_app_token(uid)
-    if not row:
-        await show_app_token(message)
-        return
-    await say(message, ui.app_token_revoke_confirm_text(),
-              reply_markup=ui.keyboard([
-                  [ui.button("🚫 Yes, revoke it", callback_data="app:revoke_yes",
-                             style="danger")],
-                  [ui.button("❌ Keep my token", callback_data="cmd_gentoken",
-                             style="success")],
-              ]))
-
-
-def extract_app_url(text: str) -> str | None:
-    match = re.search(r"https?://[^\s]+", text or "")
-    return match.group(0) if match else None
-
-
-def extract_app_version(text: str) -> str | None:
-    match = re.search(r"\bv?(\d+\.\d+(?:\.\d+)?)\b", text or "")
-    return match.group(1) if match else None
-
-
-@bot.on_message(filters.command("apk") & filters.private)
-async def apk_handler(client, message):
-    """The owner hands the built APK over — with the deployment URL as caption."""
-    uid = message.from_user.id
-    if uid != OWNER_ID:
-        await say(message, ui.apk_not_owner_text())
-        return
-    reply = getattr(message, "reply_to_message", None)
-    document = getattr(message, "document", None) or getattr(reply, "document", None)
-    text = " ".join(filter(None, [message.text or "", message.caption or ""]))
-    url = extract_app_url(text)
-    version = extract_app_version(text.replace(url or "", " "))
-    if document is not None:
-        name = (document.file_name or "").lower()
-        mime = (document.mime_type or "").lower()
-        if not (name.endswith(".apk") or mime == "application/vnd.android.package-archive"):
-            await say(message, ui.apk_bad_file_text())
-            return
-        apk = await set_app_apk(file_id=document.file_id, file_name=document.file_name,
-                                size=document.file_size, base_url=url, version=version,
-                                uploaded_by=uid)
-        config = await get_app_config()
-        await say(message, ui.apk_saved_text(apk, base_url=config.get("base_url")))
-        return
-    if url:
-        await set_app_base_url(url, version=version)
-        config, apk = await app_config_snapshot()
-        await say(message, ui.apk_saved_text(apk or {"file_name": None},
-                                             base_url=config.get("base_url")))
-        return
-    config, apk = await app_config_snapshot()
-    await say(message, ui.apk_status_text(apk, base_url=config.get("base_url")))
-
-
-@bot.on_message(filters.command("appusers") & filters.private)
-async def appusers_handler(client, message):
-    if message.from_user.id != OWNER_ID and not await is_admin(message.from_user.id):
-        await say(message, "🚫 Admin access only.")
-        return
-    await show_app_users(message)
-
-
-@callback_action("cmd_app")
-async def cb_app(client, query):
-    await query.answer()
-    await show_app(query)
-
-
-@callback_action("cmd_gentoken")
-async def cb_gentoken(client, query):
-    await query.answer()
-    await show_app_token(query)
-
-
-@callback_action("app:howto")
-async def cb_app_howto(client, query):
-    await query.answer()
-    await show_app_howto(query)
-
-
-@callback_action("app:apk")
-async def cb_app_apk(client, query):
-    """Send the APK itself when the deployment URL is not published yet."""
-    config, apk = await app_config_snapshot()
-    if not apk.get("file_id"):
-        await query.answer(ui_text(ui.app_missing_text()[:190]), show_alert=True)
-        return
-    await query.answer(ui_text("Sending the app…"))
-    try:
-        await bot.send_document(query.from_user.id, apk["file_id"],
-                                file_name=apk.get("file_name") or "Vmore.apk",
-                                caption=ui_text(ui.app_details_text(
-                                    base_url=config.get("base_url"), apk=apk,
-                                    token=(await get_active_app_token(query.from_user.id) or {}).get("token"))[:1000]))
-    except Exception as exc:
-        await query.answer(ui_text(f"⚠️ Could not send the file: {exc}")[:190],
-                           show_alert=True)
-
-
-@callback_action("app:newtoken")
-async def cb_app_new_token(client, query):
-    row = await get_active_app_token(query.from_user.id)
-    if row:
-        await query.answer()
-        await render(query, ui.app_token_confirm_text(), ui.keyboard([
-            [ui.button("🔄 Yes, regenerate", callback_data="app:newtoken_yes",
-                       style="success")],
-            [ui.button("❌ Cancel", callback_data="cancel_action", style="danger")],
-        ]))
-        return
-    await query.answer()
-    await _generate_app_token(query)
-
-
-@callback_action("app:newtoken_yes")
-async def cb_app_new_token_yes(client, query):
-    await _generate_app_token(query)
-
-
-async def _generate_app_token(source):
-    user = source.from_user
-    await ensure_user(user)
-    row = await create_app_token(user.id, name=get_user_display_name(user, default=None),
-                                 username=getattr(user, "username", None),
-                                 regenerate=True)
-    config, _apk = await app_config_snapshot()
-    token = (row or {}).get("token") or "—"
-    if is_callback(source):
-        await render(source, ui.app_token_created_text(token, base_url=config.get("base_url")),
-                     ui.app_token_keyboard(active=True))
-    else:
-        await say(source, ui.app_token_created_text(token, base_url=config.get("base_url")),
-                  reply_markup=ui.app_token_keyboard(active=True))
-
-
-@callback_action("app:revoke")
-async def cb_app_revoke(client, query):
-    await query.answer()
-    await render(query, ui.app_token_revoke_confirm_text(), ui.keyboard([
-        [ui.button("🚫 Yes, revoke it", callback_data="app:revoke_yes", style="danger")],
-        [ui.button("❌ Cancel", callback_data="cancel_action", style="success")],
-    ]))
-
-
-@callback_action("app:revoke_yes")
-async def cb_app_revoke_yes(client, query):
-    uid = query.from_user.id
-    row = await get_active_app_token(uid)
-    if not row:
-        await query.answer(ui_text("You have no active token."), show_alert=True)
-        return
-    await revoke_app_token(token=row["token"], reason="bot")
-    await query.answer(ui_text("🚫 Token revoked."))
-    await render(query, ui.app_token_revoked_text(),
-                 ui.keyboard([[ui.button("🔑 Generate a new token", callback_data="cmd_gentoken",
-                                         style="success")],
-                              [ui.home_button()]]))
-
-
-@callback_action("appusers:refresh")
-async def cb_appusers_refresh(client, query):
-    if query.from_user.id != OWNER_ID and not await is_admin(query.from_user.id):
-        await query.answer(ui_text("🚫 Admin access only."), show_alert=True)
-        return
-    await query.answer()
-    await show_app_users(query)
-
-
-@callback_action("appusers:tokens")
-async def cb_appusers_tokens(client, query):
-    if query.from_user.id != OWNER_ID and not await is_admin(query.from_user.id):
-        await query.answer(ui_text("🚫 Admin access only."), show_alert=True)
-        return
-    await query.answer()
-    await show_app_tokens(query)
-
-
 #: Handlers defined after COMMAND_HANDLERS — registered here, exactly once.
 COMMAND_HANDLERS.update({
     "superbroadcast": superbroadcast_handler,
-    "app": app_handler,
-    "gentoken": gentoken_handler,
-    "revoketoken": revoketoken_handler,
-    "appusers": appusers_handler,
-    "apk": apk_handler,
 })
-ADMIN_INLINE_HANDLERS.update({"appusers": appusers_handler, "apk": apk_handler})
-#: Recompute the channel split now that every handler exists (the app commands
-#: and /superbroadcast are registered above, after the literals were built).
+#: Recompute the channel split now that every handler exists (/superbroadcast is
+#: registered above, after the literals were built).
 CHANNEL_BLOCKED_COMMANDS = frozenset(COMMAND_HANDLERS) - CHANNEL_ALLOWED_COMMANDS
 
 
@@ -10579,11 +9748,7 @@ def home():
 @web.route("/health")
 def health():
     """Render's health probe — deliberately tiny and never blocking."""
-    return {"ok": True, "app": ui.APP_NAME, "api": appapi.API_ROOT}, 200
-
-
-#: The Vmore app API lives on this very web service.
-appapi.register(web, APP_BRIDGE)
+    return {"ok": True, "app": ui.APP_NAME}, 200
 
 
 def run_web():

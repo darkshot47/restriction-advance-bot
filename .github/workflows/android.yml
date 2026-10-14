@@ -2,8 +2,11 @@ name: android
 
 # Builds the Vmore app, packs the APK into a zip and publishes it twice:
 #   • as a workflow artifact (every build), and
-#   • as a GitHub Release asset — the stable link the bot's "Unlimited Download"
-#     button points at (the owner copies that link into /apk's caption).
+#   • as a GitHub Release asset — the stable download link users install from.
+#
+# The app is fully standalone: it signs in with the phone's own Telegram account
+# and talks to Telegram directly (TDLib), so no server address, token or api
+# credential is baked into the build.
 #
 # The zip is what the owner asked for: "build the app and extract the APK from a
 # zip file".  Both files are verified (unzip -t + aapt2 badging) before release.
@@ -21,10 +24,6 @@ on:
       - ".github/workflows/android.yml"
   workflow_dispatch:
     inputs:
-      base_url:
-        description: "Server address baked into the app as the starting value (optional)"
-        required: false
-        default: ""
       release_tag:
         description: "Release tag to publish (default: vmore-latest)"
         required: false
@@ -126,26 +125,6 @@ jobs:
           #: installs this exact Gradle — the version AGP 8.5 wants.
           gradle-version: "8.7"
 
-      - name: Point the app at the owner's server (optional)
-        if: ${{ inputs.base_url != '' }}
-        working-directory: android
-        run: |
-          #: The address stays editable in the app; this only pre-fills it so a
-          #: fresh install already knows the deployment.
-          python3 - "${{ inputs.base_url }}" <<'PY'
-          import pathlib, sys
-          url = sys.argv[1].strip().rstrip("/")
-          if not url.startswith(("http://", "https://")):
-              url = "https://" + url
-          path = pathlib.Path("app/src/main/res/values/strings.xml")
-          text = path.read_text(encoding="utf-8")
-          start = text.index('<string name="default_base_url"')
-          end = text.index("</string>", start) + len("</string>")
-          text = text[:start] + f'<string name="default_base_url" translatable="false">{url}</string>' + text[end:]
-          path.write_text(text, encoding="utf-8")
-          print("baked base url:", url)
-          PY
-
       - name: Build the debug APK (and run its unit tests)
         working-directory: android
         run: |
@@ -230,10 +209,14 @@ jobs:
           **Install**
           1. Download `Vmore.apk` (or `Vmore-apk.zip` and unzip it).
           2. Open it on the phone and allow "Install unknown apps" once.
-          3. Enter the server address and your access token (send /gentoken to the bot).
+          3. Paste the api_id and api_hash of your own Telegram application
+             (my.telegram.org), then sign in with your phone number and the code.
 
-          The bot's **♾️ Unlimited Download (App)** button points at this release,
-          and the file is replaced with every build — so the link never rots.
+          Everything runs on the phone: links are downloaded and uploaded with
+          your own Telegram account, and the local copy is deleted right after a
+          successful upload.
+
+          The file is replaced with every build, so this link never rots.
           NOTES
             #: Deleting and recreating the release would briefly break the stable
             #: link (and race the tag); replacing the assets in place cannot.

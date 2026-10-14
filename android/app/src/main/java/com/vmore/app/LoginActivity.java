@@ -2,222 +2,292 @@ package com.vmore.app;
 
 import android.app.Activity;
 import android.content.Intent;
-import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
-import android.graphics.Canvas;
-import android.graphics.Color;
-import android.graphics.Paint;
-import android.graphics.RectF;
-import android.graphics.drawable.BitmapDrawable;
 import android.net.Uri;
 import android.os.Bundle;
 import android.text.InputType;
-import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
-import android.widget.ImageView;
-import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.TextView;
-import android.widget.Toast;
-
-import org.json.JSONObject;
-
-import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * The first screen: **server address + access token** — that is the whole login.
+ * The first screen — and the only login Vmore has.
  *
- * The owner's profile picture sits in the top-right corner (tap it to open
- * {@code @XyrDeveloper}), exactly as the bot promises.
+ * There is no server address and no access token any more. The user signs into
+ * their own Telegram account: once the app credentials are stored (my.telegram.org),
+ * the phone number, the code Telegram sends and — when the account has it — the
+ * two-step password bring the session up. TDLib keeps that session on the phone,
+ * so reopening the app lands straight on the home screen.
  */
-public class LoginActivity extends Activity {
+public class LoginActivity extends Activity implements Tg.Listener {
 
-    private EditText baseField;
-    private EditText tokenField;
-    private Button loginButton;
-    private View progress;
-    private ImageView ownerPhoto;
+    private TextView stepTitle;
+    private TextView stepHelp;
+    private EditText apiIdField;
+    private EditText apiHashField;
+    private EditText phoneField;
+    private EditText codeField;
+    private EditText passwordField;
+    private Button primaryButton;
+    private Button linkButton;
+    private ProgressBar progress;
+    private View brand;
+    private String state = Tg.STATE_CREDENTIALS;
+    private String lastDetail = "";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        Skin.prepare(this);
         setContentView(R.layout.activity_login);
 
-        baseField = findViewById(R.id.baseField);
-        tokenField = findViewById(R.id.tokenField);
-        loginButton = findViewById(R.id.loginButton);
+        stepTitle = findViewById(R.id.stepTitle);
+        stepHelp = findViewById(R.id.stepHelp);
+        apiIdField = findViewById(R.id.apiIdField);
+        apiHashField = findViewById(R.id.apiHashField);
+        phoneField = findViewById(R.id.phoneField);
+        codeField = findViewById(R.id.codeField);
+        passwordField = findViewById(R.id.passwordField);
+        primaryButton = findViewById(R.id.primaryButton);
+        linkButton = findViewById(R.id.linkButton);
         progress = findViewById(R.id.loginProgress);
-        ownerPhoto = findViewById(R.id.ownerPhoto);
+        brand = findViewById(R.id.brandBox);
 
-        baseField.setText(Prefs.baseUrl(this));
-        tokenField.setText(Prefs.token(this));
-        //: The bot prints the whole login link; if that is what was pasted, keep
-        //: the token and drop the rest (normalizeBase does the dropping).
-        String pastedToken = Api.tokenFromUrl(baseField.getText().toString());
-        if (!pastedToken.isEmpty() && tokenField.getText().toString().trim().isEmpty()) {
-            tokenField.setText(pastedToken);
-        }
+        TextView version = findViewById(R.id.versionText);
+        version.setText(getString(R.string.settings_version) + " " + Vmore.VERSION);
 
-        findViewById(R.id.ownerCard).setOnClickListener(v -> Blogger.openOwner(this));
-        findViewById(R.id.howToLogin).setOnClickListener(v ->
-                startActivity(new Intent(this, HowToActivity.class)));
-        loginButton.setOnClickListener(v -> attemptLogin());
+        apiIdField.setText(Prefs.apiId(this) == 0 ? "" : String.valueOf(Prefs.apiId(this)));
+        apiHashField.setText(Prefs.apiHash(this));
 
-        Blogger.loadOwner(this, ownerPhoto, findViewById(R.id.ownerName));
-        //: The server address is the one piece of setup we can help with: fill in
-        //: whatever the bot last published, when the phone has nothing stored.
-        if (baseField.getText().toString().trim().isEmpty()) {
-            Discover.fillKnownBase(this, baseField, progress);
-        }
-    }
-
-    private void attemptLogin() {
-        final String base = Api.normalizeBase(baseField.getText().toString());
-        final String token = tokenField.getText().toString().trim().toUpperCase();
-        if (base.isEmpty()) {
-            toast(getString(R.string.error_base_required));
-            return;
-        }
-        if (token.isEmpty()) {
-            toast(getString(R.string.error_token_required));
-            return;
-        }
-        setBusy(true);
-        final AtomicBoolean finished = new AtomicBoolean(false);
-        Api.get(Api.tokenUrl(base, token), result -> {
-            if (result.ok) {
-                Prefs.setBaseUrl(this, base);
-                Prefs.setToken(this, token);
-                JSONObject account = result.optJson("account");
-                String name = account == null ? "" : account.optString("name", "");
-                long userId = account == null ? 0L : account.optLong("user_id", 0L);
-                Prefs.saveAccount(this, name, userId);
-                //: Tell the bot "login in app successful" (it DMs the user once).
-                Api.post(Api.tokenUrl(base, token) + "/login", Blogger.loginBody(this), loginResult -> {
-                    setBusy(false);
-                    if (finished.getAndSet(true)) {
-                        return;
-                    }
-                    toast(loginResult.ok
-                            ? getString(R.string.login_ok)
-                            : getString(R.string.login_ok_offline));
-                    startActivity(new Intent(this, MainActivity.class));
-                    finish();
-                });
-            } else {
-                setBusy(false);
-                toast(result.error == null ? getString(R.string.login_failed) : result.error);
+        primaryButton.setOnClickListener(v -> act());
+        linkButton.setOnClickListener(v -> {
+            try {
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(Vmore.CREDENTIALS_URL)));
+            } catch (Exception exc) {
+                Ui.toast(this, Vmore.CREDENTIALS_URL);
             }
         });
+        Anim.pressible(primaryButton);
+        Anim.pressible(linkButton);
+        Anim.pageIn(brand);
     }
 
-    private void setBusy(boolean busy) {
-        progress.setVisibility(busy ? View.VISIBLE : View.GONE);
-        loginButton.setEnabled(!busy);
+    @Override
+    protected void onResume() {
+        super.onResume();
+        Tg.get(this).start(this);
     }
 
-    private void toast(String text) {
-        Toast.makeText(this, text, Toast.LENGTH_LONG).show();
-    }
-}
-
-/**
- * Shared helpers for the app's little "chrome": the owner card, the version line
- * and the pieces every screen shows in its header.
- */
-final class Blogger {
-
-    private Blogger() {
+    @Override
+    protected void onPause() {
+        Tg.get(this).stopListening();
+        super.onPause();
     }
 
-    static void openOwner(Activity activity) {
-        String username = Prefs.ownerUsername(activity);
+    @Override
+    public void onState(String newState, String detail) {
+        state = newState;
+        lastDetail = detail == null ? "" : detail;
+        switch (newState) {
+            case Tg.STATE_NONE:
+                showMessage(getString(R.string.login_no_engine));
+                break;
+            case Tg.STATE_CREDENTIALS:
+                showCredentials();
+                break;
+            case Tg.STATE_PARAMETERS:
+                showMessage(getString(R.string.login_working));
+                break;
+            case Tg.STATE_PHONE:
+                showPhone();
+                break;
+            case Tg.STATE_CODE:
+                showCode();
+                break;
+            case Tg.STATE_PASSWORD:
+                showPassword();
+                break;
+            case Tg.STATE_READY:
+                onSignedIn();
+                break;
+            case Tg.STATE_ERROR:
+                showError(detail);
+                break;
+            default:
+                showMessage(getString(R.string.login_working));
+                break;
+        }
+    }
+
+    // ------------------------------------------------------------ the steps //
+
+    private void showCredentials() {
+        stepTitle.setText(R.string.login_step_credentials);
+        stepHelp.setText(R.string.login_credentials_help);
+        visible(apiIdField, apiHashField);
+        primaryButton.setText(R.string.login_continue);
+        linkButton.setText(R.string.login_open_my_telegram);
+        linkButton.setVisibility(View.VISIBLE);
+        progress.setVisibility(View.GONE);
+        primaryButton.setEnabled(true);
+        Anim.fadeIn(apiIdField, 220);
+        Anim.fadeIn(apiHashField, 260);
+    }
+
+    private void showPhone() {
+        stepTitle.setText(R.string.login_step_phone);
+        stepHelp.setText(R.string.login_phone_help);
+        phoneField.setText(Prefs.phone(this));
+        phoneField.setInputType(InputType.TYPE_CLASS_PHONE);
+        visible(phoneField);
+        primaryButton.setText(R.string.login_continue);
+        linkButton.setVisibility(View.GONE);
+        progress.setVisibility(View.GONE);
+        primaryButton.setEnabled(true);
+        Anim.fadeIn(phoneField, 220);
+    }
+
+    private void showCode() {
+        stepTitle.setText(R.string.login_step_code);
+        stepHelp.setText(R.string.login_code_help);
+        codeField.setText("");
+        codeField.setInputType(InputType.TYPE_CLASS_NUMBER);
+        visible(codeField);
+        primaryButton.setText(R.string.login_continue);
+        linkButton.setVisibility(View.GONE);
+        progress.setVisibility(View.GONE);
+        primaryButton.setEnabled(true);
+        Anim.fadeIn(codeField, 220);
+    }
+
+    private void showPassword() {
+        stepTitle.setText(R.string.login_step_password);
+        stepHelp.setText(lastDetail.isEmpty()
+                ? getString(R.string.login_password_help)
+                : getString(R.string.login_password_help) + " (hint: " + lastDetail + ")");
+        passwordField.setText("");
+        passwordField.setInputType(InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        visible(passwordField);
+        primaryButton.setText(R.string.login_continue);
+        linkButton.setVisibility(View.GONE);
+        progress.setVisibility(View.GONE);
+        primaryButton.setEnabled(true);
+        Anim.fadeIn(passwordField, 220);
+    }
+
+    private void showMessage(String message) {
+        stepTitle.setText(R.string.login_working);
+        stepHelp.setText(message);
+        hide(apiIdField, apiHashField, phoneField, codeField, passwordField);
+        primaryButton.setText(R.string.login_continue);
+        primaryButton.setEnabled(false);
+        linkButton.setVisibility(View.GONE);
+        progress.setVisibility(View.VISIBLE);
+    }
+
+    private void showError(String detail) {
+        stepTitle.setText(R.string.login_working);
+        stepHelp.setText(detail == null || detail.isEmpty()
+                ? getString(R.string.common_failed) : detail);
+        progress.setVisibility(View.GONE);
+        primaryButton.setEnabled(true);
+        //: Re-show the field that matches the state Telegram is waiting in.
+        switch (state) {
+            case Tg.STATE_CODE:
+                visible(codeField);
+                break;
+            case Tg.STATE_PASSWORD:
+                visible(passwordField);
+                break;
+            case Tg.STATE_CREDENTIALS:
+                visible(apiIdField, apiHashField);
+                linkButton.setVisibility(View.VISIBLE);
+                break;
+            default:
+                visible(phoneField);
+                break;
+        }
+    }
+
+    private void onSignedIn() {
+        stepTitle.setText(R.string.login_done);
+        stepHelp.setText(Prefs.accountName(this));
+        progress.setVisibility(View.GONE);
+        primaryButton.setEnabled(false);
+        startActivity(new Intent(this, MainActivity.class));
+        finish();
+    }
+
+    // -------------------------------------------------------------- actions //
+
+    private void act() {
+        if (Tg.STATE_CREDENTIALS.equals(state)) {
+            saveCredentials();
+            return;
+        }
+        if (Tg.STATE_PHONE.equals(state)) {
+            String phone = phoneField.getText().toString().trim();
+            if (phone.length() < 6) {
+                phoneField.setError("enter your number with the country code");
+                return;
+            }
+            showMessage(getString(R.string.login_working));
+            Tg.get(this).submitPhone(phone);
+            return;
+        }
+        if (Tg.STATE_CODE.equals(state)) {
+            String code = codeField.getText().toString().trim();
+            if (code.isEmpty()) {
+                codeField.setError("type the code Telegram sent");
+                return;
+            }
+            showMessage(getString(R.string.login_working));
+            Tg.get(this).submitCode(code);
+            return;
+        }
+        if (Tg.STATE_PASSWORD.equals(state)) {
+            String password = passwordField.getText().toString();
+            if (password.isEmpty()) {
+                passwordField.setError("type your two-step password");
+                return;
+            }
+            showMessage(getString(R.string.login_working));
+            Tg.get(this).submitPassword(password);
+        }
+    }
+
+    private void saveCredentials() {
+        String idText = apiIdField.getText().toString().trim();
+        String hash = apiHashField.getText().toString().trim();
+        int apiId;
         try {
-            activity.startActivity(new Intent(Intent.ACTION_VIEW,
-                    Uri.parse("https://t.me/" + username)));
+            apiId = Integer.parseInt(idText);
         } catch (Exception exc) {
-            Toast.makeText(activity, "https://t.me/" + username, Toast.LENGTH_LONG).show();
-        }
-    }
-
-    static JSONObject loginBody(Activity activity) {
-        JSONObject body = new JSONObject();
-        try {
-            body.put("device", android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL);
-            body.put("app_version", Api.VERSION);
-        } catch (Exception ignored) {
-        }
-        return body;
-    }
-
-    /** Load the owner's name + picture into the header (cached per launch). */
-    static void loadOwner(Activity activity, ImageView photo, TextView nameView) {
-        if (nameView != null) {
-            //: The corner chip shows the owner's display name, never the raw
-            //: username — the profile picture sits right next to it.
-            String cachedName = Prefs.ownerName(activity);
-            nameView.setText(cachedName == null || cachedName.isEmpty()
-                    ? "Owner" : cachedName);
-        }
-        String base = Prefs.baseUrl(activity);
-        if (photo == null || base.isEmpty()) {
+            apiIdField.setError("api_id is a number");
             return;
         }
-        Api.get(Api.normalizeBase(base) + Api.API + "/owner", result -> {
-            if (result.ok && nameView != null) {
-                JSONObject owner = result.optJson("owner");
-                if (owner != null) {
-                    String username = owner.optString("username", Prefs.ownerUsername(activity));
-                    String display = owner.optString("name", "").trim();
-                    if (display.isEmpty()) {
-                        display = username;
-                    }
-                    Prefs.setOwner(activity, username, display);
-                    nameView.setText(display);
-                }
-            }
-        });
-        //: The picture is a normal HTTP GET — the app ships no image library.
-        new Thread(() -> {
-            byte[] data = Api.bytes(Api.normalizeBase(base) + Api.API + "/owner/photo");
-            if (data != null && data.length > 0) {
-                Bitmap bitmap = BitmapFactory.decodeByteArray(data, 0, data.length);
-                if (bitmap != null) {
-                    Bitmap round = circle(bitmap);
-                    photo.post(() -> photo.setImageDrawable(
-                            new BitmapDrawable(activity.getResources(), round)));
-                }
-            }
-        }).start();
+        if (apiId <= 0 || hash.length() < 8) {
+            apiHashField.setError("paste the api_hash from my.telegram.org");
+            return;
+        }
+        Prefs.saveCredentials(this, apiId, hash);
+        showMessage(getString(R.string.login_working));
+        Tg.get(this).restartWithCredentials();
     }
 
-    static Bitmap circle(Bitmap source) {
-        int size = Math.min(source.getWidth(), source.getHeight());
-        Bitmap output = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
-        Canvas canvas = new Canvas(output);
-        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        RectF rect = new RectF(0, 0, size, size);
-        canvas.drawARGB(0, 0, 0, 0);
-        paint.setColor(Color.WHITE);
-        canvas.drawOval(rect, paint);
-        paint.setXfermode(new android.graphics.PorterDuffXfermode(android.graphics.PorterDuff.Mode.SRC_IN));
-        int left = (source.getWidth() - size) / 2;
-        int top = (source.getHeight() - size) / 2;
-        canvas.drawBitmap(source, -left, -top, paint);
-        return output;
+    // -------------------------------------------------------------- helpers //
+
+    private void visible(View... views) {
+        for (View view : views) {
+            view.setVisibility(View.VISIBLE);
+        }
     }
 
-    /** A simple labelled field row used by the editor and the settings sheet. */
-    static LinearLayout row(Activity activity, String label, View field) {
-        LinearLayout box = new LinearLayout(activity);
-        box.setOrientation(LinearLayout.VERTICAL);
-        TextView text = new TextView(activity);
-        text.setText(label);
-        text.setTextColor(activity.getColor(R.color.vmore_text_dim));
-        text.setTextSize(12f);
-        box.addView(text);
-        box.addView(field);
-        return box;
+    private void hide(View... views) {
+        for (View view : views) {
+            view.setVisibility(View.GONE);
+        }
     }
 }

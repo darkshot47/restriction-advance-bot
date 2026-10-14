@@ -2,160 +2,152 @@
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/vmore_bg"
+    android:background="@color/vmore_black"
     android:fillViewport="true">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="18dp">
-
-        <!-- Owner card, top-right corner: tap opens @XyrDeveloper -->
-        <LinearLayout
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="end"
-            android:background="@drawable/bg_chip"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:paddingStart="8dp"
-            android:paddingEnd="12dp"
-            android:paddingTop="6dp"
-            android:paddingBottom="6dp"
-            android:id="@+id/ownerCard">
-
-            <ImageView
-                android:id="@+id/ownerPhoto"
-                android:layout_width="40dp"
-                android:layout_height="40dp"
-                android:contentDescription="@string/app_name"
-                android:padding="4dp"
-                android:src="@drawable/ic_owner" />
-
-            <LinearLayout
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="6dp"
-                android:orientation="vertical">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Owner"
-                    android:textColor="@color/vmore_text_dim"
-                    android:textSize="10sp" />
-
-                <TextView
-                    android:id="@+id/ownerName"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="@string/app_name"
-                    android:textColor="@color/vmore_text"
-                    android:textSize="14sp"
-                    android:textStyle="bold" />
-            </LinearLayout>
-        </LinearLayout>
-
-        <ImageView
-            android:layout_width="72dp"
-            android:layout_height="72dp"
-            android:layout_marginTop="14dp"
-            android:contentDescription="@string/app_name"
-            android:src="@drawable/ic_vmore" />
-
-        <TextView
-            style="@style/VmoreTitle"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:text="Vmore" />
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Unlimited download app — private links download with your own Telegram data."
-            android:textColor="@color/vmore_text_dim"
-            android:textSize="13sp" />
+        android:paddingLeft="22dp"
+        android:paddingRight="22dp"
+        android:paddingTop="48dp"
+        android:paddingBottom="28dp">
 
         <LinearLayout
-            style="@style/VmoreCard"
+            android:id="@+id/brandBox"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="20dp"
             android:orientation="vertical">
 
-            <TextView style="@style/VmoreLabel"
-                android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:text="Server address" />
-
-            <EditText
-                android:id="@+id/baseField"
-                style="@style/VmoreField"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:hint="https://your-app.onrender.com"
-                android:importantForAutofill="no"
-                android:inputType="textUri"
-                android:singleLine="true" />
-
-            <TextView style="@style/VmoreLabel"
-                android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:text="Access token (from /gentoken)" />
-
-            <EditText
-                android:id="@+id/tokenField"
-                style="@style/VmoreField"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:digits="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz23456789"
-                android:hint="HPSEG9"
-                android:importantForAutofill="no"
-                android:inputType="textCapCharacters"
-                android:maxLength="8"
-                android:singleLine="true" />
+            <ImageView
+                android:layout_width="46dp"
+                android:layout_height="46dp"
+                android:src="@drawable/ic_vmore"
+                android:contentDescription="@string/app_name" />
 
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                android:text="🔐 The token is your whole login — no phone number, no OTP. It is valid for 30 days."
-                android:textColor="@color/vmore_text_dim"
-                android:textSize="12sp" />
+                android:layout_marginTop="14dp"
+                style="@style/VmoreTitle"
+                android:textSize="30sp"
+                android:text="@string/login_title" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                style="@style/VmoreSubtitle"
+                android:text="@string/login_tagline" />
         </LinearLayout>
 
-        <ProgressBar
-            android:id="@+id/loginProgress"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center"
-            android:visibility="gone" />
-
-        <Button
-            android:id="@+id/loginButton"
-            style="@style/VmoreButtonAccent"
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:drawableStart="@drawable/ic_token"
-            android:drawablePadding="10dp"
-            android:text="Log in" />
+            android:orientation="vertical"
+            android:layout_marginTop="34dp"
+            android:background="@drawable/bg_card"
+            android:padding="18dp">
 
-        <Button
-            android:id="@+id/howToLogin"
-            style="@style/VmoreButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:drawableStart="@drawable/ic_help"
-            android:drawablePadding="10dp"
-            android:text="How to use?" />
+            <TextView
+                android:id="@+id/stepTitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                style="@style/VmoreTitle"
+                android:textSize="18sp"
+                android:text="@string/login_step_credentials" />
+
+            <TextView
+                android:id="@+id/stepHelp"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                style="@style/VmoreSubtitle"
+                android:text="@string/login_credentials_help" />
+
+            <EditText
+                android:id="@+id/apiIdField"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                style="@style/VmoreField"
+                android:inputType="number"
+                android:hint="@string/login_step_credentials"
+                android:visibility="gone" />
+
+            <EditText
+                android:id="@+id/apiHashField"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                style="@style/VmoreField"
+                android:inputType="text"
+                android:hint="api_hash"
+                android:visibility="gone" />
+
+            <EditText
+                android:id="@+id/phoneField"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                style="@style/VmoreField"
+                android:inputType="phone"
+                android:hint="+91 90000 00000"
+                android:visibility="gone" />
+
+            <EditText
+                android:id="@+id/codeField"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                style="@style/VmoreField"
+                android:inputType="number"
+                android:hint="12345"
+                android:visibility="gone" />
+
+            <EditText
+                android:id="@+id/passwordField"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                style="@style/VmoreField"
+                android:inputType="textPassword"
+                android:hint="@string/login_step_password"
+                android:visibility="gone" />
+
+            <ProgressBar
+                android:id="@+id/loginProgress"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_horizontal"
+                android:layout_marginTop="18dp"
+                android:visibility="gone" />
+
+            <Button
+                android:id="@+id/primaryButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="18dp"
+                style="@style/VmoreButton"
+                android:text="@string/login_continue" />
+
+            <Button
+                android:id="@+id/linkButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                style="@style/VmoreButtonGhost"
+                android:text="@string/login_open_my_telegram" />
+        </LinearLayout>
 
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="18dp"
-            android:text="Get a token: send /gentoken to the bot. Private downloads then use your own Telegram session — run /login in the bot once for that."
-            android:textColor="@color/vmore_text_dim"
-            android:textSize="12sp" />
+            android:layout_marginTop="22dp"
+            style="@style/VmoreSubtitle"
+            android:textSize="12sp"
+            android:text="Your session stays on this phone. Vmore sends nothing to any server." />
+
+        <TextView
+            android:id="@+id/versionText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            style="@style/VmoreLabel" />
     </LinearLayout>
 </ScrollView>

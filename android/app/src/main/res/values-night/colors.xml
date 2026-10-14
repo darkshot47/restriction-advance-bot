@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The NIGHT skin: the same names as values/colors.xml, filled in with the dark
+  side of the three-colour palette — black surfaces, white text, the same blue.
+-->
+<resources>
+    <color name="vmore_bg">#000000</color>
+    <color name="vmore_surface">#14FFFFFF</color>
+    <color name="vmore_surface_alt">#1FFFFFFF</color>
+    <color name="vmore_stroke">#33FFFFFF</color>
+    <color name="vmore_stroke_soft">#24FFFFFF</color>
+    <color name="vmore_media_bg">#000000</color>
+
+    <color name="vmore_text">#FFFFFF</color>
+    <color name="vmore_text_dim">#B8FFFFFF</color>
+    <color name="vmore_text_faint">#7AFFFFFF</color>
+    <color name="vmore_on_accent">#FFFFFF</color>
+    <color name="vmore_on_accent_dim">#B8FFFFFF</color>
+    <color name="vmore_on_accent_faint">#7AFFFFFF</color>
+    <color name="vmore_icon">#FFFFFF</color>
+
+    <color name="vmore_blue">#1B6EF3</color>
+    <color name="vmore_blue_deep">#0F4FBF</color>
+    <color name="vmore_blue_soft">#331B6EF3</color>
+    <color name="vmore_blue_ghost">#1A1B6EF3</color>
+
+    <color name="vmore_black">@color/vmore_bg</color>
+    <color name="vmore_black_soft">@color/vmore_media_bg</color>
+    <color name="vmore_white">@color/vmore_on_accent</color>
+    <color name="vmore_white_dim">@color/vmore_text_dim</color>
+    <color name="vmore_white_faint">@color/vmore_text_faint</color>
+    <color name="vmore_white_ghost">@color/vmore_stroke</color>
+    <color name="vmore_white_tint">@color/vmore_surface</color>
+    <color name="vmore_accent">@color/vmore_blue</color>
+    <color name="vmore_accent_dim">@color/vmore_blue_deep</color>
+    <color name="vmore_primary">@color/vmore_blue</color>
+    <color name="vmore_danger">@color/vmore_blue</color>
+</resources>

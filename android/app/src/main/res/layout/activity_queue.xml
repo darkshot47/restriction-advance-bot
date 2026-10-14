@@ -1,0 +1,105 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/vmore_black"
+    android:orientation="vertical">
+
+    <LinearLayout
+        android:id="@+id/queueHeader"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:paddingLeft="12dp"
+        android:paddingRight="18dp"
+        android:paddingTop="16dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+
+            <ImageView
+                android:id="@+id/backButton"
+                android:layout_width="44dp"
+                android:layout_height="44dp"
+                android:padding="10dp"
+                android:src="@drawable/ic_back"
+                android:contentDescription="@string/common_back" />
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginLeft="4dp"
+                style="@style/VmoreTitle"
+                android:text="@string/queue_title" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/queueSummary"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            style="@style/VmoreSubtitle"
+            android:layout_marginLeft="4dp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/pauseAllButton"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                style="@style/VmoreButtonGhost"
+                android:text="@string/queue_pause_all" />
+
+            <Button
+                android:id="@+id/resumeAllButton"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:layout_marginLeft="8dp"
+                style="@style/VmoreButtonGhost"
+                android:text="@string/queue_resume_all" />
+
+            <Button
+                android:id="@+id/clearButton"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:layout_marginLeft="8dp"
+                style="@style/VmoreButtonGhost"
+                android:text="@string/queue_clear_done" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/queueEmpty"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        style="@style/VmoreSubtitle"
+        android:padding="22dp"
+        android:visibility="gone"
+        android:text="@string/queue_empty" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:layout_marginTop="8dp"
+        android:paddingLeft="16dp"
+        android:paddingRight="16dp">
+
+        <LinearLayout
+            android:id="@+id/jobList"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:paddingBottom="20dp" />
+    </ScrollView>
+</LinearLayout>

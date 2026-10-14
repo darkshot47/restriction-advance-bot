@@ -142,12 +142,12 @@ def test_styles_degrade_gracefully_without_library_support(monkeypatch):
     markup = ui.start_keyboard()
     buttons = flat(markup)
     # Login/Logout, Premium/Refer, Stats/Set channel, My Channels/Help,
-    # Settings/Feedback, Language/Share, and the Vmore app footer button.
-    assert len(buttons) == 13
+    # Settings/Feedback and Language/Share.
+    assert len(buttons) == 12
     assert all(is_plain(b) for b in buttons)
     # callback data is untouched, so the actions keep working
     assert {b.callback_data for b in buttons} >= {
-        "cmd_login", "cmd_language", "cmd_setchat", "cmd_mychannels", "cmd_app",
+        "cmd_login", "cmd_language", "cmd_setchat", "cmd_mychannels",
     }
 
 

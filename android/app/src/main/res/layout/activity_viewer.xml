@@ -1,79 +1,203 @@
 <?xml version="1.0" encoding="utf-8"?>
-<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/vmore_bg"
-    android:fillViewport="true">
+    android:background="@color/vmore_media_bg"
+    android:orientation="vertical">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:orientation="vertical"
-        android:padding="16dp">
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingLeft="10dp"
+        android:paddingRight="10dp"
+        android:paddingTop="10dp">
+
+        <ImageView
+            android:id="@+id/backButton"
+            android:layout_width="42dp"
+            android:layout_height="42dp"
+            android:padding="9dp"
+            android:src="@drawable/ic_back"
+            android:tint="@color/vmore_on_accent"
+            android:contentDescription="@string/common_back" />
 
         <TextView
             android:id="@+id/viewerTitle"
-            style="@style/VmoreTitle"
-            android:layout_width="match_parent"
+            android:layout_width="0dp"
             android:layout_height="wrap_content"
-            android:text="Viewer" />
+            android:layout_weight="1"
+            android:layout_marginLeft="4dp"
+            android:textColor="@color/vmore_white"
+            android:textSize="14sp"
+            android:maxLines="1"
+            android:ellipsize="middle" />
 
-        <VideoView
-            android:id="@+id/videoView"
+        <ImageView
+            android:id="@+id/editButton"
+            android:layout_width="42dp"
+            android:layout_height="42dp"
+            android:padding="9dp"
+            android:src="@drawable/ic_edit"
+            android:tint="@color/vmore_on_accent"
+            android:contentDescription="@string/viewer_edit" />
+
+        <ImageView
+            android:id="@+id/uploadButton"
+            android:layout_width="42dp"
+            android:layout_height="42dp"
+            android:padding="9dp"
+            android:src="@drawable/ic_upload"
+            android:tint="@color/vmore_on_accent"
+            android:contentDescription="@string/viewer_upload" />
+    </LinearLayout>
+
+    <FrameLayout
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:background="@color/vmore_media_bg">
+
+        <SurfaceView
+            android:id="@+id/videoSurface"
             android:layout_width="match_parent"
-            android:layout_height="240dp"
-            android:layout_marginTop="12dp"
+            android:layout_height="match_parent"
             android:visibility="gone" />
 
         <ImageView
             android:id="@+id/imageView"
             android:layout_width="match_parent"
-            android:layout_height="300dp"
-            android:layout_marginTop="12dp"
-            android:contentDescription="@string/app_name"
+            android:layout_height="match_parent"
             android:scaleType="fitCenter"
+            android:contentDescription="@string/common_image"
             android:visibility="gone" />
 
-        <TextView
-            android:id="@+id/textView"
+        <ScrollView
+            android:id="@+id/textScroll"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:padding="16dp"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/textView"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="@color/vmore_on_accent_dim"
+                android:textSize="13sp"
+                android:typeface="monospace" />
+        </ScrollView>
+
+        <LinearLayout
+            android:id="@+id/fallbackBox"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:gravity="center"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/fallbackText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                style="@style/VmoreSubtitle"
+                android:paddingLeft="30dp"
+                android:paddingRight="30dp" />
+
+            <Button
+                android:id="@+id/openExternalButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                style="@style/VmoreButtonGhost"
+                android:text="@string/viewer_open_external" />
+        </LinearLayout>
+
+        <!-- Player controls -->
+        <LinearLayout
+            android:id="@+id/controls"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:fontFamily="monospace"
-            android:textColor="@color/vmore_text"
-            android:textSize="12sp"
-            android:visibility="gone" />
+            android:layout_gravity="bottom"
+            android:orientation="vertical"
+            android:background="@color/vmore_media_bg"
+            android:padding="14dp">
+
+            <SeekBar
+                android:id="@+id/seekBar"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="100" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <Button
+                    android:id="@+id/playButton"
+                    android:layout_width="48dp"
+                    android:layout_height="48dp"
+                    style="@style/VmoreButtonFlat"
+                    android:text="" />
+
+                <TextView
+                    android:id="@+id/timeText"
+                    android:textColor="@color/vmore_on_accent_faint"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginLeft="6dp"
+                    style="@style/VmoreLabel" />
+
+                <Button
+                    android:id="@+id/speedButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    style="@style/VmoreButtonGhost"
+                    android:minHeight="40dp"
+                    android:text="@string/viewer_speed" />
+
+                <ImageView
+                    android:id="@+id/fullscreenButton"
+                    android:layout_width="42dp"
+                    android:layout_height="42dp"
+                    android:layout_marginLeft="4dp"
+                    android:padding="9dp"
+                    android:src="@drawable/ic_fullscreen"
+            android:tint="@color/vmore_on_accent"
+                    android:contentDescription="@string/viewer_speed" />
+            </LinearLayout>
+        </LinearLayout>
+    </FrameLayout>
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:paddingLeft="12dp"
+        android:paddingRight="12dp"
+        android:paddingTop="10dp"
+        android:paddingBottom="14dp">
 
         <Button
-            android:id="@+id/saveDeviceButton"
-            style="@style/VmoreButtonAccent"
-            android:layout_width="match_parent"
+            android:id="@+id/saveButton"
+            android:layout_width="0dp"
+            android:layout_weight="1"
             android:layout_height="wrap_content"
-            android:drawableStart="@drawable/ic_save"
-            android:drawablePadding="10dp"
-            android:text="Save to device" />
-
-        <Button
-            android:id="@+id/openExternalButton"
-            style="@style/VmoreButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Open in another app" />
+            style="@style/VmoreButtonGhost"
+            android:text="@string/viewer_save" />
 
         <Button
             android:id="@+id/shareButton"
-            style="@style/VmoreButton"
-            android:layout_width="match_parent"
+            android:layout_width="0dp"
+            android:layout_weight="1"
             android:layout_height="wrap_content"
-            android:text="Share" />
-
-        <Button
-            android:id="@+id/editButton"
-            style="@style/VmoreButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:drawableStart="@drawable/ic_edit"
-            android:drawablePadding="10dp"
-            android:text="Edit &amp; upload" />
+            android:layout_marginLeft="8dp"
+            style="@style/VmoreButtonGhost"
+            android:text="@string/viewer_share" />
     </LinearLayout>
-</ScrollView>
+</LinearLayout>
