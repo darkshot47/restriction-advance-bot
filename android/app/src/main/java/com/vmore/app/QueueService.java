@@ -279,7 +279,7 @@ public class QueueService extends Service {
             if (!QJob.FAILED.equals(job.stage)) {
                 return;
             }
-            boolean worthRetrying = attempt < MAX_ATTEMPTS && transient(job.error)
+            boolean worthRetrying = attempt < MAX_ATTEMPTS && recoverable(job.error)
                     && !cancelled.get() && !jobs.pausedAll();
             if (!worthRetrying) {
                 recordFailure(jobs, job);
@@ -298,8 +298,11 @@ public class QueueService extends Service {
         }
     }
 
-    /** Telegram is only asking to wait, or the phone lost the network. */
-    private static boolean transient(String message) {
+    /**
+     * True when the failure was only Telegram asking to wait or a lost
+     * connection, which is worth another attempt.
+     */
+    private static boolean recoverable(String message) {
         if (message == null) {
             return false;
         }

@@ -266,6 +266,47 @@ def count_args(raw):
     return count
 
 
+JAVA_KEYWORDS = {
+    "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class",
+    "const", "continue", "default", "do", "double", "else", "enum", "extends", "final",
+    "finally", "float", "for", "goto", "if", "implements", "import", "instanceof", "int",
+    "interface", "long", "native", "new", "package", "private", "protected", "public",
+    "return", "short", "static", "strictfp", "super", "switch", "synchronized", "this",
+    "throw", "throws", "transient", "try", "void", "volatile", "while", "true", "false",
+    "null", "var", "record", "yield", "sealed", "permits",
+}
+
+
+#: These ones appear in front of a "(" in normal code, so they are not proof
+#: of a broken name: `if (`, `catch (`, `while (` and friends.
+CONTROL_FLOW = {
+    "if", "else", "for", "while", "switch", "case", "default", "catch", "finally",
+    "try", "do", "return", "throw", "throws", "new", "this", "super", "instanceof",
+    "assert", "null", "true", "false", "yield", "synchronized",
+}
+#: A name that javac refuses, but that reads like one.
+#: `record`, `var`, `yield`, `sealed` and `permits` are contextual: they are
+#: still legal as method names, which History.record() relies on.
+CONTEXTUAL = {"record", "var", "yield", "sealed", "permits"}
+NEVER_A_NAME = JAVA_KEYWORDS - CONTROL_FLOW - CONTEXTUAL
+
+METHOD_DECL = re.compile(
+    r"(?:^|\n)\s*(?:@\w+\s*)?(?:public |private |protected |static |final |"
+    r"synchronized |abstract )*(?:[A-Za-z0-9_<>\[\]\.\,\?]+)\s+"
+    r"([a-z][A-Za-z0-9_]*)\s*\(")
+
+
+def check_java_keywords():
+    """A method named after a reserved word does not compile."""
+    for path in sorted(JAVA.glob("*.java")):
+        text = strip_java(path.read_text())
+        for match in METHOD_DECL.finditer(text):
+            name = match.group(1)
+            if name in NEVER_A_NAME:
+                line = text[:match.start()].count("\n") + 1
+                problem("%s:%d: %s(...) is a Java keyword" % (path.name, line, name))
+
+
 def check_java_calls():
     files = sorted(JAVA.glob("*.java"))
     classes = {path.stem for path in files}
@@ -305,6 +346,7 @@ def main():
     check_references()
     check_palettes()
     check_text_rules()
+    check_java_keywords()
     check_java_calls()
     for message in PROBLEMS:
         print("problem:", message)
