@@ -130,7 +130,7 @@ public final class Jobs {
         }
         QJob moved = jobs.remove(from);
         jobs.add(to, moved);
-        save();
+        persist();
         notifyListeners();
         return true;
     }
@@ -148,7 +148,7 @@ public final class Jobs {
             }
         }
         if (woken > 0) {
-            save();
+            persist();
             notifyListeners();
         }
         return woken;

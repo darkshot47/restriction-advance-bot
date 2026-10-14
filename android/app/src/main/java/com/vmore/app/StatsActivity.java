@@ -88,12 +88,12 @@ public class StatsActivity extends Activity {
         row.addView(name, new LinearLayout.LayoutParams(0,
                 LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
 
-        TextView value = new TextView(this);
-        value.setText(value);
-        value.setTextColor(getColor(R.color.vmore_text));
-        value.setTextSize(15f);
-        value.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
-        row.addView(value);
+        TextView number = new TextView(this);
+        number.setText(value);
+        number.setTextColor(getColor(R.color.vmore_text));
+        number.setTextSize(15f);
+        number.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        row.addView(number);
         box.addView(row);
     }
 
