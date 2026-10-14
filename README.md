@@ -503,6 +503,18 @@ The list below is the whole feature set, all of it on the phone, none of it need
 16. **Home-screen widget and Quick Settings tile** — the widget shows the job, the stage and the queue
     size with pause/resume and open; the Quick Settings tile does the same from the panel.
 
+### On the phone, the first time
+
+1. Allow "Install unknown apps" for the browser or file manager that opens the APK (Android asks once).
+2. On Android 13 and newer, allow notifications when Vmore asks: the queue shows its progress there, and
+   *Pause all* / *Resume all* live in that notification.
+3. Settings shows whether Android may stop the queue in the background; one tap opens the system dialog
+   that lifts the restriction.  Some phones (Xiaomi, Oppo, Vivo) also have their own "Autostart" switch —
+   without it, a very long batch can be cut short when the screen has been off for a while.
+4. The link's own rules still apply: a private link needs the account to be able to read the message, and
+   Telegram's own protected content cannot be saved by any client.  When Telegram asks Vmore to wait
+   (flood wait), the job pauses itself, says so in the queue, and retries up to three times.
+
 ### Look and feel
 
 * **Day and night skins** — the in-app switch (Settings → Appearance, or the sun/moon button in the
