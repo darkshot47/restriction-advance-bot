@@ -173,8 +173,13 @@ def check_text_rules():
     for path in sorted(JAVA.glob("*.java")):
         text = path.read_text()
         for match in re.finditer(r'"((?:[^"\\]|\\.)*)"', text):
-            if "*" in match.group(1):
-                problem("%s: asterisk in a string literal" % path.name)
+            value = match.group(1)
+            if "*" not in value:
+                continue
+            #: A MIME wildcard is never shown on a screen, so it is allowed.
+            if re.fullmatch(r"[a-z*]+/[a-z0-9*+.\-]+", value):
+                continue
+            problem("%s: asterisk in a string literal (%s)" % (path.name, value))
     del allowed_arrow
 
 
@@ -341,7 +346,26 @@ def check_java_calls():
                         % (name, line, owner, method, count, sorted(allowed)))
 
 
+def check_java_syntax():
+    """A real parse of every Java file.
+
+    There is no JDK on every machine that runs this checker, so when javalang
+    is installed the files are parsed for real: a missing brace or a stray
+    token is caught here instead of in the build.
+    """
+    try:
+        import javalang
+    except ImportError:
+        return
+    for path in sorted(JAVA.glob("*.java")):
+        try:
+            javalang.parse.parse(path.read_text())
+        except Exception as error:  # noqa: BLE001 - the message is the report
+            problem("%s: %s" % (path.name, str(error).splitlines()[0]))
+
+
 def main():
+    check_java_syntax()
     check_xml_well_formed()
     check_references()
     check_palettes()

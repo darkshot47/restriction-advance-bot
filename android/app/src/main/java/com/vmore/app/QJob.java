@@ -68,6 +68,32 @@ public final class QJob {
     public long updated;
     public int attempts;
 
+    /**
+     * Per-batch rules, carried by every job of the batch: which kinds to keep,
+     * how big a file may be, and whether a file that was already uploaded once
+     * should be skipped instead of sent again.
+     */
+    public String onlyKinds = "";
+    public long minSize;
+    public long maxSize;
+    public boolean skipDuplicates = true;
+    /** Set while the engine skips this job, so the screens can say why. */
+    public boolean skipped;
+
+    /** True when this media passes the batch's filter. */
+    public boolean allows(String kind, long size) {
+        if (onlyKinds != null && !onlyKinds.isEmpty()) {
+            String clean = kind == null ? "document" : kind;
+            if (!onlyKinds.contains(clean)) {
+                return false;
+            }
+        }
+        if (minSize > 0 && size > 0 && size < minSize) {
+            return false;
+        }
+        return maxSize <= 0 || size <= 0 || size <= maxSize;
+    }
+
     public boolean isFinished() {
         return DONE.equals(stage) || CANCELLED.equals(stage);
     }
@@ -131,6 +157,10 @@ public final class QJob {
             json.put("created", created);
             json.put("updated", updated);
             json.put("attempts", attempts);
+            json.put("only_kinds", onlyKinds);
+            json.put("min_size", minSize);
+            json.put("max_size", maxSize);
+            json.put("skip_duplicates", skipDuplicates);
         } catch (Exception ignored) {
         }
         return json;
@@ -171,6 +201,10 @@ public final class QJob {
         job.created = json.optLong("created", 0L);
         job.updated = json.optLong("updated", 0L);
         job.attempts = json.optInt("attempts", 0);
+        job.onlyKinds = json.optString("only_kinds", "");
+        job.minSize = json.optLong("min_size", 0L);
+        job.maxSize = json.optLong("max_size", 0L);
+        job.skipDuplicates = json.optBoolean("skip_duplicates", true);
         //: A job that was running when the app died comes back as queued — the
         //: engine picks it up again instead of leaving it stuck on "downloading".
         if (job.isActive()) {

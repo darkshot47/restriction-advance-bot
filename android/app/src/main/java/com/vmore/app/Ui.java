@@ -231,7 +231,7 @@ final class Ui {
 
     static void tintSwitch(android.widget.Switch view) {
         int blue = view.getContext().getColor(R.color.vmore_blue);
-        int white = view.getContext().getColor(R.color.vmore_white_dim);
+        int white = view.getContext().getColor(R.color.vmore_text_dim);
         view.setThumbTintList(new ColorStateList(
                 new int[][]{
                         new int[]{android.R.attr.state_checked},

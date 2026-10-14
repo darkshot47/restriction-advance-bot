@@ -2,7 +2,7 @@
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/vmore_black"
+    android:background="@color/vmore_bg"
     android:fillViewport="true">
 
     <LinearLayout
@@ -204,6 +204,69 @@
         </LinearLayout>
 
         <!-- Trim -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            style="@style/VmoreSection"
+            android:text="@string/editor_tools" />
+
+        <TextView
+            android:id="@+id/toolsHint"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            style="@style/VmoreLabel" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/muteChip"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                style="@style/VmoreChip"
+                android:text="@string/editor_mute" />
+
+            <Button
+                android:id="@+id/audioChip"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginLeft="8dp"
+                style="@style/VmoreChip"
+                android:text="@string/editor_audio_only" />
+        </LinearLayout>
+
+        <SeekBar
+            android:id="@+id/frameBar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:max="100" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/frameButton"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                style="@style/VmoreButtonGhost"
+                android:text="@string/editor_frame" />
+
+            <TextView
+                android:id="@+id/frameLabel"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:layout_marginLeft="10dp"
+                android:gravity="center_vertical"
+                style="@style/VmoreLabel" />
+        </LinearLayout>
+
         <LinearLayout
             android:id="@+id/trimBox"
             android:layout_width="match_parent"

@@ -186,4 +186,13 @@ public class ChatPickerActivity extends Activity {
             }
         });
     }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (Lock.guard(this)) {
+            return;
+        }
+    }
+
 }

@@ -2,7 +2,7 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/vmore_black"
+    android:background="@color/vmore_bg"
     android:orientation="vertical">
 
     <LinearLayout
@@ -54,7 +54,7 @@
             android:layout_height="wrap_content"
             android:layout_marginTop="10dp"
             android:text="@string/chats_remember"
-            android:textColor="@color/vmore_white_dim"
+            android:textColor="@color/vmore_text_dim"
             android:textSize="13sp" />
     </LinearLayout>
 

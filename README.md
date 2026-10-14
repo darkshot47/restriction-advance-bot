@@ -460,6 +460,49 @@ APK.
   video, `Photo` sends a fast preview.
 * **Forward without download** — a job can be forwarded with TDLib, so zero bytes cross the phone.
 
+### Everything the app does
+
+The list below is the whole feature set, all of it on the phone, none of it needing a server.
+
+1. **Files** — a Library screen for everything Vmore left on the phone: search, sort by date, name or
+   size, multi-select, upload the selection again, share it, or delete it with a confirmation.
+2. **Data saving** — *only on Wi-Fi* and *only while charging* hold the queue and release it by
+   themselves the moment the phone is back on Wi-Fi or on the charger; a speed limit caps the transfer
+   rate (full, 4, 2, 1 or half a megabyte a second).
+3. **Scheduled queue** — pick a time (Settings → Schedule) and the queue starts by itself, once or every
+   day; while it waits the notification says so, and *Start now* ignores the wait.
+4. **Battery** — Settings shows whether Android is free to let the queue run in the background, with one
+   tap into the system's battery-optimization screen.
+5. **Duplicate skip** — a file that was uploaded before (`file id` + size) is left out instead of being
+   sent twice, and the job says so in the finish summary.
+6. **Batch filters** — before a batch starts, keep only the kinds you want (`video`, `photo`, `audio`,
+   `document`) and only a size range; everything else is skipped with a note, so a 500-message range does
+   not drag 500 files through the phone.
+7. **Share to Vmore and the clipboard banner** — *Share → Vmore* from any app sends the text straight to
+   the link box, and a Telegram link already on the clipboard offers itself with one tap.
+8. **Per-batch rules** — the kind, the filter and *skip duplicates* chosen on Home travel with the batch
+   and are shown per job in the queue, while Queue and Editor can override the destination per job.
+9. **Retry all and priority** — *Retry all failed* puts every failed job back at once (Wake up clears the
+   waits), and the arrows on a waiting job move it up or down the queue.
+10. **Statistics** — a dashboard with uploads, downloads, failures, bytes sent and received, the space
+    the cleanup gave back, what is still on the phone, the average file, the queue size, the last
+    activity, a seven-day chart and the busiest chats.
+11. **Automatic skin** — Settings → Appearance: *Day* (the default), *Night*, or *Automatic*, which
+    follows the clock (night between 18:00 and 06:00).  The header button flips between day and night in
+    one tap.
+12. **PIN lock** — a four to eight digit PIN (Settings → Privacy) guards the app after it has been left
+    alone for a while; a wrong PIN shakes, and a forgotten PIN signs the account out.
+13. **Player upgrade** — playback speed from 0.25x to 3x, *Play the next file by itself* so a folder of
+    downloads runs as one long queue, picture-in-picture, fullscreen, rotate, screen-on while playing.
+14. **Editor upgrade** — trim, caption, cover taken from the gallery **or from a frame of the video
+    itself**, *Remove sound*, *Sound only* (the audio track saved as `.m4a`), and the upload quality
+    (`File` / `Video` / `Photo`) for this upload only.
+15. **Three accounts** — Settings holds up to three Telegram accounts, each with its own session folder
+    (`telegram_<slot>`), its own profile picture and its own credentials; *Switch* goes through the
+    sign-in screen so Telegram is never left in a half state, and the queue, history and files stay.
+16. **Home-screen widget and Quick Settings tile** — the widget shows the job, the stage and the queue
+    size with pause/resume and open; the Quick Settings tile does the same from the panel.
+
 ### Look and feel
 
 * **Day and night skins** — the in-app switch (Settings → Appearance, or the sun/moon button in the

@@ -53,6 +53,23 @@ public class QueueActivity extends Activity implements Jobs.Listener {
             Jobs.get(this).removeFinished();
             render();
         });
+        findViewById(R.id.retryAllButton).setOnClickListener(v -> {
+            int woken = Jobs.get(this).retryFailed();
+            if (woken == 0) {
+                Ui.toast(this, getString(R.string.queue_nothing_failed));
+            } else {
+                QueueService.run(this);
+                Ui.toast(this, woken + " " + getString(R.string.queue_retried));
+            }
+            render();
+        });
+        findViewById(R.id.stopAllButton).setOnClickListener(v ->
+                Ui.confirm(this, getString(R.string.queue_stop_all),
+                        getString(R.string.queue_stop_confirm),
+                        getString(R.string.queue_stop_all), () -> {
+                            QueueService.stopJob(this, null);
+                            render();
+                        }));
         pauseAll.setOnClickListener(v -> {
             QueueService.pauseAll(this);
             render();
@@ -61,7 +78,8 @@ public class QueueActivity extends Activity implements Jobs.Listener {
             QueueService.resumeAll(this);
             render();
         });
-        for (View view : new View[]{pauseAll, resumeAll, findViewById(R.id.clearButton)}) {
+        for (View view : new View[]{pauseAll, resumeAll, findViewById(R.id.clearButton),
+                findViewById(R.id.retryAllButton), findViewById(R.id.stopAllButton)}) {
             Anim.pressible(view);
         }
         Anim.pageIn(findViewById(R.id.queueHeader));
@@ -70,6 +88,9 @@ public class QueueActivity extends Activity implements Jobs.Listener {
     @Override
     protected void onResume() {
         super.onResume();
+        if (Lock.guard(this)) {
+            return;
+        }
         Jobs.get(this).addListener(this);
         handler.post(watcher);
     }
@@ -221,6 +242,18 @@ public class QueueActivity extends Activity implements Jobs.Listener {
             });
         }
         remove.setOnClickListener(v -> Jobs.get(this).remove(job.id));
+
+        //: Waiting jobs can be pulled up or pushed down: the engine always takes
+        //: the first one in the list.
+        View up = row.findViewById(R.id.jobUp);
+        View down = row.findViewById(R.id.jobDown);
+        boolean waiting = QJob.QUEUED.equals(job.stage);
+        up.setVisibility(waiting ? View.VISIBLE : View.INVISIBLE);
+        down.setVisibility(waiting ? View.VISIBLE : View.INVISIBLE);
+        up.setOnClickListener(v -> Jobs.get(this).move(job.id, -1));
+        down.setOnClickListener(v -> Jobs.get(this).move(job.id, 1));
+        Anim.pressible(up);
+        Anim.pressible(down);
         Anim.pressible(action);
         Anim.pressible(open);
         Anim.pressible(remove);

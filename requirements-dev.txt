@@ -4,3 +4,6 @@ pytest>=8.0
 pytest-asyncio>=0.23
 
 mongomock-motor>=0.0.36,<1
+# android/tools/check_sources.py parses every Java file for real when this is
+# importable, so a dropped brace fails the tests job instead of the APK build.
+javalang>=0.13

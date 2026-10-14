@@ -207,6 +207,33 @@ public final class Tg {
         }
     }
 
+    /**
+     * Starts using another account slot: the running session is closed first,
+     * the screens go back to the sign-in steps, and the queue keeps its place.
+     */
+    public void useSlot(int slot) {
+        if (slot == Prefs.activeSlot(app)) {
+            return;
+        }
+        closeSession();
+        Prefs.setActiveSlot(app, slot);
+        pendingPhone = "";
+    }
+
+    /** Closes TDLib without touching the queue, history or settings. */
+    public void closeSession() {
+        ready = false;
+        account = null;
+        chatCache.clear();
+        Client current = client;
+        client = null;
+        if (current != null) {
+            current.send(new TdApi.Close(), object -> {
+            });
+        }
+        state = STATE_NONE;
+    }
+
     /** Called after the user typed the api_id and api_hash for the first time. */
     public void restartWithCredentials() {
         if (client != null) {
@@ -380,7 +407,9 @@ public final class Tg {
             tell(STATE_CREDENTIALS, null);
             return;
         }
-        File dir = new File(app.getFilesDir(), "telegram");
+        //: Each account slot keeps its own TDLib databases, which is what makes
+        //: switching accounts safe and instant.
+        File dir = new File(app.getFilesDir(), "telegram_" + Prefs.activeSlot(app));
         //noinspection ResultOfMethodCallIgnored
         dir.mkdirs();
         current.send(new TdApi.SetTdlibParameters(

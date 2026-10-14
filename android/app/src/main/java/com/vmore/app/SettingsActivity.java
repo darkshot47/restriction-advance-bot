@@ -42,6 +42,9 @@ public class SettingsActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        if (Lock.guard(this)) {
+            return;
+        }
         render();
     }
 
@@ -73,6 +76,8 @@ public class SettingsActivity extends Activity {
                 Skin.toggle(this);
             }
         }));
+        skins.addView(Ui.chip(this, getString(R.string.settings_auto), Prefs.skinMode(this) == 2,
+                v -> Skin.setMode(this, 2)));
         box.addView(skins);
         TextView skinHint = new TextView(this);
         skinHint.setText(R.string.settings_skin_hint);
@@ -81,6 +86,39 @@ public class SettingsActivity extends Activity {
         skinHint.setPadding(Ui.dp(this, 4), 0, Ui.dp(this, 4), Ui.dp(this, 8));
         box.addView(skinHint);
 
+        box.addView(Ui.section(this, getString(R.string.settings_data)));
+        addSwitch(R.string.settings_wifi_only, Prefs.wifiOnly(this),
+                value -> Prefs.setWifiOnly(this, value), R.string.settings_wifi_hint);
+        addSwitch(R.string.settings_charging_only, Prefs.chargingOnly(this),
+                value -> Prefs.setChargingOnly(this, value), R.string.settings_charging_hint);
+        boolean restricted = Net.batteryRestricted(this);
+        addRow(R.drawable.ic_lock,
+                restricted ? getString(R.string.settings_battery_on)
+                        : getString(R.string.settings_battery_off),
+                getString(R.string.settings_battery_hint),
+                restricted ? v -> Net.askForBatteryFreedom(this) : null);
+
+        box.addView(Ui.section(this, getString(R.string.settings_schedule)));
+        long at = Prefs.scheduleAt(this);
+        addRow(R.drawable.ic_history,
+                at > System.currentTimeMillis()
+                        ? getString(R.string.settings_schedule_at) + " " + Format.when(at)
+                        : getString(R.string.settings_schedule_none),
+                getString(R.string.settings_schedule_hint), v -> pickSchedule());
+        addSwitch(R.string.settings_schedule_daily, Prefs.scheduleDaily(this),
+                value -> Prefs.setScheduleDaily(this, value));
+        if (at > System.currentTimeMillis()) {
+            addRow(R.drawable.ic_close, getString(R.string.settings_schedule_clear),
+                    getString(R.string.settings_schedule_clear_hint), v -> {
+                        Prefs.setScheduleAt(this, 0L);
+                        render();
+                    });
+        }
+
+        box.addView(Ui.section(this, getString(R.string.filters_title)));
+        addRow(R.drawable.ic_folder, filterSummary(),
+                getString(R.string.filters_hint), v -> Filters.show(this, this::render));
+
         box.addView(Ui.section(this, getString(R.string.settings_delete_local)));
         addSwitch(R.string.settings_upload_after, Prefs.autoUpload(this),
                 value -> Prefs.setAutoUpload(this, value));
@@ -88,6 +126,8 @@ public class SettingsActivity extends Activity {
                 value -> Prefs.setAutoDeleteLocal(this, value), R.string.settings_delete_local_hint);
         addSwitch(R.string.settings_keep_screen, Prefs.keepScreenOn(this),
                 value -> Prefs.setKeepScreenOn(this, value));
+        addSwitch(R.string.settings_autoplay, Prefs.autoplayNext(this),
+                value -> Prefs.setAutoplayNext(this, value), R.string.settings_autoplay_hint);
 
         box.addView(Ui.section(this, getString(R.string.settings_send_as)));
         LinearLayout chips = new LinearLayout(this);
@@ -122,13 +162,31 @@ public class SettingsActivity extends Activity {
                 "captions for every upload; {name} becomes the file name",
                 v -> editCaption());
 
+        box.addView(Ui.section(this, getString(R.string.settings_library)));
+        addRow(R.drawable.ic_folder, getString(R.string.files_title),
+                onPhone(), v -> startActivity(new Intent(this, FilesActivity.class)));
+        addRow(R.drawable.ic_speed, getString(R.string.stats_title),
+                getString(R.string.settings_stats_hint),
+                v -> startActivity(new Intent(this, StatsActivity.class)));
+
+        box.addView(Ui.section(this, getString(R.string.settings_privacy)));
+        addSwitch(R.string.settings_lock, Prefs.lockEnabled(this), value -> {
+            if (value) {
+                askNewPin();
+            } else {
+                Lock.clear(this);
+                render();
+            }
+        }, R.string.settings_lock_hint);
+
         box.addView(Ui.section(this, getString(R.string.settings_account)));
         String name = Prefs.accountName(this);
         String phone = Prefs.phone(this);
         addRow(R.drawable.ic_person, name == null || name.isEmpty() ? "Signed in" : name,
                 phone.isEmpty() ? "Telegram account" : phone, null);
+        accounts();
         addRow(R.drawable.ic_lock, getString(R.string.settings_sign_out),
-                "leaves this phone and forgets the session", v -> confirmSignOut());
+                getString(R.string.settings_sign_out_hint), v -> confirmSignOut());
 
         box.addView(Ui.section(this, getString(R.string.settings_about)));
         addRow(R.drawable.ic_vmore, getString(R.string.settings_version) + " " + Vmore.VERSION,
@@ -197,6 +255,132 @@ public class SettingsActivity extends Activity {
         }
         box.addView(wrapper);
         box.addView(Ui.divider(this));
+    }
+
+    // ------------------------------------------------------ new sections //
+
+    private String onPhone() {
+        return Format.size(LocalFiles.totalBytes(this)) + " \u2022 "
+                + getString(R.string.settings_library_hint);
+    }
+
+    private String filterSummary() {
+        String kinds = Prefs.filterKinds(this);
+        long min = Prefs.filterMinSize(this);
+        long max = Prefs.filterMaxSize(this);
+        if ((kinds == null || kinds.isEmpty()) && min == 0 && max == 0) {
+            return getString(R.string.filters_off);
+        }
+        StringBuilder builder = new StringBuilder();
+        builder.append(kinds == null || kinds.isEmpty() ? getString(R.string.filters_all) : kinds);
+        if (min > 0) {
+            builder.append(" \u2022 from ").append(Format.size(min));
+        }
+        if (max > 0) {
+            builder.append(" \u2022 up to ").append(Format.size(max));
+        }
+        return builder.toString();
+    }
+
+    /** Every account slot, with the one in use marked. */
+    private void accounts() {
+        int active = Prefs.activeSlot(this);
+        for (int slot = 1; slot <= Prefs.slotCount(this); slot++) {
+            final int target = slot;
+            boolean used = Prefs.slotUsed(this, slot);
+            String title = getString(R.string.settings_account) + " " + slot
+                    + (used ? " \u2022 " + Prefs.slotLabel(this, slot) : "");
+            String subtitle = slot == active
+                    ? getString(R.string.settings_account_current)
+                    : used ? getString(R.string.settings_account_switch)
+                    : getString(R.string.settings_account_empty);
+            addRow(R.drawable.ic_person, title, subtitle, v -> switchAccount(target));
+        }
+        if (Prefs.slotCount(this) < Prefs.MAX_SLOTS) {
+            addRow(R.drawable.ic_add, getString(R.string.settings_account_add),
+                    getString(R.string.settings_account_add_hint), v -> {
+                        int slot = Prefs.addSlot(this);
+                        if (slot == 0) {
+                            Ui.toast(this, getString(R.string.settings_account_full));
+                            return;
+                        }
+                        switchAccount(slot);
+                    });
+        }
+    }
+
+    /** Moves the app to another account slot and asks for its sign-in. */
+    private void switchAccount(int slot) {
+        if (slot == Prefs.activeSlot(this)) {
+            Ui.toast(this, getString(R.string.settings_account_current));
+            return;
+        }
+        Ui.confirm(this, getString(R.string.settings_account_switch),
+                getString(R.string.settings_account_switch_confirm),
+                getString(R.string.settings_account_switch), () -> {
+                    Tg.get(this).useSlot(slot);
+                    startActivity(new Intent(this, LoginActivity.class));
+                    finish();
+                });
+    }
+
+    private void pickSchedule() {
+        java.util.Calendar calendar = java.util.Calendar.getInstance();
+        long at = Prefs.scheduleAt(this);
+        if (at > System.currentTimeMillis()) {
+            calendar.setTimeInMillis(at);
+        } else {
+            calendar.add(java.util.Calendar.HOUR_OF_DAY, 1);
+        }
+        new android.app.TimePickerDialog(this, (view, hour, minute) -> {
+            java.util.Calendar chosen = java.util.Calendar.getInstance();
+            chosen.set(java.util.Calendar.HOUR_OF_DAY, hour);
+            chosen.set(java.util.Calendar.MINUTE, minute);
+            chosen.set(java.util.Calendar.SECOND, 0);
+            if (chosen.getTimeInMillis() <= System.currentTimeMillis()) {
+                chosen.add(java.util.Calendar.DAY_OF_YEAR, 1);
+            }
+            Prefs.setScheduleAt(this, chosen.getTimeInMillis());
+            render();
+        }, calendar.get(java.util.Calendar.HOUR_OF_DAY),
+                calendar.get(java.util.Calendar.MINUTE), true).show();
+    }
+
+    /** Asks for a new PIN twice, then stores the salted hash. */
+    private void askNewPin() {
+        EditText field = pinField(getString(R.string.settings_lock_new));
+        LinearLayout holder = new LinearLayout(this);
+        holder.setPadding(Ui.dp(this, 20), Ui.dp(this, 12), Ui.dp(this, 20), 0);
+        holder.addView(field);
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.settings_lock)
+                .setView(holder)
+                .setPositiveButton(R.string.common_ok, (dialog, which) -> {
+                    String pin = field.getText().toString().trim();
+                    if (!Lock.valid(pin)) {
+                        Ui.toast(this, getString(R.string.settings_lock_bad));
+                        render();
+                        return;
+                    }
+                    Lock.setPin(this, pin);
+                    Ui.toast(this, getString(R.string.settings_lock_set));
+                    render();
+                })
+                .setNegativeButton(R.string.common_cancel, (dialog, which) -> render())
+                .show();
+    }
+
+    private EditText pinField(String hint) {
+        EditText field = new EditText(this);
+        field.setHint(hint);
+        field.setInputType(android.text.InputType.TYPE_CLASS_NUMBER
+                | android.text.InputType.TYPE_NUMBER_VARIATION_PASSWORD);
+        field.setSingleLine(true);
+        field.setBackgroundResource(R.drawable.bg_field);
+        field.setTextColor(getColor(R.color.vmore_text));
+        field.setHintTextColor(getColor(R.color.vmore_text_faint));
+        field.setPadding(Ui.dp(this, 12), Ui.dp(this, 12), Ui.dp(this, 12), Ui.dp(this, 12));
+        return field;
     }
 
     // -------------------------------------------------------------- actions //

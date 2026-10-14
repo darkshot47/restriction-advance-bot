@@ -2,7 +2,7 @@
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/vmore_black"
+    android:background="@color/vmore_bg"
     android:fillViewport="true">
 
     <LinearLayout
@@ -279,6 +279,70 @@
                     android:layout_marginLeft="8dp"
                     style="@style/VmoreChip"
                     android:text="@string/home_option_forward" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="horizontal"
+                android:weightSum="3">
+
+                <Button
+                    android:id="@+id/chipQuality"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    style="@style/VmoreChip"
+                    android:text="@string/home_option_quality" />
+
+                <Button
+                    android:id="@+id/chipFilter"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:layout_marginLeft="8dp"
+                    style="@style/VmoreChip"
+                    android:text="@string/home_option_filter" />
+
+                <Button
+                    android:id="@+id/chipSchedule"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:layout_marginLeft="8dp"
+                    style="@style/VmoreChip"
+                    android:text="@string/home_option_schedule" />
+            </LinearLayout>
+
+            <!-- The clipboard banner: a Telegram link is one tap away. -->
+            <LinearLayout
+                android:id="@+id/clipboardBanner"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:visibility="gone">
+
+                <TextView
+                    android:id="@+id/clipboardText"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:maxLines="1"
+                    android:ellipsize="middle"
+                    android:textColor="@color/vmore_text_dim"
+                    android:textSize="12.5sp"
+                    android:text="@string/home_clipboard_found" />
+
+                <Button
+                    android:id="@+id/clipboardAdd"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:minHeight="36dp"
+                    style="@style/VmoreChipActive"
+                    android:text="@string/home_clipboard_add" />
             </LinearLayout>
 
             <Button

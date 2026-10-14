@@ -47,6 +47,12 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
     private TextView profileUser;
     private TextView emptyText;
     private boolean forwardBatch;
+    private Button chipQuality;
+    private Button chipFilter;
+    private Button chipSchedule;
+    private View clipboardBanner;
+    private TextView clipboardText;
+    private String clipboardLink = "";
 
     /** Jobs waiting for a destination (the picker is open for them). */
     private final List<QJob> pending = new ArrayList<>();
@@ -67,6 +73,7 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         Skin.prepare(this);
+        captureShareIntent();
         if (!Tg.get(this).isReady()) {
             startActivity(new Intent(this, LoginActivity.class));
             finish();
@@ -89,6 +96,11 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         progressBar = findViewById(R.id.progressBar);
         pauseButton = findViewById(R.id.pauseButton);
         recentList = findViewById(R.id.recentList);
+        chipQuality = findViewById(R.id.chipQuality);
+        chipFilter = findViewById(R.id.chipFilter);
+        chipSchedule = findViewById(R.id.chipSchedule);
+        clipboardBanner = findViewById(R.id.clipboardBanner);
+        clipboardText = findViewById(R.id.clipboardText);
         avatarView = findViewById(R.id.profileAvatar);
         profileName = findViewById(R.id.profileName);
         profileUser = findViewById(R.id.profileUser);
@@ -123,6 +135,17 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
             forwardBatch = !forwardBatch;
             paintOptions();
         });
+        chipQuality.setOnClickListener(v -> cycleQuality());
+        chipFilter.setOnClickListener(v -> openFilters());
+        chipSchedule.setOnClickListener(v -> startActivity(
+                new Intent(this, SettingsActivity.class)));
+        findViewById(R.id.clipboardAdd).setOnClickListener(v -> {
+            if (!clipboardLink.isEmpty()) {
+                linkField.setText(clipboardLink);
+                Anim.fadeIn(linkField, 160);
+                linkField.setSelection(linkField.getText().length());
+            }
+        });
         findViewById(R.id.stopQueueButton).setOnClickListener(v ->
                 QueueService.stopJob(this, null));
         pauseButton.setOnClickListener(v -> {
@@ -135,7 +158,7 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         });
 
         for (View view : new View[]{startButton, chipUpload, chipDelete, chipForward,
-                pauseButton}) {
+                chipQuality, chipFilter, chipSchedule, pauseButton}) {
             Anim.pressible(view);
         }
         Anim.pageIn(findViewById(R.id.header));
@@ -164,7 +187,11 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
             finish();
             return;
         }
+        if (Lock.guard(this)) {
+            return;
+        }
         Tg.get(this).start(null);
+        takeSharedLink();
         Jobs.get(this).addListener(this);
         History.get(this).addListener(this);
         paintAccount();
@@ -174,6 +201,7 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         paintOptions();
         paintRecent();
         paintLive();
+        paintClipboard();
         handler.post(watcher);
     }
 
@@ -246,6 +274,99 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
                 + (forwardBatch ? " • on" : " • off"));
         chipForward.setBackgroundResource(forwardBatch
                 ? R.drawable.bg_chip_active : R.drawable.bg_chip);
+
+        String sendAs = Prefs.sendAs(this);
+        String quality = Prefs.SEND_VIDEO.equals(sendAs) ? getString(R.string.settings_send_as_video)
+                : Prefs.SEND_PHOTO.equals(sendAs) ? getString(R.string.settings_send_as_photo)
+                : getString(R.string.settings_send_as_file);
+        chipQuality.setText(getString(R.string.home_option_quality) + " • " + quality);
+
+        boolean filtered = !Prefs.filterKinds(this).isEmpty()
+                || Prefs.filterMinSize(this) > 0 || Prefs.filterMaxSize(this) > 0;
+        chipFilter.setText(getString(R.string.home_option_filter)
+                + (filtered ? " • on" : " • off"));
+        chipFilter.setBackgroundResource(filtered
+                ? R.drawable.bg_chip_active : R.drawable.bg_chip);
+
+        long at = Prefs.scheduleAt(this);
+        boolean scheduled = at > System.currentTimeMillis();
+        chipSchedule.setText(scheduled
+                ? Format.when(at) : getString(R.string.home_option_schedule));
+        chipSchedule.setBackgroundResource(scheduled
+                ? R.drawable.bg_chip_active : R.drawable.bg_chip);
+    }
+
+    /** File, video, photo — the quality every job of the next batch uses. */
+    private void cycleQuality() {
+        String current = Prefs.sendAs(this);
+        String next = Prefs.SEND_FILE.equals(current) ? Prefs.SEND_VIDEO
+                : Prefs.SEND_VIDEO.equals(current) ? Prefs.SEND_PHOTO : Prefs.SEND_FILE;
+        Prefs.setSendAs(this, next);
+        paintOptions();
+        Anim.fadeIn(chipQuality, 140);
+    }
+
+    /** The batch filter: which kinds are kept, and how big a file may be. */
+    private void openFilters() {
+        Filters.show(this, this::paintOptions);
+    }
+
+    /**
+     * A link shared from another app, or the one sitting in the clipboard: both
+     * land in the link box without any typing.
+     */
+    private void takeSharedLink() {
+        String shared = Prefs.takePendingShare(this);
+        if (shared != null && !shared.isEmpty()) {
+            linkField.setText(shared);
+            Anim.fadeIn(linkField, 200);
+            Ui.toast(this, getString(R.string.home_shared_received));
+        }
+    }
+
+    /**
+     * A link shared from another app ("Share to Vmore") is stored right away,
+     * so it survives the sign-in screen as well.
+     */
+    private void captureShareIntent() {
+        Intent intent = getIntent();
+        if (intent == null || !Intent.ACTION_SEND.equals(intent.getAction())) {
+            return;
+        }
+        String value = intent.getStringExtra(Intent.EXTRA_TEXT);
+        if (value != null && !value.trim().isEmpty()) {
+            Prefs.setPendingShare(this, value.trim());
+        }
+        intent.setAction(null);
+    }
+
+    private void paintClipboard() {
+        clipboardLink = "";
+        android.content.ClipboardManager clipboard =
+                (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        if (clipboard == null || !clipboard.hasPrimaryClip()
+                || clipboard.getPrimaryClip() == null
+                || clipboard.getPrimaryClip().getItemCount() == 0) {
+            clipboardBanner.setVisibility(View.GONE);
+            return;
+        }
+        CharSequence text = clipboard.getPrimaryClip().getItemAt(0).coerceToText(this);
+        String value = text == null ? "" : text.toString().trim();
+        String already = linkField.getText().toString();
+        if (value.isEmpty() || value.length() > 400 || already.contains(value)) {
+            clipboardBanner.setVisibility(View.GONE);
+            return;
+        }
+        boolean looksLikeLink = value.contains("t.me/") || value.startsWith("tg://")
+                || value.startsWith("@") || value.startsWith("-100");
+        if (!looksLikeLink) {
+            clipboardBanner.setVisibility(View.GONE);
+            return;
+        }
+        clipboardLink = value;
+        clipboardText.setText(value);
+        clipboardBanner.setVisibility(View.VISIBLE);
+        Anim.fadeIn(clipboardBanner, 200);
     }
 
     private void paintRecent() {
@@ -433,6 +554,10 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         job.sendAs = Prefs.sendAs(this);
         job.uploadAfter = Prefs.autoUpload(this);
         job.deleteLocal = Prefs.autoDeleteLocal(this);
+        job.onlyKinds = Prefs.filterKinds(this);
+        job.minSize = Prefs.filterMinSize(this);
+        job.maxSize = Prefs.filterMaxSize(this);
+        job.skipDuplicates = true;
         return job;
     }
 

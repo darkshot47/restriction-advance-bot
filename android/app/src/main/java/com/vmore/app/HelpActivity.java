@@ -23,4 +23,13 @@ public class HelpActivity extends Activity {
         Anim.pageIn(findViewById(R.id.helpHeader));
         Anim.pageIn(body);
     }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (Lock.guard(this)) {
+            return;
+        }
+    }
+
 }

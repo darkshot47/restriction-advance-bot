@@ -70,6 +70,9 @@ public class HistoryActivity extends Activity implements History.Listener {
     @Override
     protected void onResume() {
         super.onResume();
+        if (Lock.guard(this)) {
+            return;
+        }
         History.get(this).addListener(this);
         render();
     }

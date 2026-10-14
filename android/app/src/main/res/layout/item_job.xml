@@ -71,6 +71,22 @@
         android:layout_marginTop="8dp"
         android:orientation="horizontal">
 
+        <ImageView
+            android:id="@+id/jobUp"
+            android:layout_width="34dp"
+            android:layout_height="34dp"
+            android:padding="6dp"
+            android:src="@drawable/ic_up"
+            android:contentDescription="@string/queue_move_up" />
+
+        <ImageView
+            android:id="@+id/jobDown"
+            android:layout_width="34dp"
+            android:layout_height="34dp"
+            android:padding="6dp"
+            android:src="@drawable/ic_down"
+            android:contentDescription="@string/queue_move_down" />
+
         <Button
             android:id="@+id/jobAction"
             android:layout_width="0dp"

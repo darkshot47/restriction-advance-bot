@@ -42,6 +42,12 @@ public class EditorActivity extends Activity {
     private long destChatId;
     private String destTitle = "";
     private String sendAs = Prefs.SEND_FILE;
+    private boolean muted;
+    private SeekBar frameBar;
+    private TextView frameLabel;
+    private Button muteChip;
+    private boolean hasVideo;
+    private boolean hasAudio;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -109,11 +115,14 @@ public class EditorActivity extends Activity {
 
         long[] meta = MediaUtils.videoMeta(file);
         durationMs = meta[0];
-        boolean video = MediaUtils.isVideo(file) && MediaUtils.canTrim(file) && durationMs > 0;
+        hasVideo = MediaUtils.isVideo(file) && MediaUtils.canTrim(file);
+        hasAudio = MediaUtils.isAudio(file) || (hasVideo && durationMs > 0);
+        boolean video = hasVideo && durationMs > 0;
         trimBox.setVisibility(video ? View.VISIBLE : View.GONE);
         if (video) {
             setupTrim();
         }
+        setupTools(video);
     }
 
     // -------------------------------------------------------------- quality //
@@ -181,6 +190,112 @@ public class EditorActivity extends Activity {
         }
         trimming = !trimming;
         paintTrim();
+    }
+
+    // ---------------------------------------------------------------- tools //
+
+    private void setupTools(boolean video) {
+        muteChip = findViewById(R.id.muteChip);
+        Button audioChip = findViewById(R.id.audioChip);
+        frameBar = findViewById(R.id.frameBar);
+        frameLabel = findViewById(R.id.frameLabel);
+        Button frameButton = findViewById(R.id.frameButton);
+        TextView hint = findViewById(R.id.toolsHint);
+
+        hint.setText(R.string.editor_tools_hint);
+        muteChip.setEnabled(hasVideo && hasAudio);
+        audioChip.setEnabled(hasAudio);
+        frameBar.setEnabled(video);
+        frameButton.setEnabled(video);
+        frameBar.setVisibility(video ? View.VISIBLE : View.GONE);
+        frameLabel.setVisibility(video ? View.VISIBLE : View.GONE);
+        frameButton.setVisibility(video ? View.VISIBLE : View.GONE);
+        frameLabel.setText(R.string.editor_frame_hint);
+
+        muteChip.setOnClickListener(v -> {
+            muted = !muted;
+            paintTools();
+        });
+        audioChip.setOnClickListener(v -> extractAudio());
+        frameButton.setOnClickListener(v -> useFrame());
+        frameBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar bar, int value, boolean fromUser) {
+                if (durationMs > 0) {
+                    frameLabel.setText(Format.duration(durationMs * value / 100));
+                }
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar bar) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar bar) {
+            }
+        });
+        if (durationMs > 0) {
+            frameBar.setProgress(10);
+        }
+        paintTools();
+        Anim.pressible(muteChip);
+        Anim.pressible(audioChip);
+        Anim.pressible(frameButton);
+    }
+
+    private void paintTools() {
+        muteChip.setText(muted ? R.string.editor_mute_on : R.string.editor_mute);
+        muteChip.setBackgroundResource(muted ? R.drawable.bg_chip_active : R.drawable.bg_chip);
+    }
+
+    /** Takes the frame the slider points at and uses it as the cover. */
+    private void useFrame() {
+        if (!hasVideo || durationMs <= 0) {
+            Ui.toast(this, getString(R.string.editor_need_video));
+            return;
+        }
+        long when = durationMs * frameBar.getProgress() / 100;
+        File target = new File(getCacheDir(), "cover.jpg");
+        File result = MediaUtils.frameAt(file, when, target);
+        if (result == null) {
+            Ui.toast(this, getString(R.string.editor_thumb_failed));
+            return;
+        }
+        thumbnail = result;
+        thumbPreview.setImageBitmap(BitmapFactory.decodeFile(result.getAbsolutePath()));
+        thumbPreview.setVisibility(View.VISIBLE);
+        Ui.toast(this, getString(R.string.editor_frame_used) + " " + Format.duration(when));
+    }
+
+    /** Writes the sound of this file next to it, as a playable .m4a. */
+    private void extractAudio() {
+        if (!hasAudio) {
+            Ui.toast(this, getString(R.string.editor_no_audio));
+            return;
+        }
+        File target = LocalFiles.targetFile(this,
+                Format.withoutExtension(file.getName()) + ".m4a");
+        Ui.toast(this, getString(R.string.editor_working));
+        new Thread(() -> {
+            File result = null;
+            try {
+                result = MediaUtils.keepTracks(file, target, "audio/");
+            } catch (Exception error) {
+                result = null;
+            }
+            final File written = result;
+            runOnUiThread(() -> {
+                if (written == null) {
+                    Ui.toast(this, getString(R.string.editor_audio_failed));
+                    return;
+                }
+                History.get(this).record(written.getName(), "audio", written.length(), 0L, "",
+                        History.STATUS_DONE, "", "", written.getAbsolutePath());
+                Intent intent = new Intent(this, ViewerActivity.class);
+                intent.putExtra("path", written.getAbsolutePath());
+                startActivity(intent);
+            });
+        }, "vmore-editor-audio").start();
     }
 
     // ------------------------------------------------------------ thumbnail //
@@ -268,13 +383,26 @@ public class EditorActivity extends Activity {
         final String kind = mediaKind();
         new Thread(() -> {
             File toSend = file;
+            if (muted && hasVideo) {
+                File silent = new File(getCacheDir(),
+                        Format.withoutExtension(file.getName()) + "_silent.mp4");
+                try {
+                    File stripped = MediaUtils.keepTracks(file, silent, "video/");
+                    if (stripped != null) {
+                        toSend = stripped;
+                    }
+                } catch (Exception error) {
+                    runOnUiThread(() -> Ui.toast(this,
+                            getString(R.string.editor_mute_failed)));
+                }
+            }
             if (trimming && durationMs > 0) {
                 File target = new File(getCacheDir(),
                         Format.withoutExtension(file.getName()) + "_trim"
                                 + file.getName().substring(
                                 Format.withoutExtension(file.getName()).length()));
                 try {
-                    toSend = MediaUtils.trim(file, target, startBar.getProgress(),
+                    toSend = MediaUtils.trim(toSend, target, startBar.getProgress(),
                             endBar.getProgress());
                 } catch (Exception error) {
                     runOnUiThread(() -> {
@@ -311,6 +439,9 @@ public class EditorActivity extends Activity {
     }
 
     private String mediaKind() {
+        if (muted && hasVideo) {
+            return "video";
+        }
         if (MediaUtils.isVideo(file)) {
             return "video";
         }
@@ -336,4 +467,13 @@ public class EditorActivity extends Activity {
         Ui.toast(this, getString(R.string.editor_uploaded) + " " + destTitle);
         finish();
     }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (Lock.guard(this)) {
+            return;
+        }
+    }
+
 }

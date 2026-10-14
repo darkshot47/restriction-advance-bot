@@ -29,7 +29,7 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:layout_marginLeft="4dp"
-            android:textColor="@color/vmore_white"
+            android:textColor="@color/vmore_on_accent"
             android:textSize="14sp"
             android:maxLines="1"
             android:ellipsize="middle" />
@@ -160,6 +160,16 @@
                     style="@style/VmoreButtonGhost"
                     android:minHeight="40dp"
                     android:text="@string/viewer_speed" />
+
+                <ImageView
+                    android:id="@+id/pipButton"
+                    android:layout_width="42dp"
+                    android:layout_height="42dp"
+                    android:layout_marginLeft="4dp"
+                    android:padding="9dp"
+                    android:tint="@color/vmore_on_accent"
+                    android:src="@drawable/ic_pip"
+                    android:contentDescription="@string/viewer_pip" />
 
                 <ImageView
                     android:id="@+id/fullscreenButton"

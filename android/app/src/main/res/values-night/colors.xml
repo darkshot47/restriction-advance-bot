@@ -24,15 +24,4 @@
     <color name="vmore_blue_soft">#331B6EF3</color>
     <color name="vmore_blue_ghost">#1A1B6EF3</color>
 
-    <color name="vmore_black">@color/vmore_bg</color>
-    <color name="vmore_black_soft">@color/vmore_media_bg</color>
-    <color name="vmore_white">@color/vmore_on_accent</color>
-    <color name="vmore_white_dim">@color/vmore_text_dim</color>
-    <color name="vmore_white_faint">@color/vmore_text_faint</color>
-    <color name="vmore_white_ghost">@color/vmore_stroke</color>
-    <color name="vmore_white_tint">@color/vmore_surface</color>
-    <color name="vmore_accent">@color/vmore_blue</color>
-    <color name="vmore_accent_dim">@color/vmore_blue_deep</color>
-    <color name="vmore_primary">@color/vmore_blue</color>
-    <color name="vmore_danger">@color/vmore_blue</color>
 </resources>

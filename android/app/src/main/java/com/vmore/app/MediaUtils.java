@@ -270,6 +270,102 @@ final class MediaUtils {
     //  Trim (front / back) — MP4 in, MP4 out, no re-encode
     // -------------------------------------------------------------------- //
 
+    /**
+     * Keeps only the tracks whose mime starts with {@code mimePrefix}: the
+     * movie without its sound ("video/") or just the sound of it ("audio/").
+     * Like the trim, no frame is touched — the tracks are copied, not encoded.
+     */
+    static File keepTracks(File source, File target, String mimePrefix) throws IOException {
+        MediaExtractor extractor = new MediaExtractor();
+        MediaMuxer muxer = null;
+        try {
+            extractor.setDataSource(source.getAbsolutePath());
+            int wanted = -1;
+            for (int index = 0; index < extractor.getTrackCount(); index++) {
+                MediaFormat format = extractor.getTrackFormat(index);
+                String mime = format.getString(MediaFormat.KEY_MIME);
+                if (mime != null && mime.startsWith(mimePrefix)) {
+                    wanted = index;
+                    break;
+                }
+            }
+            if (wanted < 0) {
+                return null;
+            }
+            extractor.selectTrack(wanted);
+            muxer = new MediaMuxer(target.getAbsolutePath(),
+                    MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4);
+            int outTrack = muxer.addTrack(extractor.getTrackFormat(wanted));
+            muxer.start();
+            ByteBuffer buffer = ByteBuffer.allocate(2 * 1024 * 1024);
+            MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
+            while (true) {
+                int size = extractor.readSampleData(buffer, 0);
+                if (size < 0) {
+                    break;
+                }
+                info.offset = 0;
+                info.size = size;
+                info.presentationTimeUs = extractor.getSampleTime();
+                info.flags = extractor.getSampleFlags();
+                muxer.writeSampleData(outTrack, buffer, info);
+                extractor.advance();
+            }
+            muxer.stop();
+            return target;
+        } finally {
+            if (muxer != null) {
+                try {
+                    muxer.release();
+                } catch (Exception ignored) {
+                }
+            }
+            extractor.release();
+        }
+    }
+
+    /** One frame of a video at {@code timeMs}, written as a JPEG cover. */
+    static File frameAt(File video, long timeMs, File target) {
+        MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+        try {
+            retriever.setDataSource(video.getAbsolutePath());
+            android.graphics.Bitmap frame = retriever.getFrameAtTime(timeMs * 1000L,
+                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+            if (frame == null) {
+                return null;
+            }
+            return saveJpeg(frame, target, 640);
+        } catch (Exception error) {
+            return null;
+        } finally {
+            try {
+                retriever.release();
+            } catch (Exception ignored) {
+            }
+        }
+    }
+
+    /** Writes a bitmap as a JPEG, no wider than {@code maxSide} pixels. */
+    private static File saveJpeg(android.graphics.Bitmap bitmap, File target, int maxSide) {
+        try {
+            int width = bitmap.getWidth();
+            int height = bitmap.getHeight();
+            float scale = Math.min(1f, (float) maxSide / Math.max(width, height));
+            android.graphics.Bitmap out = scale < 1f
+                    ? android.graphics.Bitmap.createScaledBitmap(bitmap,
+                    Math.max(1, Math.round(width * scale)),
+                    Math.max(1, Math.round(height * scale)), true)
+                    : bitmap;
+            FileOutputStream stream = new FileOutputStream(target);
+            out.compress(android.graphics.Bitmap.CompressFormat.JPEG, 88, stream);
+            stream.flush();
+            stream.close();
+            return target;
+        } catch (Exception error) {
+            return null;
+        }
+    }
+
     static boolean canTrim(File file) {
         String ext = extension(file.getName());
         return "mp4".equals(ext) || "m4v".equals(ext) || "mov".equals(ext);

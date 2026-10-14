@@ -140,6 +140,39 @@
     <string name="settings_check_copy">Copy</string>
     <string name="settings_check_copied">Copied</string>
     <string name="settings_session">Session</string>
+    <string name="settings_auto">Automatic</string>
+    <string name="settings_data">Data saving</string>
+    <string name="settings_wifi_only">Only on Wi-Fi</string>
+    <string name="settings_wifi_hint">The queue waits, and picks up by itself, the moment Wi-Fi is back.</string>
+    <string name="settings_charging_only">Only while charging</string>
+    <string name="settings_charging_hint">Kind to the battery: long batches wait for the charger.</string>
+    <string name="settings_battery_on">Android may stop the queue</string>
+    <string name="settings_battery_off">Background work is unrestricted</string>
+    <string name="settings_battery_hint">Tap to give Vmore freedom from battery optimization.</string>
+    <string name="settings_schedule">Schedule</string>
+    <string name="settings_schedule_at">Starts</string>
+    <string name="settings_schedule_none">Start now, whenever you tap Start</string>
+    <string name="settings_schedule_hint">Pick the time the queue should begin by itself.</string>
+    <string name="settings_schedule_daily">Repeat every day</string>
+    <string name="settings_schedule_clear">Clear the schedule</string>
+    <string name="settings_schedule_clear_hint">Back to starting only when you ask.</string>
+    <string name="settings_library">Library</string>
+    <string name="settings_library_hint">open the files on this phone</string>
+    <string name="settings_stats_hint">what moved through this phone</string>
+    <string name="settings_privacy">Privacy</string>
+    <string name="settings_lock">PIN lock</string>
+    <string name="settings_lock_hint">Ask for four to eight digits when the app is opened again.</string>
+    <string name="settings_lock_new">New PIN, four to eight digits</string>
+    <string name="settings_lock_bad">A PIN is four to eight digits</string>
+    <string name="settings_lock_set">PIN saved</string>
+    <string name="settings_sign_out_hint">leaves this phone and forgets the session</string>
+    <string name="settings_account_current">in use right now</string>
+    <string name="settings_account_switch">switch to this account</string>
+    <string name="settings_account_switch_confirm">The queue, the history and the files stay. Only the Telegram session changes.</string>
+    <string name="settings_account_empty">not signed in yet</string>
+    <string name="settings_account_add">Add another account</string>
+    <string name="settings_account_add_hint">sign in a second Telegram account and switch whenever you like</string>
+    <string name="settings_account_full">Three accounts are the limit</string>
     <string name="settings_help">How to use Vmore</string>
     <string name="settings_about">About</string>
     <string name="settings_version">Version</string>
@@ -149,6 +182,99 @@
     <!-- Help -->
     <string name="help_title">How to use Vmore</string>
     <string name="help_body">Vmore is a downloader and uploader that runs entirely on this phone.\n\n1. Sign in once with your Telegram number and the login code. Nothing is sent to any server.\n2. Paste a Telegram link on the home screen. Private links (t.me/c/…) work with your own account.\n3. Choose the chat that should receive the files.\n4. Tap Start. Vmore downloads the media and uploads it to that chat with your own data.\n\nRanges and batches: a range link such as t.me/channel/1-500 becomes one job per message, so a whole album or a whole channel section can be moved in one go.\n\nQuality: sending as File keeps the original bytes. Video plays inline. Photo is a fast preview.\n\nStorage: when Delete local copy is on, the phone copy is removed right after a successful upload and the job moves on to the next one.\n\nAll of this happens again by itself if the app is closed, because the queue runs as a foreground service.</string>
+
+    <!-- Home extras -->
+    <string name="home_option_quality">Quality</string>
+    <string name="home_option_filter">Filters</string>
+    <string name="home_option_schedule">Schedule</string>
+    <string name="home_clipboard_found">A Telegram link is on the clipboard</string>
+    <string name="home_clipboard_add">Add it</string>
+    <string name="home_shared_received">Link received from the other app</string>
+
+    <!-- Filters -->
+    <string name="filters_title">Batch filter</string>
+    <string name="filters_kinds">Kinds to keep</string>
+    <string name="filters_size">Size in megabytes</string>
+    <string name="filters_min">smallest</string>
+    <string name="filters_max">largest</string>
+    <string name="filters_all">Everything</string>
+    <string name="filters_off">Everything is kept</string>
+    <string name="filters_hint">A range of hundreds of messages can be narrowed down before anything is downloaded.</string>
+    <string name="filters_clear">Turn the filter off</string>
+
+    <!-- Files -->
+    <string name="files_title">Files on the phone</string>
+    <string name="files_empty">No file is on the phone right now. Everything that was uploaded and cleaned up lives in History.</string>
+    <string name="files_search_hint">Search by name</string>
+    <string name="files_sort_date">Newest</string>
+    <string name="files_sort_name">Name</string>
+    <string name="files_sort_size">Biggest</string>
+    <string name="files_count">files</string>
+    <string name="files_selected">selected</string>
+    <string name="files_upload">Upload</string>
+    <string name="files_share">Share</string>
+    <string name="files_clear">Unselect</string>
+    <string name="files_queued">files queued for upload</string>
+    <string name="files_delete_confirm">files will be deleted from the phone</string>
+    <string name="files_deleted">files deleted</string>
+
+    <!-- Stats -->
+    <string name="stats_title">Statistics</string>
+    <string name="stats_empty">Nothing has moved through this phone yet.</string>
+    <string name="stats_overview">Overview</string>
+    <string name="stats_uploaded">Uploaded</string>
+    <string name="stats_downloaded">Downloaded</string>
+    <string name="stats_failed">Failed</string>
+    <string name="stats_bytes_up">Sent to Telegram</string>
+    <string name="stats_bytes_down">Received from Telegram</string>
+    <string name="stats_saved">Space given back by the cleanup</string>
+    <string name="stats_on_phone">Still on the phone</string>
+    <string name="stats_average">Average file</string>
+    <string name="stats_queue">Jobs in the queue</string>
+    <string name="stats_last">Last activity</string>
+    <string name="stats_week">Last seven days</string>
+    <string name="stats_chats">Busiest chats</string>
+
+    <!-- Lock -->
+    <string name="lock_title">Enter your PIN</string>
+    <string name="lock_hint">Vmore was left alone, so it locked itself.</string>
+    <string name="lock_wrong">That PIN is not right</string>
+    <string name="lock_forgot">Forgot the PIN</string>
+    <string name="lock_forgot_confirm">The only way past a forgotten PIN is to sign out of Telegram on this phone. The queue, the history and the files stay.</string>
+    <string name="lock_forgot_yes">Sign out</string>
+    <string name="lock_cleared">The lock was removed</string>
+
+    <!-- Queue extras -->
+    <string name="queue_retry_all">Retry all failed</string>
+    <string name="queue_stop_all">Stop everything</string>
+    <string name="queue_stop_confirm">The running job and everything waiting leaves the queue. The files already uploaded stay in the chat.</string>
+    <string name="queue_nothing_failed">No failed job is waiting</string>
+    <string name="queue_retried">jobs back in the queue</string>
+    <string name="queue_move_up">Move up</string>
+    <string name="queue_move_down">Move down</string>
+
+    <!-- Editor tools -->
+    <string name="editor_tools">More tools</string>
+    <string name="editor_tools_hint">All of this runs on the phone, and nothing is re-encoded, so no quality is lost.</string>
+    <string name="editor_mute">Remove sound</string>
+    <string name="editor_mute_on">Sound removed</string>
+    <string name="editor_audio_only">Sound only</string>
+    <string name="editor_frame">Take this frame as the cover</string>
+    <string name="editor_frame_hint">Move the slider, then take the frame</string>
+    <string name="editor_frame_used">Cover taken at</string>
+    <string name="editor_working">Working on the phone</string>
+    <string name="editor_audio_failed">That file has no sound track to take out</string>
+    <string name="editor_no_audio">That file has no sound</string>
+    <string name="editor_mute_failed">The sound could not be removed from that file</string>
+
+    <!-- Player extras -->
+    <string name="viewer_pip">Floating player</string>
+    <string name="viewer_pip_old">The floating player needs Android 8 or newer</string>
+    <string name="viewer_pip_failed">This phone refused the floating player</string>
+    <string name="viewer_next">Next up</string>
+    <string name="viewer_no_next">That was the last file in the folder</string>
+    <string name="settings_autoplay">Play the next file by itself</string>
+    <string name="settings_autoplay_hint">A folder of downloads plays straight through, one after another.</string>
 
     <!-- Shared -->
     <string name="common_back">Back</string>

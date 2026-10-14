@@ -2,7 +2,7 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/vmore_black"
+    android:background="@color/vmore_bg"
     android:orientation="vertical">
 
     <LinearLayout
@@ -75,6 +75,30 @@
                 android:layout_marginLeft="8dp"
                 style="@style/VmoreButtonGhost"
                 android:text="@string/queue_clear_done" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:orientation="horizontal">
+
+            <Button
+                android:id="@+id/retryAllButton"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                style="@style/VmoreButtonGhost"
+                android:text="@string/queue_retry_all" />
+
+            <Button
+                android:id="@+id/stopAllButton"
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                android:layout_marginLeft="8dp"
+                style="@style/VmoreButtonGhost"
+                android:text="@string/queue_stop_all" />
         </LinearLayout>
     </LinearLayout>
 

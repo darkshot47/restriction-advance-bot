@@ -53,6 +53,8 @@ public class ViewerActivity extends Activity {
     private boolean controlsVisible = true;
     private boolean fullscreen;
     private float speed = 1f;
+    private int videoWidth;
+    private int videoHeight;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable ticker = new Runnable() {
@@ -103,6 +105,7 @@ public class ViewerActivity extends Activity {
         findViewById(R.id.shareButton).setOnClickListener(v -> share());
         findViewById(R.id.openExternalButton).setOnClickListener(v -> openExternally());
         findViewById(R.id.fullscreenButton).setOnClickListener(v -> toggleFullscreen());
+        findViewById(R.id.pipButton).setOnClickListener(v -> enterPip());
         playButton.setOnClickListener(v -> togglePlay());
         speedButton.setOnClickListener(v -> cycleSpeed());
 
@@ -187,6 +190,8 @@ public class ViewerActivity extends Activity {
                 }
                 player.setOnPreparedListener(mp -> {
                     prepared = true;
+                    videoWidth = mp.getVideoWidth();
+                    videoHeight = mp.getVideoHeight();
                     seekBar.setMax(Math.max(1, mp.getDuration()));
                     applySpeed();
                     seekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
@@ -217,6 +222,9 @@ public class ViewerActivity extends Activity {
                     playButton.setCompoundDrawablesWithIntrinsicBounds(
                             R.drawable.ic_play, 0, 0, 0);
                     setControls(true);
+                    if (Prefs.autoplayNext(this)) {
+                        playNext();
+                    }
                 });
                 player.setOnErrorListener((mp, what, extra) -> {
                     Ui.toast(this, "This phone cannot play that file");
@@ -278,6 +286,78 @@ public class ViewerActivity extends Activity {
         } catch (Exception ignored) {
             //: Some files answer with an illegal-state error; playback simply
             //: continues at the previous speed.
+        }
+    }
+
+    /**
+     * The files that sit next to this one in the app's folder, newest first:
+     * the player walks down that list, so a folder of downloads plays as one
+     * long queue.
+     */
+    private java.util.List<File> playlist() {
+        java.util.List<File> found = new java.util.ArrayList<>();
+        File[] files = LocalFiles.downloadsDir(this).listFiles();
+        if (files != null) {
+            for (File candidate : files) {
+                if (candidate.isFile() && (MediaUtils.isVideo(candidate)
+                        || MediaUtils.isAudio(candidate))) {
+                    found.add(candidate);
+                }
+            }
+        }
+        found.sort((left, right) -> Long.compare(right.lastModified(), left.lastModified()));
+        return found;
+    }
+
+    private void playNext() {
+        java.util.List<File> files = playlist();
+        int index = -1;
+        for (int position = 0; position < files.size(); position++) {
+            if (files.get(position).getAbsolutePath().equals(file.getAbsolutePath())) {
+                index = position;
+                break;
+            }
+        }
+        if (index < 0 || index + 1 >= files.size()) {
+            Ui.toast(this, getString(R.string.viewer_no_next));
+            return;
+        }
+        File next = files.get(index + 1);
+        Intent intent = new Intent(this, ViewerActivity.class);
+        intent.putExtra("path", next.getAbsolutePath());
+        Ui.toast(this, getString(R.string.viewer_next) + " " + next.getName());
+        startActivity(intent);
+        finish();
+    }
+
+    // ----------------------------------------------------- window modes //
+
+    /** The little floating player, for when the video should keep running. */
+    private void enterPip() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            Ui.toast(this, getString(R.string.viewer_pip_old));
+            return;
+        }
+        try {
+            android.app.PictureInPictureParams.Builder builder =
+                    new android.app.PictureInPictureParams.Builder();
+            if (videoWidth > 0 && videoHeight > 0) {
+                builder.setAspectRatio(new android.util.Rational(videoWidth, videoHeight));
+            }
+            enterPictureInPictureMode(builder.build());
+        } catch (Exception error) {
+            Ui.toast(this, getString(R.string.viewer_pip_failed));
+        }
+    }
+
+    @Override
+    public void onPictureInPictureModeChanged(boolean inPip,
+                                              android.content.res.Configuration configuration) {
+        super.onPictureInPictureModeChanged(inPip, configuration);
+        if (inPip) {
+            controls.setVisibility(View.GONE);
+        } else if (file != null && MediaUtils.isVideo(file)) {
+            controls.setVisibility(View.VISIBLE);
         }
     }
 
@@ -468,4 +548,13 @@ public class ViewerActivity extends Activity {
         }
         super.onDestroy();
     }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (Lock.guard(this)) {
+            return;
+        }
+    }
+
 }

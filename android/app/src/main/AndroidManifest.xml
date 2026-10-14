@@ -38,10 +38,32 @@
             </intent-filter>
         </activity>
 
+        <!-- Also the target of "Share to Vmore" from any other app. -->
         <activity
             android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".LockActivity"
             android:exported="false"
-            android:label="@string/app_name" />
+            android:label="@string/lock_title" />
+
+        <activity
+            android:name=".FilesActivity"
+            android:exported="false"
+            android:label="@string/files_title" />
+
+        <activity
+            android:name=".StatsActivity"
+            android:exported="false"
+            android:label="@string/stats_title" />
 
         <activity
             android:name=".ChatPickerActivity"
@@ -77,7 +99,8 @@
             android:name=".ViewerActivity"
             android:exported="false"
             android:label="@string/app_name"
-            android:configChanges="orientation|screenSize|keyboardHidden" />
+            android:supportsPictureInPicture="true"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden" />
 
         <provider
             android:name=".VmoreFiles"
@@ -91,6 +114,29 @@
             android:name=".QueueService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- Pause or resume from the home screen or the Quick Settings panel. -->
+        <receiver
+            android:name=".Widget"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/widget_info" />
+        </receiver>
+
+        <service
+            android:name=".QSTile"
+            android:exported="true"
+            android:icon="@drawable/ic_play"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
 
     </application>
 

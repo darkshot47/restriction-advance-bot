@@ -109,6 +109,51 @@ public final class Jobs {
         return result;
     }
 
+    /**
+     * Moves a job up or down the waiting list: the engine always takes the
+     * first queued job, so the list order is the priority.
+     */
+    public synchronized boolean move(String id, int delta) {
+        int from = -1;
+        for (int index = 0; index < jobs.size(); index++) {
+            if (jobs.get(index).id.equals(id)) {
+                from = index;
+                break;
+            }
+        }
+        if (from < 0) {
+            return false;
+        }
+        int to = from + delta;
+        if (to < 0 || to >= jobs.size()) {
+            return false;
+        }
+        QJob moved = jobs.remove(from);
+        jobs.add(to, moved);
+        save();
+        notifyListeners();
+        return true;
+    }
+
+    /** Puts every failed job back in line; returns how many were woken. */
+    public synchronized int retryFailed() {
+        int woken = 0;
+        for (QJob job : jobs) {
+            if (QJob.FAILED.equals(job.stage)) {
+                job.stage = QJob.QUEUED;
+                job.error = "";
+                job.attempts = 0;
+                job.skipped = false;
+                woken++;
+            }
+        }
+        if (woken > 0) {
+            save();
+            notifyListeners();
+        }
+        return woken;
+    }
+
     public synchronized int countInStage(String stage) {
         int total = 0;
         for (QJob job : jobs) {
@@ -218,6 +263,8 @@ public final class Jobs {
         for (Listener listener : listeners) {
             listener.onJobsChanged();
         }
+        //: The home screen and the Quick Settings panel see the same queue.
+        Widget.touch(app);
     }
 
     // --------------------------------------------------------- persistence //

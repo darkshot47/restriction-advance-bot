@@ -24,7 +24,15 @@ final class Skin {
     }
 
     static boolean isNight(Context context) {
-        return Prefs.night(context);
+        int mode = Prefs.skinMode(context);
+        if (mode == 1) {
+            return true;
+        }
+        if (mode == 2) {
+            int hour = java.util.Calendar.getInstance().get(java.util.Calendar.HOUR_OF_DAY);
+            return hour < 6 || hour >= 18;
+        }
+        return false;
     }
 
     /** What every screen calls first: skin plus the matching system bars. */
@@ -71,7 +79,13 @@ final class Skin {
 
     /** Flips the skin and rebuilds the screen that asked for it. */
     static void toggle(Activity activity) {
-        Prefs.setNight(activity, !isNight(activity));
+        //: From automatic, a tap goes to the opposite of what is showing now.
+        Prefs.setSkinMode(activity, isNight(activity) ? 0 : 1);
+        activity.recreate();
+    }
+
+    static void setMode(Activity activity, int mode) {
+        Prefs.setSkinMode(activity, mode);
         activity.recreate();
     }
 
@@ -84,6 +98,10 @@ final class Skin {
     }
 
     static String label(Context context) {
+        int mode = Prefs.skinMode(context);
+        if (mode == 2) {
+            return isNight(context) ? "Automatic (night)" : "Automatic (day)";
+        }
         return isNight(context) ? "Night" : "Day";
     }
 }

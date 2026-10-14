@@ -35,6 +35,8 @@ public class QueueService extends Service {
     /** Attempts per job, and the pause between them (it grows a little). */
     private static final int MAX_ATTEMPTS = 3;
     private static final long RETRY_WAIT_MS = 6_000L;
+    /** How often a queue waiting for Wi-Fi or the charger looks again. */
+    private static final long HOLD_POLL_MS = 5_000L;
 
     /** Live numbers for whichever job is running — read by every screen. */
     public static final class Live {
@@ -71,6 +73,7 @@ public class QueueService extends Service {
     private final AtomicBoolean skipCurrent = new AtomicBoolean(false);
     private long postedAt;
     private int completedJobs;
+    private int skippedJobs;
     private String lastName = "";
     private String lastWhere = "";
 
@@ -205,6 +208,7 @@ public class QueueService extends Service {
         }
         acquireWakeLock();
         completedJobs = 0;
+        skippedJobs = 0;
         Live.RUNNING.set(true);
         //: A queue woken by the system lives in a fresh process where the
         //: Telegram session has not been built yet; the worker waits for it.
@@ -220,6 +224,17 @@ public class QueueService extends Service {
             while (!shuttingDown) {
                 if (jobs.pausedAll()) {
                     break;
+                }
+                //: "only on Wi-Fi", "only while charging" and a start time are
+                //: rules the queue obeys for every job, not just the first one.
+                String hold = holdReason();
+                if (!hold.isEmpty()) {
+                    Live.STAGE = "";
+                    Live.NAME = hold;
+                    Live.RUNNING.set(true);
+                    postProgress(false);
+                    sleep(HOLD_POLL_MS);
+                    continue;
                 }
                 QJob job = jobs.nextQueued();
                 if (job == null) {
@@ -259,8 +274,10 @@ public class QueueService extends Service {
             showNotification(false);
             return;
         }
-        if (completedJobs > 0) {
-            Notifications.finished(this, lastName, lastWhere);
+        if (completedJobs > 0 || skippedJobs > 0) {
+            String extra = skippedJobs == 0 ? lastName
+                    : lastName + " (" + skippedJobs + " left out by the filters)";
+            Notifications.finished(this, extra, lastWhere);
         }
         stopForegroundCompat(STOP_FOREGROUND_REMOVE);
         stopSelf();
@@ -296,6 +313,15 @@ public class QueueService extends Service {
             postProgress(false);
             sleep(RETRY_WAIT_MS * attempt);
         }
+    }
+
+    /** The rule that makes the queue wait right now, or an empty string. */
+    private String holdReason() {
+        String schedule = Net.scheduleBlocker(this);
+        if (!schedule.isEmpty()) {
+            return schedule;
+        }
+        return Net.blocker(this);
     }
 
     /**
@@ -361,6 +387,20 @@ public class QueueService extends Service {
                     return;
                 }
             }
+            String skip = skipReason(job);
+            if (!skip.isEmpty()) {
+                skippedJobs++;
+                job.skipped = true;
+                job.note = skip;
+                job.stage = QJob.DONE;
+                Live.STAGE = QJob.DONE;
+                Live.ERROR = "";
+                jobs.update(job);
+                jobs.remove(job.id);
+                Tg.get(this).releaseDownload(job.fileId);
+                return;
+            }
+
             job.stage = QJob.DOWNLOADING;
             Live.STAGE = QJob.DOWNLOADING;
             Live.TOTAL.set(job.size);
@@ -394,6 +434,7 @@ public class QueueService extends Service {
                 }, cancelled);
                 job.uploaded = job.size;
                 job.note = "";
+                Stats.rememberUploaded(this, String.valueOf(job.fileId), job.size);
 
                 if (job.deleteLocal) {
                     deleteLocalCopy(job);
@@ -474,6 +515,18 @@ public class QueueService extends Service {
         Live.NAME = job.name;
         Live.TOTAL.set(job.size);
         jobs.update(job);
+    }
+
+    /** Why this job is not worth downloading, or an empty string. */
+    private String skipReason(QJob job) {
+        if (!job.allows(job.kind, job.size)) {
+            return "left out: the batch filter does not keep this kind of media";
+        }
+        if (job.skipDuplicates && job.fileId != 0 && job.uploadAfter
+                && Stats.alreadyUploaded(this, String.valueOf(job.fileId), job.size)) {
+            return "left out: this file was already uploaded once";
+        }
+        return "";
     }
 
     private String captionFor(QJob job, Tg.Media media) {
@@ -614,6 +667,7 @@ public class QueueService extends Service {
 
     /** Puts the live row up as a real foreground notification. */
     private void postProgress(boolean paused) {
+        Widget.touch(this);
         Notification notification = Notifications.progress(this, Live.NAME, Live.STAGE,
                 Live.DONE.get(), Live.TOTAL.get(), paused);
         try {

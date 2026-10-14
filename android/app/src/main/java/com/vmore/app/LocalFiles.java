@@ -45,7 +45,8 @@ final class LocalFiles {
 
     /** Where the account's profile picture is kept, once, in app storage. */
     static File avatarFile(Context context) {
-        return new File(context.getFilesDir(), "avatar.jpg");
+        //: One picture per account slot, so switching accounts switches faces.
+        return new File(context.getFilesDir(), "avatar_" + Prefs.activeSlot(context) + ".jpg");
     }
 
     /** Copy a file (or move-and-replace) to an exact target path. */
