@@ -91,6 +91,9 @@ public class SettingsActivity extends Activity {
                 value -> Prefs.setWifiOnly(this, value), R.string.settings_wifi_hint);
         addSwitch(R.string.settings_charging_only, Prefs.chargingOnly(this),
                 value -> Prefs.setChargingOnly(this, value), R.string.settings_charging_hint);
+
+        addRow(R.drawable.ic_speed, getString(R.string.settings_speed), speedSummary(),
+                v -> pickSpeed());
         boolean restricted = Net.batteryRestricted(this);
         addRow(R.drawable.ic_lock,
                 restricted ? getString(R.string.settings_battery_on)
@@ -216,6 +219,48 @@ public class SettingsActivity extends Activity {
 
     private interface Toggle {
         void onChanged(boolean value);
+    }
+
+    /** "Full speed" or the cap, in the words on the data-saving screen. */
+    private String speedSummary() {
+        int kbps = Prefs.speedLimitKbps(this);
+        if (kbps <= 0) {
+            return getString(R.string.settings_speed_full);
+        }
+        if (kbps >= 1024) {
+            return (kbps / 1024) + " MB/s";
+        }
+        return kbps + " KB/s";
+    }
+
+    private void pickSpeed() {
+        final int[] values = {0, 4096, 2048, 1024, 512};
+        String[] labels = new String[values.length];
+        for (int index = 0; index < values.length; index++) {
+            labels[index] = values[index] == 0
+                    ? getString(R.string.settings_speed_full) : speedLabel(values[index]);
+        }
+        int current = Prefs.speedLimitKbps(this);
+        int checked = 0;
+        for (int index = 0; index < values.length; index++) {
+            if (values[index] == current) {
+                checked = index;
+            }
+        }
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.settings_speed)
+                .setSingleChoiceItems(labels, checked, (dialog, which) -> {
+                    Prefs.setSpeedLimitKbps(this, values[which]);
+                    dialog.dismiss();
+                    render();
+                })
+                .setNeutralButton(R.string.common_cancel, null)
+                .show();
+    }
+
+    /** "4 MB/s" or "512 KB/s". */
+    private static String speedLabel(int kbps) {
+        return kbps >= 1024 ? (kbps / 1024) + " MB/s" : kbps + " KB/s";
     }
 
     private void addSwitch(int titleRes, boolean value, Toggle toggle) {

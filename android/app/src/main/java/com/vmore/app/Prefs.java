@@ -266,6 +266,18 @@ public final class Prefs {
     }
 
     /** Only work while the phone is charging — kind to the battery. */
+    /**
+     * The download cap in kilobytes per second; 0 means the full speed.
+     * Telegram resumes a cancelled download, so the cap only slows it down.
+     */
+    public static int speedLimitKbps(Context context) {
+        return prefs(context).getInt("speed_limit_kbps", 0);
+    }
+
+    public static void setSpeedLimitKbps(Context context, int value) {
+        prefs(context).edit().putInt("speed_limit_kbps", Math.max(0, value)).apply();
+    }
+
     public static boolean chargingOnly(Context context) {
         return prefs(context).getBoolean(KEY_CHARGING_ONLY, false);
     }
@@ -282,6 +294,18 @@ public final class Prefs {
 
     public static void setScheduleAt(Context context, long when) {
         prefs(context).edit().putLong(KEY_SCHEDULE_AT, when).apply();
+    }
+
+    /**
+     * Set when the user starts the queue by hand: the start time is then
+     * skipped once, because a tap means now.
+     */
+    public static boolean startNow(Context context) {
+        return prefs(context).getBoolean("start_now", false);
+    }
+
+    public static void setStartNow(Context context, boolean value) {
+        prefs(context).edit().putBoolean("start_now", value).apply();
     }
 
     public static boolean scheduleDaily(Context context) {

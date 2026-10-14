@@ -314,6 +314,7 @@ public final class Tg {
             FileWatch watch = downloads.get(file.id);
             if (watch != null) {
                 watch.onFile(file);
+                throttle(watch, file);
             }
         } else if (object instanceof TdApi.UpdateMessageSendSucceeded) {
             TdApi.UpdateMessageSendSucceeded update = (TdApi.UpdateMessageSendSucceeded) object;
@@ -1040,6 +1041,56 @@ public final class Tg {
         return null;
     }
 
+    /**
+     * Holds a download to the user's cap.
+     *
+     * The whole trick is that a cancelled download is not a lost download:
+     * Telegram keeps the part it has and carries on when the file is requested
+     * again, so a cap is a pause loop rather than a smaller transfer.  Uploads
+     * have no such switch, so the cap covers downloads.
+     */
+    private void throttle(FileWatch watch, TdApi.File file) {
+        long cap = Prefs.speedLimitKbps(app) * 1024L;
+        if (cap <= 0 || watch.done || watch.waiting) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (watch.anchorAt == 0L) {
+            watch.anchorAt = now;
+            watch.anchorBytes = watch.bytesSeen;
+            return;
+        }
+        long allowed = watch.anchorBytes + cap * (now - watch.anchorAt) / 1000L;
+        if (watch.bytesSeen <= allowed) {
+            return;
+        }
+        long over = watch.bytesSeen - allowed;
+        long pause = Math.min(4000L, Math.max(250L, over * 1000L / cap));
+        watch.waiting = true;
+        watch.anchorAt = now + pause;
+        watch.anchorBytes = watch.bytesSeen;
+        Client current = client;
+        if (current != null) {
+            current.send(new TdApi.CancelDownloadFile(watch.fileId, false),
+                    ignored -> {
+                    }, ignored -> {
+                    });
+        }
+        main.postDelayed(() -> {
+            watch.waiting = false;
+            if (watch.done) {
+                return;
+            }
+            Client restart = client;
+            if (restart != null) {
+                restart.send(new TdApi.DownloadFile(watch.fileId, 32, 0, 0, false),
+                        ignored -> {
+                        }, ignored -> {
+                        });
+            }
+        }, pause);
+    }
+
     private static boolean isComplete(TdApi.File file) {
         return file != null && file.local != null && file.local.isDownloadingCompleted
                 && file.local.path != null && !file.local.path.isEmpty();
@@ -1089,6 +1140,8 @@ public final class Tg {
                     SendWatch watch = new SendWatch(message.id, file.id, length, progress,
                             callback);
                     sends.put(message.id, watch);
+                    //: Uploads have no pause switch, so the cap covers the
+                    //: download side only; the watch here is progress only.
                     downloads.put(file.id, watch.progressWatch());
                 });
     }
@@ -1291,6 +1344,12 @@ public final class Tg {
         final Cb<Integer> callback;
         volatile boolean done;
         volatile String path;
+        //: The cap is enforced by stopping the download for a moment and
+        //: starting it again: Telegram keeps the bytes it already has.
+        volatile long anchorAt;
+        volatile long anchorBytes;
+        volatile long bytesSeen;
+        volatile boolean waiting;
 
         FileWatch(int fileId, Progress progress, Cb<Integer> callback) {
             this.fileId = fileId;
@@ -1307,6 +1366,7 @@ public final class Tg {
             if (progress != null) {
                 progress.onBytes(written, total);
             }
+            bytesSeen = written;
             if (isComplete(file)) {
                 done = true;
                 path = file.local.path;

@@ -88,6 +88,12 @@ final class Net {
 
     /** The same answer for the scheduler, before the first job starts. */
     static String scheduleBlocker(Context context) {
+        if (Prefs.startNow(context)) {
+            //: The user tapped Start: a start time in the future waits for the
+            //: next job, not for this one.
+            Prefs.setStartNow(context, false);
+            return "";
+        }
         long at = Prefs.scheduleAt(context);
         if (at <= 0L) {
             return "";

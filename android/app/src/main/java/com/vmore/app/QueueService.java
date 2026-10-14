@@ -84,6 +84,9 @@ public class QueueService extends Service {
     }
 
     public static void run(Context context) {
+        //: Anything that asks the queue to go right now (Start, Resume, the
+        //: notification, the widget) also says "do not wait for the start time".
+        Prefs.setStartNow(context, true);
         dispatch(context, ACTION_RUN, null);
     }
 
