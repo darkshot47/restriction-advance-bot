@@ -38,6 +38,9 @@ public class RetryTest {
         assertTrue(Retry.fatal("not enough rights to read this chat"));
         assertTrue(Retry.fatal("no destination chat was chosen"));
         assertTrue(Retry.fatal("open the app and sign in with your Telegram account"));
+        assertTrue(Retry.fatal("Telegram could not find @nosuchchannel"));
+        assertTrue(Retry.fatal("that link does not name a chat"));
+        assertTrue(Retry.fatal("that invite link cannot be used to read the message"));
     }
 
     @Test

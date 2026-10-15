@@ -58,7 +58,8 @@ final class Retry {
                 || lower.contains("sign in")
                 || lower.contains("no telegram engine") || lower.contains("not ready")
                 || lower.contains("unsupported") || lower.contains("invalid")
-                || lower.contains("cannot see that chat")
+                || lower.contains("cannot see that chat") || lower.contains("could not find")
+                || lower.contains("does not name") || lower.contains("invite link cannot")
                 || lower.contains("not a member") || lower.contains("no access")
                 || lower.contains("not enough rights") || lower.contains("kicked")
                 || lower.contains("banned") || lower.contains("deleted");
