@@ -43,6 +43,32 @@ public final class Tg {
         void onBytes(long done, long total);
     }
 
+    /**
+     * A step of the pipeline that did not work, carrying Telegram's own words
+     * and whether another attempt is worth the data.
+     */
+    public static final class Failure extends Exception {
+
+        public final boolean retryable;
+        public final String raw;
+
+        Failure(String message, String raw, boolean retryable) {
+            super(message);
+            this.raw = raw == null ? "" : raw;
+            this.retryable = retryable;
+        }
+    }
+
+    /**
+     * Some refusals repeat forever: the file is bigger than the phone, the
+     * chat does not allow saving, the message is gone.  Everything else — a
+     * dropped connection, a file reference Telegram has moved on from, a
+     * download that stopped half way — is worth one more try.
+     */
+    private static boolean worthRetrying(String reason) {
+        return Retry.worthIt(reason);
+    }
+
     /** State machine of the sign-in screen. */
     public interface Listener {
         void onState(String state, String detail);
@@ -57,6 +83,11 @@ public final class Tg {
     public static final String STATE_READY = "ready";
     public static final String STATE_CLOSED = "closed";
     public static final String STATE_ERROR = "error";
+
+    /** How long a download may sit with no byte of progress before a nudge. */
+    private static final long STALL_MS = 45_000L;
+    /** How many times one download is nudged before it is called stuck. */
+    private static final int MAX_NUDGES = 2;
 
     /** The signed-in account. */
     public static final class Account {
@@ -105,6 +136,13 @@ public final class Tg {
         public boolean isVideo() {
             return "video".equals(kind);
         }
+
+        /**
+         * True when Telegram is willing to hand these bytes over.  A chat whose
+         * owner protects its content, and any file this account may not read,
+         * comes back with the flag down — and no amount of retrying changes it.
+         */
+        public boolean downloadable = true;
     }
 
     private static volatile Tg instance;
@@ -126,6 +164,9 @@ public final class Tg {
     private final Context app;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Map<Integer, FileWatch> downloads = new ConcurrentHashMap<>();
+    //: Upload progress watches live apart from downloads: the two share TDLib's
+    //: file ids, and a long upload must never knock a running download out.
+    private final Map<Integer, FileWatch> uploads = new ConcurrentHashMap<>();
     private final Map<Long, SendWatch> sends = new ConcurrentHashMap<>();
     private final Map<Long, Chat> chatCache = new ConcurrentHashMap<>();
 
@@ -315,6 +356,10 @@ public final class Tg {
             if (watch != null) {
                 watch.onFile(file);
                 throttle(watch, file);
+            }
+            FileWatch sending = uploads.get(file.id);
+            if (sending != null) {
+                sending.onFile(file);
             }
         } else if (object instanceof TdApi.UpdateMessageSendSucceeded) {
             TdApi.UpdateMessageSendSucceeded update = (TdApi.UpdateMessageSendSucceeded) object;
@@ -533,6 +578,19 @@ public final class Tg {
         return ready;
     }
 
+    /**
+     * True while the session is only *starting* — a fresh process where TDLib
+     * has not finished replaying the sign-in yet.  The queue waits for this
+     * instead of failing the user's jobs, because a few seconds are the whole
+     * difference between "download failed" and a job that simply ran.
+     */
+    public boolean starting() {
+        if (!nativeOk || !Prefs.hasCredentials(app)) {
+            return false;
+        }
+        return !ready && !STATE_ERROR.equals(state);
+    }
+
     /** Plain words for why the queue cannot run right now. */
     public String blockedReason() {
         if (!nativeOk) {
@@ -623,6 +681,60 @@ public final class Tg {
 
     private <T> void post(Cb<T> callback, T value) {
         main.post(() -> callback.ok(value));
+    }
+
+    /**
+     * The chat a link points at when the link has no message in it — the
+     * "https://t.me/channel" and "@channel" shapes.  Invite links are checked
+     * (and joined when Telegram allows it) exactly like a message link is.
+     */
+    public long chatForBlocking(final TgLink link, final AtomicBoolean cancelled)
+            throws Exception {
+        if (link.chatId != 0L) {
+            chatBlocking(link.chatId);
+            return link.chatId;
+        }
+        final Sync<Long> sync = new Sync<>();
+        Client current = client;
+        if (current == null) {
+            throw new Failure("the Telegram engine is not running", "no client", false);
+        }
+        if (!link.inviteHash.isEmpty()) {
+            current.send(new TdApi.CheckChatInviteLink(inviteUrl(link.inviteHash)), object -> {
+                if (object instanceof TdApi.ChatInviteLinkInfo) {
+                    long chatId = ((TdApi.ChatInviteLinkInfo) object).chatId;
+                    if (chatId != 0L) {
+                        sync.ok(chatId);
+                        return;
+                    }
+                }
+                current.send(new TdApi.JoinChatByInviteLink(inviteUrl(link.inviteHash)), joined -> {
+                    if (joined instanceof TdApi.ChatJoinResultSuccess) {
+                        sync.ok(((TdApi.ChatJoinResultSuccess) joined).chatId);
+                    } else {
+                        sync.fail("that invite link cannot be opened by this account");
+                    }
+                });
+            });
+        } else if (!link.username.isEmpty()) {
+            current.send(new TdApi.SearchPublicChat(link.username), object -> {
+                if (object instanceof TdApi.Error) {
+                    sync.fail("Telegram could not find @" + link.username);
+                    return;
+                }
+                remember((TdApi.Chat) object);
+                sync.ok(((TdApi.Chat) object).id);
+            });
+        } else {
+            throw new Failure("that link does not name a chat", "no chat in the link", false);
+        }
+        Long found = sync.await(90_000, cancelled);
+        if (found == null || found == 0L) {
+            String reason = sync.error == null || sync.error.isEmpty()
+                    ? "Telegram could not open that chat" : sync.error;
+            throw new Failure(reason, reason, worthRetrying(reason));
+        }
+        return found;
     }
 
     /** One chat's details (title, type) by id. */
@@ -932,6 +1044,10 @@ public final class Tg {
         }
         media.fileId = file.id;
         media.size = file.size > 0 ? file.size : file.expectedSize;
+        //: A file already on the phone is usable whatever the flag says; only a
+        //: file that is still on Telegram's side has to be allowed down.
+        boolean cached = file.local != null && file.local.isDownloadingCompleted;
+        media.downloadable = cached || file.local == null || file.local.canBeDownloaded;
         media.caption = captionOf(content);
         if (media.name == null || media.name.isEmpty()) {
             media.name = "vmore_" + media.messageId + guessExtension(media.mime);
@@ -988,22 +1104,49 @@ public final class Tg {
             done.fail("the Telegram engine is not running");
             return;
         }
+        //: The watch is registered before the request goes out.  Telegram can
+        //: answer with a file that is already on the phone (the second time a
+        //: link is used, for instance) and the update that says so may even
+        //: arrive first; registering late used to lose it and call a finished
+        //: download a failure.
+        final FileWatch watch = new FileWatch(fileId, progress, done);
+        FileWatch previous = downloads.put(fileId, watch);
+        if (previous != null && previous != watch && !previous.done) {
+            previous.finishError("a newer request replaced this one");
+        }
         current.send(new TdApi.DownloadFile(fileId, 32, 0, 0, false), object -> {
             if (object instanceof TdApi.Error) {
-                done.fail(friendly(((TdApi.Error) object).message));
+                if (downloads.get(fileId) == watch) {
+                    downloads.remove(fileId);
+                }
+                watch.finishError(friendly(((TdApi.Error) object).message));
+                Log.engine(app, "download " + fileId + " refused: "
+                        + ((TdApi.Error) object).message);
                 return;
             }
-            TdApi.File file = (TdApi.File) object;
-            FileWatch watch = new FileWatch(fileId, progress, done);
-            if (isComplete(file)) {
-                watch.path = file.local.path;
-                watch.done = true;
-                done.ok(fileId);
-                downloads.put(fileId, watch);
+            if (!(object instanceof TdApi.File)) {
+                watch.finishError("Telegram sent an answer the app did not understand");
                 return;
             }
-            downloads.put(fileId, watch);
+            watch.onFile((TdApi.File) object);
+        }, error -> {
+            Log.engine(app, "download " + fileId + " could not be sent: " + error);
+            watch.finishError("the download request could not be sent");
         });
+    }
+
+    /** Asks Telegram for one file without touching any watch. */
+    private void requestDownload(final int fileId) {
+        Client current = client;
+        if (current == null) {
+            return;
+        }
+        current.send(new TdApi.DownloadFile(fileId, 32, 0, 0, false), object -> {
+            if (object instanceof TdApi.Error) {
+                Log.engine(app, "download " + fileId + " refused: "
+                        + ((TdApi.Error) object).message);
+            }
+        }, error -> Log.engine(app, "download " + fileId + " could not be sent: " + error));
     }
 
     public void cancelDownload(int fileId) {
@@ -1051,7 +1194,7 @@ public final class Tg {
      */
     private void throttle(FileWatch watch, TdApi.File file) {
         long cap = Prefs.speedLimitKbps(app) * 1024L;
-        if (cap <= 0 || watch.done || watch.waiting) {
+        if (cap <= 0 || watch.done || watch.waiting || isComplete(file)) {
             return;
         }
         long now = System.currentTimeMillis();
@@ -1142,7 +1285,21 @@ public final class Tg {
                     sends.put(message.id, watch);
                     //: Uploads have no pause switch, so the cap covers the
                     //: download side only; the watch here is progress only.
-                    downloads.put(file.id, watch.progressWatch());
+                    uploads.put(file.id, watch.progressWatch());
+                    //: Telegram may have finished this message already, in which
+                    //: case the update that would end the watch is long gone.
+                    TdApi.MessageSendingState sending = message.sendingState;
+                    if (sending instanceof TdApi.MessageSendingStateFailed) {
+                        TdApi.MessageSendingStateFailed failed =
+                                (TdApi.MessageSendingStateFailed) sending;
+                        sends.remove(message.id);
+                        watch.finish(0L, failed.error == null
+                                ? "Telegram refused the upload"
+                                : friendly(failed.error.message));
+                    } else if (sending == null) {
+                        sends.remove(message.id);
+                        watch.finish(message.id, null);
+                    }
                 });
     }
 
@@ -1271,7 +1428,10 @@ public final class Tg {
         resolve(link, sync);
         Media media = sync.await(90_000, cancelled);
         if (media == null) {
-            throw new Exception(sync.error == null ? "Telegram did not answer" : sync.error);
+            String reason = sync.error == null || sync.error.isEmpty()
+                    ? "Telegram did not answer" : sync.error;
+            Log.engine(app, "resolve failed: " + reason);
+            throw new Failure(reason, reason, worthRetrying(reason));
         }
         return media;
     }
@@ -1280,16 +1440,53 @@ public final class Tg {
                                    final AtomicBoolean cancelled) throws Exception {
         final Sync<Integer> sync = new Sync<>();
         downloadFile(fileId, progress, sync);
-        Integer result = sync.await(0, cancelled);
-        FileWatch watch = downloads.get(fileId);
-        if (result == null) {
-            throw new Exception(sync.error == null ? "download failed" : sync.error);
+        long lastBytes = -1L;
+        long lastMove = System.currentTimeMillis();
+        int nudges = 0;
+        while (!sync.finished()) {
+            if (cancelled != null && cancelled.get()) {
+                throw new Failure("cancelled", "cancelled", false);
+            }
+            FileWatch watch = downloads.get(fileId);
+            long seen = watch == null ? 0L : watch.bytesSeen;
+            if (seen > lastBytes) {
+                lastBytes = seen;
+                lastMove = System.currentTimeMillis();
+                nudges = 0;
+            }
+            if (System.currentTimeMillis() - lastMove > STALL_MS) {
+                if (nudges >= MAX_NUDGES) {
+                    throw new Failure("the download stopped half way",
+                            "no progress for " + (STALL_MS / 1000) + " seconds", true);
+                }
+                nudges++;
+                lastMove = System.currentTimeMillis();
+                //: Telegram keeps the part it already sent, so asking again is
+                //: carrying on, not starting over.
+                Log.engine(app, "download " + fileId + " stalled, asking again ("
+                        + nudges + ")");
+                requestDownload(fileId);
+            }
+            try {
+                Thread.sleep(500L);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new Failure("interrupted", "interrupted", false);
+            }
+        }
+        if (sync.value == null) {
+            String reason = sync.error == null || sync.error.isEmpty()
+                    ? "the download did not finish" : sync.error;
+            Log.engine(app, "download " + fileId + " failed: " + reason);
+            throw new Failure(reason, reason, worthRetrying(reason));
         }
         //: The finished local path always lives on the watch, whether the file
         //: was already cached or arrived just now.
+        FileWatch watch = downloads.get(fileId);
         String path = watch == null ? null : watch.path;
-        if (path == null) {
-            throw new Exception("the download did not produce a file");
+        if (path == null || path.isEmpty() || !new File(path).exists()) {
+            Log.engine(app, "download " + fileId + " ended without a file on the phone");
+            throw new Failure("the file did not arrive on the phone", "no local path", true);
         }
         return path;
     }
@@ -1301,7 +1498,10 @@ public final class Tg {
                 job.width, job.height, job.sendAs, progress, sync);
         Long result = sync.await(0, cancelled);
         if (result == null) {
-            throw new Exception(sync.error == null ? "upload failed" : sync.error);
+            String reason = sync.error == null || sync.error.isEmpty()
+                    ? "the upload did not finish" : sync.error;
+            Log.engine(app, "upload failed: " + reason);
+            throw new Failure(reason, reason, worthRetrying(reason));
         }
         return result;
     }
@@ -1419,6 +1619,7 @@ public final class Tg {
                 return;
             }
             done = true;
+            uploads.remove(fileId);
             downloads.remove(fileId);
             if (error != null) {
                 callback.fail(error);
@@ -1449,6 +1650,13 @@ public final class Tg {
             synchronized (this) {
                 done = true;
                 notifyAll();
+            }
+        }
+
+        /** True once the answer is in, whatever it was. */
+        boolean finished() {
+            synchronized (this) {
+                return done;
             }
         }
 

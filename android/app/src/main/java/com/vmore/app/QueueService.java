@@ -9,6 +9,8 @@ import android.os.IBinder;
 import android.os.PowerManager;
 
 import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -33,10 +35,14 @@ public class QueueService extends Service {
     /** How long a freshly woken queue waits for the Telegram session. */
     private static final long WAIT_FOR_SESSION_MS = 90_000L;
     /** Attempts per job, and the pause between them (it grows a little). */
-    private static final int MAX_ATTEMPTS = 3;
+    private static final int MAX_ATTEMPTS = 4;
+    /** Room kept free on top of the file itself, for the upload copy. */
+    private static final long FREE_MARGIN = 64L * 1024L * 1024L;
     private static final long RETRY_WAIT_MS = 6_000L;
     /** How often a queue waiting for Wi-Fi or the charger looks again. */
     private static final long HOLD_POLL_MS = 5_000L;
+    /** How long the queue waits for a session that is still coming up. */
+    private static final long ENGINE_WAIT_MAX = 180_000L;
 
     /** Live numbers for whichever job is running — read by every screen. */
     public static final class Live {
@@ -69,6 +75,10 @@ public class QueueService extends Service {
     private PowerManager.WakeLock wakeLock;
     private Thread worker;
     private volatile boolean shuttingDown;
+    /** The exception the last attempt died of — read by the retry rule. */
+    private volatile Exception lastFailure;
+    /** The reason the queue last waited, so the log gets it once, not 700 times. */
+    private volatile String lastHold = "";
     private final AtomicBoolean cancelled = new AtomicBoolean(false);
     private final AtomicBoolean skipCurrent = new AtomicBoolean(false);
     private long postedAt;
@@ -224,6 +234,7 @@ public class QueueService extends Service {
         Jobs jobs = Jobs.get(this);
         try {
             boolean engineReady = Tg.get(this).awaitReady(WAIT_FOR_SESSION_MS);
+            long engineWaited = 0L;
             while (!shuttingDown) {
                 if (jobs.pausedAll()) {
                     break;
@@ -232,11 +243,7 @@ public class QueueService extends Service {
                 //: rules the queue obeys for every job, not just the first one.
                 String hold = holdReason();
                 if (!hold.isEmpty()) {
-                    Live.STAGE = "";
-                    Live.NAME = hold;
-                    Live.RUNNING.set(true);
-                    postProgress(false);
-                    sleep(HOLD_POLL_MS);
+                    hold(hold);
                     continue;
                 }
                 QJob job = jobs.nextQueued();
@@ -244,11 +251,20 @@ public class QueueService extends Service {
                     break;
                 }
                 if (!engineReady) {
+                    if (Tg.get(this).starting() && engineWaited < ENGINE_WAIT_MAX) {
+                        //: The session is coming up.  Waiting here is the whole
+                        //: point: failing now would throw away a loaded queue
+                        //: over a few seconds of sign-in.
+                        engineWaited += HOLD_POLL_MS;
+                        hold("waiting for the Telegram session");
+                        continue;
+                    }
                     //: No sign-in in this process: say so once, plainly, and
                     //: leave the queue alone for the next launch of the app.
                     failJob(jobs, job, Tg.get(this).blockedReason());
                     continue;
                 }
+                lastHold = "";
                 cancelled.set(false);
                 skipCurrent.set(false);
                 process(jobs, job);
@@ -295,15 +311,27 @@ public class QueueService extends Service {
         while (!shuttingDown) {
             attempt++;
             job.attempts = attempt;
+            lastFailure = null;
             processOnce(jobs, job);
             if (!QJob.FAILED.equals(job.stage)) {
                 return;
             }
-            boolean worthRetrying = attempt < MAX_ATTEMPTS && recoverable(job.error)
-                    && !cancelled.get() && !jobs.pausedAll();
-            if (!worthRetrying) {
+            //: A job that already knows which file it wants is holding a file
+            //: reference Telegram handed out earlier.  Those go stale, and the
+            //: old code retried with the very same stale id, which is how one
+            //: hiccup turned into "download failed" on the first try.  Clearing
+            //: the id makes the retry ask Telegram for the link again.
+            boolean staleReference = job.fileId != 0;
+            boolean again = attempt < MAX_ATTEMPTS && !cancelled.get() && !jobs.pausedAll()
+                    && worthRetrying(lastFailure, job.error, staleReference);
+            Log.step(this, "job " + job.id + " attempt " + attempt + " failed: "
+                    + job.error + (again ? " (trying again with a fresh link)" : ""));
+            if (!again) {
                 recordFailure(jobs, job);
                 return;
+            }
+            if (staleReference) {
+                job.fileId = 0;
             }
             job.stage = QJob.QUEUED;
             job.error = "";
@@ -318,6 +346,22 @@ public class QueueService extends Service {
         }
     }
 
+    /**
+     * The queue stays where it is and says why, on the home screen, in the
+     * notification and — once per reason — in the log.
+     */
+    private void hold(String reason) {
+        Live.STAGE = "";
+        Live.NAME = reason;
+        Live.RUNNING.set(true);
+        if (!reason.equals(lastHold)) {
+            lastHold = reason;
+            Log.step(this, "holding: " + reason);
+        }
+        postProgress(false);
+        sleep(HOLD_POLL_MS);
+    }
+
     /** The rule that makes the queue wait right now, or an empty string. */
     private String holdReason() {
         String schedule = Net.scheduleBlocker(this);
@@ -328,18 +372,27 @@ public class QueueService extends Service {
     }
 
     /**
-     * True when the failure was only Telegram asking to wait or a lost
-     * connection, which is worth another attempt.
+     * Whether another attempt is worth the data.
+     *
+     * The step itself is asked first (a {@link Tg.Failure} knows whether it was
+     * a lost connection or a file that will never be allowed), then a stale file
+     * reference counts as replaceable, and finally the older keyword rules cover
+     * the rest.
      */
-    private static boolean recoverable(String message) {
-        if (message == null) {
+    private static boolean worthRetrying(Exception failure, String message, boolean stale) {
+        if (failure instanceof Tg.Failure) {
+            //: The step itself knows best: it has Telegram's own words.
+            return ((Tg.Failure) failure).retryable;
+        }
+        if (Retry.fatal(message)) {
             return false;
         }
-        String lower = message.toLowerCase(java.util.Locale.US);
-        return lower.contains("slow down") || lower.contains("flood")
-                || lower.contains("did not answer") || lower.contains("connection")
-                || lower.contains("timeout") || lower.contains("timed out")
-                || lower.contains("retry");
+        if (stale) {
+            //: Nothing is known about this failure, but the next attempt asks
+            //: Telegram for the link again, which is a genuinely new try.
+            return true;
+        }
+        return Retry.recoverable(message);
     }
 
     private void sleep(long millis) {
@@ -374,9 +427,14 @@ public class QueueService extends Service {
         Live.NAME = job.title();
         Live.TOTAL.set(job.size);
         Live.DONE.set(job.done);
+        Log.step(this, "job " + job.id + " " + job.method + " " + shortText(job.raw, 120));
         try {
             if (QJob.METHOD_FORWARD.equals(job.method)) {
                 forwardOnly(jobs, job);
+                return;
+            }
+            if (QJob.METHOD_SCAN.equals(job.method)) {
+                scanIntoQueue(jobs, job);
                 return;
             }
             if (job.fileId == 0 || job.chatId == 0L) {
@@ -390,9 +448,16 @@ public class QueueService extends Service {
                     return;
                 }
             }
+            if (job.remoteLocked) {
+                //: Telegram refuses these bytes to every app, so retrying is
+                //: pointless and the reason is worth saying plainly.
+                throw new Tg.Failure("that file cannot be saved: the chat's owner has "
+                        + "protected its content", "protected content", false);
+            }
             String skip = skipReason(job);
             if (!skip.isEmpty()) {
                 skippedJobs++;
+                Log.step(this, "job " + job.id + " " + skip);
                 job.skipped = true;
                 job.note = skip;
                 job.stage = QJob.DONE;
@@ -404,6 +469,19 @@ public class QueueService extends Service {
                 return;
             }
 
+            String space = spaceProblem(job.size);
+            if (!space.isEmpty()) {
+                //: Said here, in plain words, instead of surfacing as a strange
+                //: Telegram error half way through.
+                Log.step(this, "job " + job.id + " " + space);
+                job.stage = QJob.FAILED;
+                job.error = space;
+                Live.STAGE = QJob.FAILED;
+                Live.ERROR = space;
+                jobs.update(job);
+                return;
+            }
+
             job.stage = QJob.DOWNLOADING;
             Live.STAGE = QJob.DOWNLOADING;
             Live.TOTAL.set(job.size);
@@ -411,6 +489,8 @@ public class QueueService extends Service {
             showNotification(false);
 
             String path = download(job);
+            Log.step(this, "job " + job.id + " downloaded " + shortText(path, 80)
+                    + " (" + Format.size(job.size) + ")");
             if (path == null) {
                 if (skipCurrent.get()) {
                     dropJob(jobs, job);
@@ -448,6 +528,8 @@ public class QueueService extends Service {
                             job.destTitle, History.STATUS_UPLOADED, job.raw, "", job.path);
                 }
                 job.note = "sent as message " + sentId;
+                Log.step(this, "job " + job.id + " uploaded to " + shortText(job.destTitle, 40)
+                        + " as message " + sentId);
                 markFinished(job);
             } else {
                 History.get(this).record(job.title(), job.kind, job.size, job.destChatId,
@@ -460,7 +542,9 @@ public class QueueService extends Service {
             jobs.remove(job.id);
             Tg.get(this).releaseDownload(job.fileId);
         } catch (Exception error) {
+            lastFailure = error;
             String message = error.getMessage() == null ? "the job failed" : error.getMessage();
+            Log.step(this, "job " + job.id + " " + job.stage + ": " + message);
             if (cancelled.get() && skipCurrent.get()) {
                 dropJob(jobs, job);
                 return;
@@ -476,6 +560,71 @@ public class QueueService extends Service {
             //: History gets the failure once, after the last retry (see above).
             jobs.update(job);
         }
+    }
+
+    /**
+     * A link that names a chat but no message — "https://t.me/channel",
+     * "@channel", an invite link — means that chat's recent files.  They become
+     * one job each inside the same batch, with the same rules and the same
+     * destination, and the link itself leaves the queue.
+     */
+    private void scanIntoQueue(Jobs jobs, QJob job) throws Exception {
+        job.stage = QJob.RESOLVING;
+        Live.STAGE = QJob.RESOLVING;
+        Live.NAME = shortText(job.raw, 60);
+        Live.TOTAL.set(0);
+        jobs.update(job);
+        showNotification(false);
+
+        TgLink link = new TgLink();
+        link.raw = job.raw;
+        link.chatId = job.chatId;
+        link.username = job.username;
+        link.inviteHash = job.inviteHash;
+        link.privateLink = job.privateLink;
+        link.internalId = job.internalId;
+        link.valid = true;
+
+        long chatId = Tg.get(this).chatForBlocking(link, cancelled);
+        List<Tg.Media> media = Tg.get(this).scanBlocking(chatId, Vmore.SCAN_LIMIT);
+        if (media.isEmpty()) {
+            job.stage = QJob.DONE;
+            job.note = "nothing to move in that chat";
+            Log.step(this, "job " + job.id + " " + job.note);
+            Live.STAGE = QJob.DONE;
+            jobs.remove(job.id);
+            return;
+        }
+        List<QJob> children = new ArrayList<>();
+        for (Tg.Media item : media) {
+            QJob child = new QJob();
+            child.batchId = job.batchId;
+            child.batchLabel = job.batchLabel;
+            child.raw = item.chatTitle.isEmpty() ? job.raw : item.chatTitle;
+            child.chatId = item.chatId;
+            child.messageId = item.messageId;
+            child.privateLink = item.chatId < -1000000000000L;
+            child.internalId = TgLink.internalFromChatId(item.chatId);
+            child.method = QJob.METHOD_FORWARD.equals(job.method)
+                    ? QJob.METHOD_FORWARD : QJob.METHOD_DOWNLOAD;
+            child.destChatId = job.destChatId;
+            child.destTitle = job.destTitle;
+            child.sendAs = job.sendAs;
+            child.uploadAfter = job.uploadAfter;
+            child.deleteLocal = job.deleteLocal;
+            child.onlyKinds = job.onlyKinds;
+            child.minSize = job.minSize;
+            child.maxSize = job.maxSize;
+            child.skipDuplicates = job.skipDuplicates;
+            child.stage = QJob.QUEUED;
+            children.add(child);
+        }
+        jobs.addBatch(children);
+        job.stage = QJob.DONE;
+        job.note = children.size() + " files queued from this chat";
+        Live.STAGE = QJob.DONE;
+        Log.step(this, "job " + job.id + " " + job.note);
+        jobs.remove(job.id);
     }
 
     /** Step one: ask Telegram what is behind the link. */
@@ -497,6 +646,7 @@ public class QueueService extends Service {
         link.valid = true;
 
         Tg.Media media = Tg.get(this).resolveBlocking(link, cancelled);
+        job.remoteLocked = !media.downloadable;
         job.chatId = media.chatId;
         job.messageId = media.messageId;
         job.fileId = media.fileId;
@@ -608,6 +758,36 @@ public class QueueService extends Service {
 
     private File downloadsDir() {
         return LocalFiles.downloadsDir(this);
+    }
+
+    /**
+     * The reason this file must not be downloaded right now, or an empty
+     * string: a phone that is full should say so before the transfer starts.
+     */
+    private String spaceProblem(long size) {
+        if (size <= 0) {
+            return "";
+        }
+        try {
+            File dir = downloadsDir();
+            //noinspection ResultOfMethodCallIgnored
+            dir.mkdirs();
+            android.os.StatFs stat = new android.os.StatFs(dir.getAbsolutePath());
+            long free = stat.getAvailableBytes();
+            if (free < size + FREE_MARGIN) {
+                return "not enough space on this phone: this file needs "
+                        + Format.size(size) + " and only " + Format.size(free)
+                        + " is free";
+            }
+        } catch (Exception ignored) {
+        }
+        return "";
+    }
+
+    /** One line of text, never longer than a log line should be. */
+    private static String shortText(String text, int max) {
+        String value = Format.oneLine(text == null ? "" : text);
+        return value.length() <= max ? value : value.substring(0, max) + "...";
     }
 
     private void markPaused(Jobs jobs, QJob job) {

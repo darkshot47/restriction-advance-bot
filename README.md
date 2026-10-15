@@ -503,6 +503,20 @@ The list below is the whole feature set, all of it on the phone, none of it need
 16. **Home-screen widget and Quick Settings tile** — the widget shows the job, the stage and the queue
     size with pause/resume and open; the Quick Settings tile does the same from the panel.
 
+### When something goes wrong
+
+* **A job retries four times**, and every retry asks Telegram for the message again — a file reference
+  from a failed attempt has usually gone stale, and retrying with the stale one is what used to turn one
+  hiccup into "download failed" on the first try.  Each attempt also re-requests a download that has
+  stopped moving (45 seconds without a byte, twice), and Telegram resumes from the part it already sent,
+  so nothing is downloaded twice.
+* **Only real dead ends stop early**: protected content, a chat this account may not read, an empty
+  destination, no room on the phone.  The queue names the reason it hit — and checks the free space
+  before the transfer, so "no room" is not discovered half way through.
+* **The log**: Settings → Check the Telegram connection lists the session, the destination, the failed
+  jobs and the *last steps the queue took*, with Telegram's own error text.  One tap copies the whole
+  report, which is what to send when a link will not move.
+
 ### On the phone, the first time
 
 1. Allow "Install unknown apps" for the browser or file manager that opens the APK (Android asks once).

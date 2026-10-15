@@ -216,6 +216,10 @@ public class QueueActivity extends Activity implements Jobs.Listener {
             action.setText(R.string.queue_retry);
             action.setOnClickListener(v -> {
                 job.error = "";
+                job.attempts = 0;
+                //: Same reason as Retry all: a fresh link reference beats the
+                //: one Telegram already turned down.
+                job.fileId = 0;
                 job.stage = QJob.QUEUED;
                 Jobs.get(this).update(job);
                 QueueService.run(this);

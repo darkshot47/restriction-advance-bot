@@ -497,7 +497,12 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         List<TgLink> usable = new ArrayList<>();
         StringBuilder notes = new StringBuilder();
         for (TgLink link : parsed) {
-            if (link.valid) {
+            if (link.valid && link.needsChatContext) {
+                //: A bare "145" names a message but no chat, and a job that
+                //: cannot be resolved would only fail the moment it starts.
+                notes.append(link.raw).append(": ").append(getString(R.string.home_need_chat))
+                        .append("\n");
+            } else if (link.valid) {
                 usable.add(link);
                 if (!link.note.isEmpty()) {
                     notes.append(link.note).append("\n");
@@ -521,7 +526,11 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         String batchId = UUID.randomUUID().toString();
         String label = usable.size() == 1 ? usable.get(0).raw : usable.size() + " links";
         for (TgLink link : usable) {
-            if (link.isRange()) {
+            if (link.messageId <= 0) {
+                //: "https://t.me/channel" or "@channel": the queue takes that
+                //: chat's recent files and turns them into one job each.
+                jobs.add(jobFor(link, 0L, batchId, label));
+            } else if (link.isRange()) {
                 for (long id = link.messageId; id <= link.endMessageId; id++) {
                     jobs.add(jobFor(link, id, batchId, label));
                 }
@@ -552,7 +561,8 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         job.inviteHash = link.inviteHash;
         job.privateLink = link.privateLink;
         job.internalId = link.internalId;
-        job.method = forwardBatch ? QJob.METHOD_FORWARD : QJob.METHOD_DOWNLOAD;
+        job.method = messageId <= 0 ? QJob.METHOD_SCAN
+                : forwardBatch ? QJob.METHOD_FORWARD : QJob.METHOD_DOWNLOAD;
         job.sendAs = Prefs.sendAs(this);
         job.uploadAfter = Prefs.autoUpload(this);
         job.deleteLocal = Prefs.autoDeleteLocal(this);

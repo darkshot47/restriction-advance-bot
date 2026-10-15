@@ -25,6 +25,8 @@ public final class QJob {
     public static final String METHOD_DOWNLOAD = "download";
     /** Let Telegram move the message itself: no bytes cross the phone. */
     public static final String METHOD_FORWARD = "forward";
+    /** A link that names a chat but no message: take its recent files. */
+    public static final String METHOD_SCAN = "scan";
 
     public String id = "";
     public String batchId = "";
@@ -79,6 +81,8 @@ public final class QJob {
     public boolean skipDuplicates = true;
     /** Set while the engine skips this job, so the screens can say why. */
     public boolean skipped;
+    /** Telegram itself will not let this file down (protected content). */
+    public boolean remoteLocked;
 
     /** True when this media passes the batch's filter. */
     public boolean allows(String kind, long size) {
@@ -161,6 +165,7 @@ public final class QJob {
             json.put("min_size", minSize);
             json.put("max_size", maxSize);
             json.put("skip_duplicates", skipDuplicates);
+            json.put("remote_locked", remoteLocked);
         } catch (Exception ignored) {
         }
         return json;
@@ -205,6 +210,7 @@ public final class QJob {
         job.minSize = json.optLong("min_size", 0L);
         job.maxSize = json.optLong("max_size", 0L);
         job.skipDuplicates = json.optBoolean("skip_duplicates", true);
+        job.remoteLocked = json.optBoolean("remote_locked", false);
         //: A job that was running when the app died comes back as queued — the
         //: engine picks it up again instead of leaving it stuck on "downloading".
         if (job.isActive()) {

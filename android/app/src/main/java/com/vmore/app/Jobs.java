@@ -144,6 +144,9 @@ public final class Jobs {
                 job.error = "";
                 job.attempts = 0;
                 job.skipped = false;
+                //: The retry asks Telegram for the link again: a file id from
+                //: the failed attempt may be exactly what Telegram refuses.
+                job.fileId = 0;
                 woken++;
             }
         }

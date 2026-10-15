@@ -499,6 +499,12 @@ public class SettingsActivity extends Activity {
         report.append("Auto upload: ").append(Prefs.autoUpload(this) ? "on" : "off")
                 .append(", delete local copy: ")
                 .append(Prefs.autoDeleteLocal(this) ? "on" : "off").append('\n');
+        report.append("Download cap: ").append(Prefs.speedLimitKbps(this) <= 0 ? "full"
+                : Prefs.speedLimitKbps(this) + " KB/s").append('\n');
+        report.append("Wi-Fi only: ").append(Prefs.wifiOnly(this) ? "on" : "off")
+                .append(", charging only: ").append(Prefs.chargingOnly(this) ? "on" : "off")
+                .append(", skip duplicates: ").append(Prefs.skipDuplicates(this) ? "on" : "off")
+                .append('\n');
 
         int shown = 0;
         for (QJob job : Jobs.get(this).all()) {
@@ -521,6 +527,13 @@ public class SettingsActivity extends Activity {
             report.append("\nNo failed job is waiting.");
         }
 
+        //: The last few lines the queue and the engine wrote: when something
+        //: refuses to move, the reason is in here, not in a guess.
+        String log = Log.tail(this, 30);
+        if (!log.isEmpty()) {
+            report.append("\n\nLast steps\n").append(log);
+        }
+
         TextView view = new TextView(this);
         view.setText(report.toString());
         view.setTextColor(getColor(R.color.vmore_text));
@@ -536,6 +549,10 @@ public class SettingsActivity extends Activity {
                 .setView(scroll)
                 .setPositiveButton(R.string.settings_check_copy, (dialog, which) -> copy(text))
                 .setNegativeButton(R.string.common_close, null)
+                .setNeutralButton(R.string.settings_check_clear, (dialog, which) -> {
+                    Log.clear(SettingsActivity.this);
+                    Ui.toast(SettingsActivity.this, getString(R.string.settings_check_cleared));
+                })
                 .show();
     }
 
