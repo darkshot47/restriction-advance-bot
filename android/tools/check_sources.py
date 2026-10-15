@@ -157,6 +157,25 @@ EMOJI = [(0x1F000, 0x1FAFF), (0x2600, 0x27BF), (0x2B00, 0x2BFF), (0xFE0F, 0xFE0F
          (0x1F1E6, 0x1F1FF)]
 
 
+def check_escaped_apostrophes():
+    """aapt2 refuses a string value with a bare apostrophe.
+
+    "the chat's recent files" looks harmless in the editor and stops the APK
+    build with "Invalid unicode escape sequence", which is a confusing way to
+    learn about it, so it is checked here instead.
+    """
+    pattern = re.compile(r"<string name=\"([^\"]+)\"[^>]*>(.*?)</string>", re.S)
+    for path in sorted(RES.glob("values*/strings.xml")):
+        text = path.read_text()
+        for match in pattern.finditer(text):
+            if "'" not in match.group(2):
+                continue
+            for hit in re.finditer(r"(?<!\\)'", match.group(2)):
+                line = text[:match.start(2) + hit.start()].count("\n") + 1
+                problem("%s:%d: %s has an unescaped apostrophe (write \\')"
+                        % (path.name, line, match.group(1)))
+
+
 def check_text_rules():
     allowed_arrow = {"\u2022", "\u2026", "\u2192", "\u2013", "\u2014", "\u00b7"}
     for path in list(RES.rglob("*.xml")) + list(JAVA.glob("*.java")):
@@ -366,6 +385,7 @@ def check_java_syntax():
 
 def main():
     check_java_syntax()
+    check_escaped_apostrophes()
     check_xml_well_formed()
     check_references()
     check_palettes()

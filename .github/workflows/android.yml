@@ -70,6 +70,14 @@ jobs:
           echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
           ls "$SDK/platforms"
 
+      - name: Check the Android sources
+        #: The same check the tests job runs, so a resource that aapt2 would
+        #: refuse does not wait for the TDLib build to be reported.
+        run: |
+          python -m pip install -q javalang
+          cd android/app/src/main
+          python3 ../../../tools/check_sources.py
+
       - name: TDLib host prerequisites (the code generator's toolchain)
         run: |
           #: Steps with `| tail`/`| tee` need pipefail, or a failing apt/sdkmanager
