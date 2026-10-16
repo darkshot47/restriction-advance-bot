@@ -13,6 +13,12 @@ ended in `App not installed`, which is the bug this folder exists to prevent.
 | `vmore.jks` | the RSA 4096 key that signs every release APK |
 | `storepass.txt` | line 1: the keystore and key password, line 2: the alias |
 
+The build writes them itself the first time it runs without them: it creates the
+key, commits all three files to the branch it is building, and only then signs
+the release with it.  A run that cannot commit the key **stops** rather than
+publish an APK — a key left behind on a runner is gone by the next build, and the
+next build would then be signed differently, which is the original bug.
+
 Both are committed on purpose.  A GitHub repository secret would be the tidier
 home for a signing key, but secrets cannot be written by the build itself, and
 a key that cannot be recreated means every future update breaks the moment it is
@@ -32,6 +38,12 @@ handed to the owner directly.  To make that verifiable anyway:
   (Settings → Check the Telegram connection), and every release carries the same
   value in its notes — so the installed app can be compared with the release it
   claims to be.
+
+## One-time cost
+
+Every build up to 2.2.2 was signed with a throwaway key, so the version installed
+on the phone right now has to be **uninstalled once** before this key's build can
+go in.  That happens once and never again.
 
 ## Rotating
 

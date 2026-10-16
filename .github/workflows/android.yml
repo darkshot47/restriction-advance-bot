@@ -428,6 +428,23 @@ jobs:
               gh release create "$TAG" $ASSETS --title "Vmore APK (latest)" \
                 --notes-file release-notes.md --latest
             fi
+            #: A download list that still offers the build this one replaces is
+            #: how the previous version gets installed by mistake, so the older
+            #: version-named copies go.  Vmore.apk and Vmore-apk.zip stay: they
+            #: are the stable link and are always the newest build.
+            OLD_ASSETS="${RUNNER_TEMP:-/tmp}/old-assets.txt"
+            if gh release view "$TAG" --json assets --jq '.assets[].name' > "$OLD_ASSETS"; then
+              while IFS= read -r asset; do
+                case "$asset" in
+                  Vmore-*.apk)
+                    if [ "$asset" != "Vmore-${VERSION_NAME}.apk" ]; then
+                      if gh release delete-asset "$TAG" "$asset" --yes; then
+                        echo "::notice::removed the older asset $asset"
+                      fi
+                    fi;;
+                esac
+              done < "$OLD_ASSETS"
+            fi
           } 2>&1 | tee release.log
           echo "::notice::release $TAG now serves Vmore.apk $(cat android/dist/SHA256SUMS.txt | head -1)"
 
