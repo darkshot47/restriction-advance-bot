@@ -126,6 +126,71 @@ jobs:
           path: tdlib-build.log
           if-no-files-found: warn
 
+      - name: The update signing key (stable across builds)
+        #: Android refuses to install an APK over an app signed with a different
+        #: key ("App not installed").  A debug keystore is regenerated on every
+        #: runner, which is exactly why updates used to fail, so the release key
+        #: is kept in a draft release of this repository — drafts are visible to
+        #: the owner only — and exported to Gradle here.  When it cannot be
+        #: reached (a pull request from a fork, for instance) the build falls
+        #: back to the debug key instead of failing.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          KEYRING="vmore-signing-key"
+          HOME_DIR="$HOME/.vmore"
+          KEYSTORE="$HOME_DIR/vmore.jks"
+          mkdir -p "$HOME_DIR"
+
+          read_keyring() {
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$KEYRING" --jq '.body' 2>/dev/null
+          }
+
+          if BODY="$(read_keyring)" && [ -n "$BODY" ] \
+              && gh release download "$KEYRING" -p vmore.jks --clobber -O "$KEYSTORE" 2>/dev/null; then
+            echo "::notice::update key restored from the $KEYRING draft release"
+          else
+            echo "no keyring yet: creating one"
+            PASSWORD="$(openssl rand -hex 24)"
+            if keytool -genkeypair -v -keystore "$KEYSTORE" -alias vmore \
+                -keyalg RSA -keysize 4096 -validity 10950 -storetype PKCS12 \
+                -storepass "$PASSWORD" -keypass "$PASSWORD" \
+                -dname "CN=Vmore, O=Vmore, C=IN" 2>&1 | tail -3; then
+              BODY="storePassword=$PASSWORD
+          keyAlias=vmore
+
+          The Android update key of this app. Android only accepts an update that
+          is signed with the same key as the installed app, so this release must
+          never be published and never be deleted: doing either would leave every
+          installed copy of Vmore unable to update itself."
+              gh release create "$KEYRING" --draft --title "Vmore signing key (do not publish, do not delete)" --notes "$BODY" 2>&1 | tail -2 || true
+              gh release upload "$KEYRING" "$KEYSTORE" --clobber 2>&1 | tail -2 || true
+              echo "::warning::a new update key was created; installed apps must be uninstalled once before they can take an update"
+            else
+              echo "::warning::the update key could not be created; falling back to the debug key"
+              BODY=""
+            fi
+          fi
+
+          if [ -n "${BODY:-}" ] && [ -f "$KEYSTORE" ]; then
+            PASSWORD="$(printf '%s\n' "$BODY" | grep -m1 '^storePassword=' | cut -d= -f2-)"
+            ALIAS="$(printf '%s\n' "$BODY" | grep -m1 '^keyAlias=' | cut -d= -f2-)"
+            ALIAS="${ALIAS:-vmore}"
+            if keytool -list -keystore "$KEYSTORE" -storepass "$PASSWORD" -alias "$ALIAS" >/dev/null 2>&1; then
+              FINGERPRINT="$(keytool -list -v -keystore "$KEYSTORE" -storepass "$PASSWORD" -alias "$ALIAS" \
+                | grep -m1 'SHA256:' | sed 's/.*SHA256: //')"
+              echo "VMORE_STORE_FILE=$KEYSTORE" >> "$GITHUB_ENV"
+              echo "VMORE_STORE_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
+              echo "VMORE_KEY_ALIAS=$ALIAS" >> "$GITHUB_ENV"
+              echo "VMORE_KEY_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
+              echo "VMORE_FINGERPRINT=$FINGERPRINT" >> "$GITHUB_ENV"
+              echo "::notice::signing with the stable update key, certificate SHA256 $FINGERPRINT"
+            else
+              echo "::warning::the update key could not be read; falling back to the debug key"
+            fi
+          fi
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -133,11 +198,13 @@ jobs:
           #: installs this exact Gradle — the version AGP 8.5 wants.
           gradle-version: "8.7"
 
-      - name: Build the debug APK (and run its unit tests)
+      - name: Build the APK (and run its unit tests)
         working-directory: android
         run: |
           set -o pipefail
-          gradle --no-daemon testDebugUnitTest assembleDebug --stacktrace 2>&1 | tee ../build.log
+          #: assembleRelease: the file people install is a real release build,
+          #: signed with the update key so the next build installs over it.
+          gradle --no-daemon testDebugUnitTest assembleRelease --stacktrace 2>&1 | tee ../build.log
           tail -5 ../build.log
 
       - name: Report the app's unit tests
@@ -163,9 +230,41 @@ jobs:
       - name: Pack it the way the owner wants it (zip → APK)
         working-directory: android
         run: |
+          set -o pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Vmore.apk
+          APK=app/build/outputs/apk/release/app-release.apk
+          if [ ! -f "$APK" ]; then
+            #: Only reachable before the first release build existed; a debug
+            #: APK is better than no download link.
+            APK=app/build/outputs/apk/debug/app-debug.apk
+            echo "::warning::no release APK was produced; packing the debug one"
+          fi
+          cp "$APK" dist/Vmore.apk
           cd dist
+          #: The signature is the thing Android judges an update by, so it is
+          #: checked here and printed: every future build must show the same
+          #: certificate, or phones will refuse to install over the old app.
+          APKSIGNER="$(ls "$ANDROID_SDK_ROOT"/build-tools/*/apksigner 2>/dev/null | head -1)"
+          if [ -n "$APKSIGNER" ]; then
+            "$APKSIGNER" verify --print-certs Vmore.apk | grep -E "Signer #1 certificate (DN|SHA-256)" || true
+            ACTUAL="$("$APKSIGNER" verify --print-certs Vmore.apk \
+              | sed -n 's/.*certificate SHA-256 digest: //p' | head -1 \
+              | tr 'A-F' 'a-f' | tr -d ':')"
+            EXPECTED_FILE="../tools/expected_signing.txt"
+            if [ -s "$EXPECTED_FILE" ]; then
+              EXPECTED="$(tr -d '[:space:]:' < "$EXPECTED_FILE" | tr 'A-F' 'a-f')"
+              if [ "$ACTUAL" != "$EXPECTED" ]; then
+                echo "::error::this APK is signed with a different key than the recorded one"
+                echo "::error::expected $EXPECTED"
+                echo "::error::actual   $ACTUAL"
+                echo "::error::Android will refuse to update an installed Vmore with it. Restore the vmore-signing-key draft release, or update android/tools/expected_signing.txt on purpose."
+                exit 1
+              fi
+              echo "::notice::signature matches the recorded update key ($ACTUAL)"
+            else
+              echo "::notice::recorded update key: $ACTUAL — write it into android/tools/expected_signing.txt to catch a key change in future builds"
+            fi
+          fi
           zip -9 Vmore-apk.zip Vmore.apk
           unzip -t Vmore-apk.zip
           #: Prove the APK inside the zip is a real, installable package.
@@ -188,8 +287,20 @@ jobs:
           while IFS= read -r line; do
             echo "::notice::$(printf '%s' "$line" | cut -c1-900)"
           done < <(grep -E "^(package|application-label:|launchable-activity:|sdkVersion|targetSdkVersion)" badging.txt)
+          VERSION_NAME="$(sed -n "s/.*versionName='\([^']*\)'.*/\1/p" badging.txt | head -1)"
+          VERSION_CODE="$(sed -n "s/.*versionCode='\([^']*\)'.*/\1/p" badging.txt | head -1)"
+          echo "::notice::this build is Vmore $VERSION_NAME (versionCode $VERSION_CODE)"
+          #: A copy under its own version number: the stable link below always
+          #: serves the newest build, and this one lets anyone see at a glance
+          #: which build they actually hold.
+          if [ -n "$VERSION_NAME" ]; then
+            cp Vmore.apk "Vmore-$VERSION_NAME.apk"
+          fi
           sha256sum Vmore.apk Vmore-apk.zip > SHA256SUMS.txt
+          sha256sum "Vmore-$VERSION_NAME.apk" >> SHA256SUMS.txt
           cat SHA256SUMS.txt
+          echo "$VERSION_NAME" > version.txt
+          echo "$VERSION_CODE" > versioncode.txt
           ls -lh
 
       - name: Upload the zip (artifact)
@@ -211,31 +322,52 @@ jobs:
           #: `gh release upload` would be silently reported as a green publish.
           set -o pipefail
           {
-            cat > release-notes.md <<'NOTES'
-          Automated build of the Vmore Android app.
-
+            VERSION_NAME="$(cat android/dist/version.txt 2>/dev/null || echo unknown)"
+            VERSION_CODE="$(cat android/dist/versioncode.txt 2>/dev/null || echo unknown)"
+            {
+              echo "Automated build of the Vmore Android app."
+              echo
+              echo "**This build**"
+              echo
+              echo "- Vmore ${VERSION_NAME} (versionCode ${VERSION_CODE})"
+              echo "- Signed with: ${VMORE_FINGERPRINT:-the debug key (no stable key was reachable in this run)}"
+              echo
+              cat <<'NOTES'
           **Install**
-          1. Download `Vmore.apk` (or `Vmore-apk.zip` and unzip it).
+          1. Download `Vmore.apk` (or the same file under its version number,
+             or `Vmore-apk.zip` and unzip it).
           2. Open it on the phone and allow "Install unknown apps" once.
-          3. Paste the api_id and api_hash of your own Telegram application
-             (my.telegram.org), then sign in with your phone number and the code.
+          3. If the phone says "App not installed", the installed Vmore was
+             signed with an older, per-build key: uninstall it once, then
+             install this. From this build on, every update installs over the
+             previous one.
+          4. Sign in with your phone number and the code, or with your own
+             api_id and api_hash from my.telegram.org.
 
           Everything runs on the phone: links are downloaded and uploaded with
           your own Telegram account, and the local copy is deleted right after a
           successful upload.
 
-          The file is replaced with every build, so this link never rots.
+          `Vmore.apk` is replaced with every build, so the stable link never
+          rots; the version-named copy is what tells two builds apart.
           NOTES
+            } > release-notes.md
+            head -8 release-notes.md
             #: Deleting and recreating the release would briefly break the stable
             #: link (and race the tag); replacing the assets in place cannot.
+            #: The stable names plus a copy named after the version, so the
+            #: owner can tell which build he is holding.
+            ASSETS="android/dist/Vmore.apk android/dist/Vmore-apk.zip android/dist/SHA256SUMS.txt"
+            VERSION_NAME="$(cat android/dist/version.txt 2>/dev/null || true)"
+            if [ -n "$VERSION_NAME" ] && [ -f "android/dist/Vmore-$VERSION_NAME.apk" ]; then
+              ASSETS="$ASSETS android/dist/Vmore-$VERSION_NAME.apk"
+            fi
             if gh release view "$TAG" >/dev/null 2>&1; then
-              gh release upload "$TAG" android/dist/Vmore.apk android/dist/Vmore-apk.zip \
-                android/dist/SHA256SUMS.txt --clobber
+              gh release upload "$TAG" $ASSETS --clobber
               gh release edit "$TAG" --title "Vmore APK (latest)" --notes-file release-notes.md \
                 --latest
             else
-              gh release create "$TAG" android/dist/Vmore.apk android/dist/Vmore-apk.zip \
-                android/dist/SHA256SUMS.txt --title "Vmore APK (latest)" \
+              gh release create "$TAG" $ASSETS --title "Vmore APK (latest)" \
                 --notes-file release-notes.md --latest
             fi
           } 2>&1 | tee release.log

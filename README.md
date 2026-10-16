@@ -523,6 +523,26 @@ The list below is the whole feature set, all of it on the phone, none of it need
   jobs and the *last steps the queue took*, with Telegram's own error text.  One tap copies the whole
   report, which is what to send when a link will not move.
 
+### Updates and the signing key
+
+Android only installs an APK over an existing app when both carry the same signature.  Every build up to
+2.2.1 was signed with Android's *debug* key, which a CI runner generates fresh each time — so every APK
+had a different signature and the phone answered "App not installed".  The fix:
+
+* the distribution APK is a **release** build signed with one stable key, kept in the private draft
+  release **`vmore-signing-key`** of this repository (drafts are visible to the owner only — this repo is
+  public, so the key must never be committed, published, or deleted);
+* the workflow exports that key to Gradle, verifies it with `keytool`, and prints the certificate's
+  SHA-256 in every build;
+* `android/tools/expected_signing.txt` records that fingerprint, and the build **fails** if a future APK
+  is signed with anything else — that is what catches a lost key before it reaches a phone;
+* if the key cannot be reached at all (a pull request from a fork, say), the build falls back to the debug
+  key and says so instead of failing.
+
+Because the key used before 2.2.2 was random, an already installed Vmore must be **uninstalled once**
+before installing a 2.2.2 or newer build.  From that build on, updates install over each other without
+touching the data.
+
 ### On the phone, the first time
 
 1. Allow "Install unknown apps" for the browser or file manager that opens the APK (Android asks once).
