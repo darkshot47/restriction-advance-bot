@@ -128,67 +128,106 @@ jobs:
 
       - name: The update signing key (stable across builds)
         #: Android refuses to install an APK over an app signed with a different
-        #: key ("App not installed").  A debug keystore is regenerated on every
+        #: key ("App not installed").  The debug keystore is regenerated on every
         #: runner, which is exactly why updates used to fail, so the release key
-        #: is kept in a draft release of this repository — drafts are visible to
-        #: the owner only — and exported to Gradle here.  When it cannot be
-        #: reached (a pull request from a fork, for instance) the build falls
-        #: back to the debug key instead of failing.
-        env:
-          GH_TOKEN: ${{ github.token }}
+        #: is committed under android/signing/ and used here.  When it is missing
+        #: it is created and committed once; when the branch cannot be written to
+        #: (a pull request from a fork, say) the build falls back to the debug key
+        #: and says so instead of failing.
         run: |
           set -o pipefail
-          KEYRING="vmore-signing-key"
-          HOME_DIR="$HOME/.vmore"
-          KEYSTORE="$HOME_DIR/vmore.jks"
-          mkdir -p "$HOME_DIR"
+          KEYSTORE="android/signing/vmore.jks"
+          PASSFILE="android/signing/storepass.txt"
+          EXPECTED="android/tools/expected_signing.txt"
 
-          read_keyring() {
-            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$KEYRING" --jq '.body' 2>/dev/null
+          fingerprint() {
+            keytool -list -v -keystore "$1" -storepass "$2" -alias "$3" \
+              | grep -m1 'SHA256:' | sed 's/.*SHA256: //' \
+              | tr -d '[:space:]:' | tr 'A-F' 'a-f'
           }
 
-          if BODY="$(read_keyring)" && [ -n "$BODY" ] \
-              && gh release download "$KEYRING" -p vmore.jks --clobber -O "$KEYSTORE" 2>/dev/null; then
-            echo "::notice::update key restored from the $KEYRING draft release"
+          #: The first 64 hex characters of expected_signing.txt, however the
+          #: file is laid out (a comment header, a line per key, colons or not).
+          recorded() {
+            tr -d '[:space:]:' < "$EXPECTED" 2>/dev/null \
+              | grep -o -E '[0-9a-fA-F]{64}' | head -1 | tr 'A-F' 'a-f'
+          }
+
+          if [ -f "$KEYSTORE" ] && [ -f "$PASSFILE" ]; then
+            PASSWORD="$(head -1 "$PASSFILE" | tr -d '[:space:]')"
+            ALIAS="$(sed -n '2p' "$PASSFILE" | tr -d '[:space:]')"
+            ALIAS="${ALIAS:-vmore}"
+            FINGERPRINT="$(fingerprint "$KEYSTORE" "$PASSWORD" "$ALIAS")"
+            if [ -z "$FINGERPRINT" ]; then
+              echo "::error::the committed update key could not be read"
+              exit 1
+            fi
+            RECORDED="$(recorded)"
+            if [ -n "$RECORDED" ] && [ "$RECORDED" != "$FINGERPRINT" ]; then
+              echo "::error::the committed update key is not the recorded one"
+              echo "::error::recorded $RECORDED"
+              echo "::error::found    $FINGERPRINT"
+              echo "::error::Android would refuse to update every installed Vmore. Restore the key, or update android/tools/expected_signing.txt on purpose."
+              exit 1
+            fi
+            if [ -z "$RECORDED" ]; then
+              echo "$FINGERPRINT" >> "$EXPECTED"
+              echo "::notice::recorded the update key fingerprint $FINGERPRINT"
+            fi
+            echo "::notice::signing with the committed update key, certificate SHA256 $FINGERPRINT"
           else
-            echo "no keyring yet: creating one"
+            echo "no committed update key: creating one"
+            mkdir -p android/signing
             PASSWORD="$(openssl rand -hex 24)"
-            if keytool -genkeypair -v -keystore "$KEYSTORE" -alias vmore \
+            if keytool -genkeypair -v -noprompt -keystore "$KEYSTORE" -alias vmore \
                 -keyalg RSA -keysize 4096 -validity 10950 -storetype PKCS12 \
                 -storepass "$PASSWORD" -keypass "$PASSWORD" \
-                -dname "CN=Vmore, O=Vmore, C=IN" 2>&1 | tail -3; then
-              BODY="storePassword=$PASSWORD
-          keyAlias=vmore
-
-          The Android update key of this app. Android only accepts an update that
-          is signed with the same key as the installed app, so this release must
-          never be published and never be deleted: doing either would leave every
-          installed copy of Vmore unable to update itself."
-              gh release create "$KEYRING" --draft --title "Vmore signing key (do not publish, do not delete)" --notes "$BODY" 2>&1 | tail -2 || true
-              gh release upload "$KEYRING" "$KEYSTORE" --clobber 2>&1 | tail -2 || true
-              echo "::warning::a new update key was created; installed apps must be uninstalled once before they can take an update"
+                -dname "CN=Vmore, O=Vmore, C=IN" 2>&1 | tail -2; then
+              printf '%s\nvmore\n' "$PASSWORD" > "$PASSFILE"
+              FINGERPRINT="$(fingerprint "$KEYSTORE" "$PASSWORD" vmore)"
+              {
+                echo
+                echo "$FINGERPRINT"
+              } >> "$EXPECTED"
+              if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF_TYPE" = "branch" ]; then
+                git config user.email "actions@github.com"
+                git config user.name "Vmore CI"
+                git add "$KEYSTORE" "$PASSFILE" "$EXPECTED"
+                if git commit -m "Signing: the update key every release is signed with" >/dev/null \
+                    && git push origin "HEAD:$GITHUB_REF_NAME"; then
+                  echo "::notice::the update key is committed; an already installed Vmore must be uninstalled once before it can take this build"
+                else
+                  #: A key that stays in the runner is a key the next build does
+                  #: not have, so the next build would be signed differently and
+                  #: every phone would refuse it.  That is the exact bug this
+                  #: whole step exists for, so it stops the release instead.
+                  echo "::error::the update key was created but could not be committed to $GITHUB_REF_NAME"
+                  echo "::error::without it committed, this build and the next one would be signed with different keys"
+                  echo "::error::re-run the job, or commit the key by hand from the run's artifacts"
+                  exit 1
+                fi
+              else
+                #: Pull requests publish nothing, so a throwaway key is harmless
+                #: there; anything else must already have refused above.
+                echo "::warning::this is not a branch push, so the update key is not committed"
+              fi
+              echo "::notice::signing with a freshly created update key, certificate SHA256 $FINGERPRINT"
+            elif [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+              echo "::warning::the update key could not be created; falling back to the debug key for this pull request, which publishes nothing"
+              FINGERPRINT=""
             else
-              echo "::warning::the update key could not be created; falling back to the debug key"
-              BODY=""
+              echo "::error::the update key could not be created, and this run publishes a release"
+              echo "::error::refusing to publish an APK that no installed Vmore could ever update"
+              exit 1
             fi
           fi
 
-          if [ -n "${BODY:-}" ] && [ -f "$KEYSTORE" ]; then
-            PASSWORD="$(printf '%s\n' "$BODY" | grep -m1 '^storePassword=' | cut -d= -f2-)"
-            ALIAS="$(printf '%s\n' "$BODY" | grep -m1 '^keyAlias=' | cut -d= -f2-)"
-            ALIAS="${ALIAS:-vmore}"
-            if keytool -list -keystore "$KEYSTORE" -storepass "$PASSWORD" -alias "$ALIAS" >/dev/null 2>&1; then
-              FINGERPRINT="$(keytool -list -v -keystore "$KEYSTORE" -storepass "$PASSWORD" -alias "$ALIAS" \
-                | grep -m1 'SHA256:' | sed 's/.*SHA256: //')"
-              echo "VMORE_STORE_FILE=$KEYSTORE" >> "$GITHUB_ENV"
-              echo "VMORE_STORE_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
-              echo "VMORE_KEY_ALIAS=$ALIAS" >> "$GITHUB_ENV"
-              echo "VMORE_KEY_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
-              echo "VMORE_FINGERPRINT=$FINGERPRINT" >> "$GITHUB_ENV"
-              echo "::notice::signing with the stable update key, certificate SHA256 $FINGERPRINT"
-            else
-              echo "::warning::the update key could not be read; falling back to the debug key"
-            fi
+          if [ -n "${FINGERPRINT:-}" ]; then
+            echo "VMORE_STORE_FILE=$PWD/$KEYSTORE" >> "$GITHUB_ENV"
+            echo "VMORE_STORE_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
+            echo "VMORE_KEY_ALIAS=${ALIAS:-vmore}" >> "$GITHUB_ENV"
+            echo "VMORE_KEY_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
+            echo "VMORE_FINGERPRINT=$FINGERPRINT" >> "$GITHUB_ENV"
           fi
 
       - name: Set up Gradle
@@ -250,19 +289,30 @@ jobs:
             ACTUAL="$("$APKSIGNER" verify --print-certs Vmore.apk \
               | sed -n 's/.*certificate SHA-256 digest: //p' | head -1 \
               | tr 'A-F' 'a-f' | tr -d ':')"
-            EXPECTED_FILE="../tools/expected_signing.txt"
-            if [ -s "$EXPECTED_FILE" ]; then
-              EXPECTED="$(tr -d '[:space:]:' < "$EXPECTED_FILE" | tr 'A-F' 'a-f')"
-              if [ "$ACTUAL" != "$EXPECTED" ]; then
-                echo "::error::this APK is signed with a different key than the recorded one"
-                echo "::error::expected $EXPECTED"
-                echo "::error::actual   $ACTUAL"
-                echo "::error::Android will refuse to update an installed Vmore with it. Restore the vmore-signing-key draft release, or update android/tools/expected_signing.txt on purpose."
-                exit 1
-              fi
-              echo "::notice::signature matches the recorded update key ($ACTUAL)"
+            #: The APK must carry the very key this run exported to Gradle.  A
+            #: silent fall back to the debug key would install on a fresh phone
+            #: and then refuse every update, which is the bug this guards.
+            WANTED="${VMORE_FINGERPRINT:-}"
+            if [ -z "$WANTED" ]; then
+              WANTED="$(tr -d '[:space:]:' < tools/expected_signing.txt 2>/dev/null \
+                | grep -o -E '[0-9a-fA-F]{64}' | head -1 | tr 'A-F' 'a-f')"
+            fi
+            if [ -z "$WANTED" ] && [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+              echo "::error::no update key to check this APK against, and this run publishes a release"
+              exit 1
+            fi
+            if [ -n "$WANTED" ] && [ "$ACTUAL" != "$WANTED" ]; then
+              echo "::error::this APK is signed with the wrong key"
+              echo "::error::wanted $WANTED"
+              echo "::error::actual $ACTUAL"
+              echo "::error::Android would refuse to update an installed Vmore with it."
+              exit 1
+            fi
+            echo "::notice::announcing certificate SHA256 $ACTUAL"
+            if [ -n "${WANTED:-}" ]; then
+              echo "::notice::signature matches the update key"
             else
-              echo "::notice::recorded update key: $ACTUAL — write it into android/tools/expected_signing.txt to catch a key change in future builds"
+              echo "::warning::no update key was available; this APK is debug signed and will not update an installed app"
             fi
           fi
           zip -9 Vmore-apk.zip Vmore.apk
@@ -330,7 +380,15 @@ jobs:
               echo "**This build**"
               echo
               echo "- Vmore ${VERSION_NAME} (versionCode ${VERSION_CODE})"
-              echo "- Signed with: ${VMORE_FINGERPRINT:-the debug key (no stable key was reachable in this run)}"
+              FINGERPRINT="${VMORE_FINGERPRINT:-}"
+              if [ -n "$FINGERPRINT" ]; then
+                #: Grouped the way Settings shows it on the phone, so the two
+                #: can be compared by eye instead of by trust.
+                GROUPED="$(printf '%s' "$FINGERPRINT" | fold -w2 | paste -sd: -)"
+                echo "- Signed with: \`$GROUPED\`"
+              else
+                echo "- Signed with: the debug key (no stable key was reachable in this run)"
+              fi
               echo
               cat <<'NOTES'
           **Install**

@@ -195,6 +195,9 @@
     <string name="settings_account_add_hint">sign in a second Telegram account and switch whenever you like</string>
     <string name="settings_account_full">Three accounts are the limit</string>
     <string name="settings_help">How to use Vmore</string>
+    <string name="settings_signature">Signature of this build</string>
+    <string name="settings_signature_unavailable">Could not be read on this device</string>
+    <string name="settings_signature_hint">Tap to copy it. It must match the one in the release notes of the version installed here.</string>
     <string name="settings_about">About</string>
     <string name="settings_version">Version</string>
     <string name="settings_saved">Saved</string>

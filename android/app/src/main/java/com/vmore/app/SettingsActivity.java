@@ -197,6 +197,8 @@ public class SettingsActivity extends Activity {
         box.addView(Ui.section(this, getString(R.string.settings_about)));
         addRow(R.drawable.ic_vmore, getString(R.string.settings_version) + " " + Vmore.VERSION,
                 "Vmore runs everything on this phone", null);
+        addRow(R.drawable.ic_lock, getString(R.string.settings_signature),
+                signatureSummary(), v -> copy(signatureText()));
         addRow(R.drawable.ic_refresh, getString(R.string.settings_check),
                 getString(R.string.settings_check_hint), v -> checkConnection());
         addRow(R.drawable.ic_person, getString(R.string.settings_developer),
@@ -209,6 +211,16 @@ public class SettingsActivity extends Activity {
     }
 
     // ------------------------------------------------------------- builders //
+
+    private String signatureSummary() {
+        String shortForm = AppSignature.shortForm(AppSignature.fingerprint(this));
+        return shortForm.isEmpty() ? getString(R.string.settings_signature_unavailable) : shortForm;
+    }
+
+    private String signatureText() {
+        String fingerprint = AppSignature.fingerprint(this);
+        return fingerprint.isEmpty() ? "" : AppSignature.grouped(fingerprint);
+    }
 
     private void addRow(int icon, String title, String subtitle, View.OnClickListener click) {
         View row = Ui.row(this, icon, title, subtitle);
@@ -499,6 +511,9 @@ public class SettingsActivity extends Activity {
         report.append("Auto upload: ").append(Prefs.autoUpload(this) ? "on" : "off")
                 .append(", delete local copy: ")
                 .append(Prefs.autoDeleteLocal(this) ? "on" : "off").append('\n');
+        String signature = AppSignature.grouped(AppSignature.fingerprint(this));
+        report.append("Signature: ").append(signature.isEmpty() ? "unreadable" : signature)
+                .append('\n');
         report.append("Download cap: ").append(Prefs.speedLimitKbps(this) <= 0 ? "full"
                 : Prefs.speedLimitKbps(this) + " KB/s").append('\n');
         report.append("Wi-Fi only: ").append(Prefs.wifiOnly(this) ? "on" : "off")

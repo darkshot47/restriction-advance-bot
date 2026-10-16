@@ -1,0 +1,3 @@
+# The SHA-256 of the certificate every release APK must be signed with.
+# Lowercase hex, colons optional.  The build fails when an APK differs, which is
+# what stops a lost or swapped key from silently breaking every update.

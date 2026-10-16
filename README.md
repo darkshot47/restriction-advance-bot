@@ -525,23 +525,25 @@ The list below is the whole feature set, all of it on the phone, none of it need
 
 ### Updates and the signing key
 
-Android only installs an APK over an existing app when both carry the same signature.  Every build up to
-2.2.1 was signed with Android's *debug* key, which a CI runner generates fresh each time — so every APK
-had a different signature and the phone answered "App not installed".  The fix:
+Android only installs an APK over an existing app when both carry the **same signature**.  Every build up
+to 2.2.1 was signed with Android's *debug* key, and a CI runner generates that keystore from scratch each
+time — so every APK had a different signature and the phone answered "App not installed".  The fix:
 
-* the distribution APK is a **release** build signed with one stable key, kept in the private draft
-  release **`vmore-signing-key`** of this repository (drafts are visible to the owner only — this repo is
-  public, so the key must never be committed, published, or deleted);
-* the workflow exports that key to Gradle, verifies it with `keytool`, and prints the certificate's
-  SHA-256 in every build;
-* `android/tools/expected_signing.txt` records that fingerprint, and the build **fails** if a future APK
-  is signed with anything else — that is what catches a lost key before it reaches a phone;
-* if the key cannot be reached at all (a pull request from a fork, say), the build falls back to the debug
-  key and says so instead of failing.
+* the distribution APK is a **release** build signed with one stable key, kept with its password under
+  [`android/signing/`](android/signing/README.md) where both the build and the owner can always reach it;
+* the certificate's SHA-256 is recorded in
+  [`android/tools/expected_signing.txt`](android/tools/expected_signing.txt) and the workflow **fails** if
+  the key, or the APK's signature, is not the recorded one — that is what stops a lost or swapped key from
+  silently breaking every update;
+* each release's notes carry the version, the version code and the signing fingerprint, and the same
+  fingerprint can be read off the *installed* app (Settings → Check the Telegram connection), so an
+  installed Vmore can be checked against the release it claims to be;
+* if no keystore can be reached at all (a pull request from a fork, say), the build falls back to the debug
+  key, says so loudly, and the release notes say the same.
 
-Because the key used before 2.2.2 was random, an already installed Vmore must be **uninstalled once**
-before installing a 2.2.2 or newer build.  From that build on, updates install over each other without
-touching the data.
+Because the key used before this change was random, an already installed Vmore must be **uninstalled
+once** before installing this build or newer.  From that build on, updates install over each other and the
+data stays.
 
 ### On the phone, the first time
 

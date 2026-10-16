@@ -10,8 +10,8 @@ android {
         applicationId "com.vmore.app"
         minSdk 26
         targetSdk 34
-        versionCode 6
-        versionName "2.2.2"
+        versionCode 7
+        versionName "2.2.3"
         resValue "string", "app_name", "Vmore"
         ndk {
             //: TDLib direct mode ships one libtdjni.so per ABI (built by
@@ -29,11 +29,13 @@ android {
     //: so every release was signed with a different key and every update ended
     //: in "App not installed".
     //:
-    //: The release build is therefore signed with a keystore that lives in a
-    //: private draft release of this repository, and the workflow exports it
-    //: here.  The path is kept out of the repository on purpose: this repo is
-    //: public, and a published signing key would let anyone produce an APK the
-    //: phone would accept as an update.
+    //: The release build is therefore signed with one keystore that lives in
+    //: the repository itself, under android/signing/, and the workflow exports
+    //: it here (the password file sits next to it).  A secret cannot be used:
+    //: the workflow has to read the key on every run, and a value only the
+    //: owner can see cannot be read by a runner.  The key is therefore public
+    //: by design — see android/signing/README.md for what that trades away and
+    //: how to rotate it.
     def updateKeystore = System.getenv('VMORE_STORE_FILE')
     if (updateKeystore != null && !updateKeystore.isEmpty()) {
         signingConfigs {
