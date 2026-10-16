@@ -191,9 +191,16 @@ public final class History {
     }
 
     private void notifyListeners() {
-        for (Listener listener : listeners) {
-            listener.onHistoryChanged();
-        }
+        //: History rows are written from the queue thread; the screens that
+        //: show them are built here, on the main thread.
+        UiThread.safe(() -> {
+            for (Listener listener : listeners) {
+                try {
+                    listener.onHistoryChanged();
+                } catch (Throwable ignored) {
+                }
+            }
+        });
     }
 
     private File file() {

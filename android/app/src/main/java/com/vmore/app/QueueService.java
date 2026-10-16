@@ -545,6 +545,16 @@ public class QueueService extends Service {
             lastFailure = error;
             String message = error.getMessage() == null ? "the job failed" : error.getMessage();
             Log.step(this, "job " + job.id + " " + job.stage + ": " + message);
+            if (message.contains("original thread")) {
+                //: A repaint mistake is not a transfer problem: say so in the
+                //: log, leave the job in the queue, and let the next turn of the
+                //: loop pick it up.
+                Log.step(this, "job " + job.id + " hit a screen error, not a transfer one");
+                job.stage = QJob.QUEUED;
+                job.error = "";
+                jobs.update(job);
+                return;
+            }
             if (cancelled.get() && skipCurrent.get()) {
                 dropJob(jobs, job);
                 return;

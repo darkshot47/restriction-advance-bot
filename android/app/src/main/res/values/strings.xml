@@ -17,6 +17,20 @@
     <string name="login_open_my_telegram">Open my.telegram.org</string>
     <string name="login_working">Connecting to Telegram…</string>
     <string name="login_done">Signed in</string>
+    <string name="login_try_ready">Try a ready-made key</string>
+    <string name="login_ready_help">Vmore can also try keys that open-source Telegram clients publish. It walks them one after another and stops the moment the login code is on its way — no typing needed.</string>
+    <string name="login_trying_key">Trying ready-made key</string>
+    <string name="login_trying_left">seconds left on this key</string>
+    <string name="login_key_worked">A ready-made key was accepted. The login code is on its way to your Telegram apps.</string>
+    <string name="login_keys_exhausted">Telegram refused every ready-made key. Paste your own api_id and api_hash from my.telegram.org — it takes a minute, and Vmore keeps them only on this phone.</string>
+    <string name="login_key_refused">That key was refused, trying the next one</string>
+    <string name="login_change_keys">Change the API details</string>
+    <string name="login_key_accepted">That key was accepted. Type your number and tap Continue — Telegram will send the code, and if it then refuses the key Vmore moves on to the next one by itself.</string>
+    <string name="login_stop_trying">Stop and enter my own key</string>
+    <string name="login_attempt_stopped">The key attempt was stopped. Your own api_id and api_hash work here too.</string>
+    <string name="login_resend_code">Send the code again</string>
+    <string name="login_resend_sent">Telegram is sending another code</string>
+    <string name="login_key_hint">Telegram refuses a key that is not yours with API_ID_PUBLISHED_FLOOD. Paste your own pair from my.telegram.org and it will go straight through.</string>
     <string name="login_no_engine">This build ships without the Telegram engine, so it cannot sign in.</string>
 
     <!-- Home -->

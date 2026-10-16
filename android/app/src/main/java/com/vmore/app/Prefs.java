@@ -173,6 +173,14 @@ public final class Prefs {
                 .apply();
     }
 
+    /** Forgets the stored pair, so the sign-in screen asks for it again. */
+    public static void clearCredentials(Context context) {
+        prefs(context).edit()
+                .remove(slotKey(context, KEY_API_ID))
+                .remove(slotKey(context, KEY_API_HASH))
+                .apply();
+    }
+
     // ------------------------------------------------------------ account //
 
     public static String phone(Context context) {

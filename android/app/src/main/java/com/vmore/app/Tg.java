@@ -44,6 +44,29 @@ public final class Tg {
     }
 
     /**
+     * Telegram answers on its own thread and the queue works on another one, but
+     * a screen may only be touched by the thread that built it.  Every result
+     * that goes back to a caller is handed to the main thread right here — once,
+     * instead of at each call site.
+     */
+    private static <T> Cb<T> deliver(final Cb<T> callback) {
+        if (callback == null) {
+            return null;
+        }
+        return new Cb<T>() {
+            @Override
+            public void ok(final T value) {
+                UiThread.run(() -> callback.ok(value));
+            }
+
+            @Override
+            public void fail(final String message) {
+                UiThread.run(() -> callback.fail(message));
+            }
+        };
+    }
+
+    /**
      * A step of the pipeline that did not work, carrying Telegram's own words
      * and whether another attempt is worth the data.
      */
@@ -171,6 +194,8 @@ public final class Tg {
     private final Map<Long, Chat> chatCache = new ConcurrentHashMap<>();
 
     private volatile Client client;
+    /** Bumped for every client: answers from a closed session are ignored. */
+    private volatile int generation;
     private volatile boolean nativeOk = true;
     private volatile boolean ready;
     private volatile String state = STATE_NONE;
@@ -226,7 +251,14 @@ public final class Tg {
         }
         if (client == null) {
             try {
-                client = Client.create(this::handleUpdate, null, null);
+                final int mine = ++generation;
+                client = Client.create(object -> {
+                    //: A session that was thrown away may still answer once;
+                    //: its words must not move the screen any more.
+                    if (mine == generation) {
+                        handleUpdate(object);
+                    }
+                }, null, null);
                 state = STATE_PARAMETERS;
             } catch (Throwable error) {
                 state = STATE_ERROR;
@@ -275,16 +307,54 @@ public final class Tg {
         state = STATE_NONE;
     }
 
-    /** Called after the user typed the api_id and api_hash for the first time. */
+    /** Called after the user typed the api_id and api_hash. */
     public void restartWithCredentials() {
-        if (client != null) {
-            client.send(new TdApi.Close(), object -> {
-            });
-            client = null;
-        }
-        ready = false;
+        startOver();
         state = STATE_PARAMETERS;
         start(listener);
+    }
+
+    /**
+     * Throws the half-built session away and starts from nothing.
+     *
+     * TDLib refuses to change the api_id of an existing authorization — and it
+     * is right to: a session belongs to the app that opened it.  So a different
+     * key means a different session, which is what this does: the running client
+     * is closed and its folder (database and files) is emptied before the next
+     * one is created.
+     */
+    public void startOver() {
+        closeSession();
+        generation++;
+        File dir = new File(app.getFilesDir(), "telegram_" + Prefs.activeSlot(app));
+        wipe(dir);
+        ready = false;
+        account = null;
+        pendingPhone = "";
+        state = STATE_NONE;
+    }
+
+    /** Empties a folder without touching anything outside it. */
+    private static void wipe(File dir) {
+        File[] children = dir.listFiles();
+        if (children != null) {
+            for (File child : children) {
+                wipe(child);
+            }
+        }
+        //noinspection ResultOfMethodCallIgnored
+        dir.delete();
+    }
+
+    /** Another code, for a code that never arrived. */
+    public void resendCode() {
+        sendOrError(new TdApi.ResendAuthenticationCode(
+                new TdApi.ResendCodeReasonUserRequest()));
+    }
+
+    /** Forgets the stored pair, so the sign-in screen asks for it again. */
+    public void forgetCredentials() {
+        Prefs.clearCredentials(app);
     }
 
     public void submitPhone(String phone) {
@@ -617,9 +687,10 @@ public final class Tg {
 
     /** The chat list, newest first, pinned chats on top. */
     public void loadChats(int limit, Cb<List<Chat>> callback) {
+        final Cb<List<Chat>> cb = deliver(callback);
         Client current = client;
         if (current == null) {
-            callback.fail("the Telegram engine is not running");
+            cb.fail("the Telegram engine is not running");
             return;
         }
         current.send(new TdApi.LoadChats(new TdApi.ChatListMain(), limit), object -> {
@@ -629,14 +700,14 @@ public final class Tg {
             }
             current.send(new TdApi.GetChats(new TdApi.ChatListMain(), limit), chats -> {
                 if (chats instanceof TdApi.Error) {
-                    callback.fail(friendly(((TdApi.Error) chats).message));
+                    cb.fail(friendly(((TdApi.Error) chats).message));
                     return;
                 }
                 TdApi.Chats list = (TdApi.Chats) chats;
                 long[] ids = list.chatIds == null ? new long[0] : list.chatIds;
                 List<Chat> rows = Collections.synchronizedList(new ArrayList<>());
                 if (ids.length == 0) {
-                    post(callback, rows);
+                    post(cb, rows);
                     return;
                 }
                 final int[] pending = {ids.length};
@@ -645,7 +716,7 @@ public final class Tg {
                     if (cached != null && cached.lastDate > 0) {
                         rows.add(cached);
                         if (--pending[0] == 0) {
-                            post(callback, sort(rows));
+                            post(cb, sort(rows));
                         }
                         continue;
                     }
@@ -658,7 +729,7 @@ public final class Tg {
                             }
                         }
                         if (--pending[0] == 0) {
-                            post(callback, sort(rows));
+                            post(cb, sort(rows));
                         }
                     });
                 }
@@ -739,52 +810,54 @@ public final class Tg {
 
     /** One chat's details (title, type) by id. */
     public void chat(long chatId, Cb<Chat> callback) {
+        final Cb<Chat> cb = deliver(callback);
         Chat cached = chatCache.get(chatId);
         if (cached != null && !cached.title.isEmpty()) {
-            callback.ok(cached);
+            cb.ok(cached);
             return;
         }
         Client current = client;
         if (current == null) {
-            callback.fail("the Telegram engine is not running");
+            cb.fail("the Telegram engine is not running");
             return;
         }
         current.send(new TdApi.GetChat(chatId), object -> {
             if (object instanceof TdApi.Error) {
-                callback.fail(friendly(((TdApi.Error) object).message));
+                cb.fail(friendly(((TdApi.Error) object).message));
                 return;
             }
             TdApi.Chat chat = (TdApi.Chat) object;
             remember(chat);
             Chat row = chatCache.get(chat.id);
             if (row == null) {
-                callback.fail("that chat could not be read");
+                cb.fail("that chat could not be read");
                 return;
             }
-            callback.ok(row);
+            cb.ok(row);
         });
     }
 
     /** Find a chat by its public @username (used when the user types one). */
     public void findPublicChat(String username, Cb<Chat> callback) {
+        final Cb<Chat> cb = deliver(callback);
         Client current = client;
         if (current == null) {
-            callback.fail("the Telegram engine is not running");
+            cb.fail("the Telegram engine is not running");
             return;
         }
         current.send(new TdApi.SearchPublicChat(username), object -> {
             if (object instanceof TdApi.Error) {
-                callback.fail("Telegram could not find @" + username);
+                cb.fail("Telegram could not find @" + username);
                 return;
             }
             TdApi.Chat chat = (TdApi.Chat) object;
             remember(chat);
             Chat row = chatCache.get(chat.id);
             if (row == null) {
-                callback.fail("that chat could not be read");
+                cb.fail("that chat could not be read");
                 return;
             }
-            callback.ok(row);
+            cb.ok(row);
         });
     }
 
@@ -798,13 +871,14 @@ public final class Tg {
      * invite link is inspected (and joined when needed) first.
      */
     public void resolve(TgLink link, Cb<Media> callback) {
+        final Cb<Media> cb = deliver(callback);
         Client current = client;
         if (current == null) {
-            callback.fail("the Telegram engine is not running");
+            cb.fail("the Telegram engine is not running");
             return;
         }
         if (link.messageId <= 0) {
-            callback.fail("that link has no message in it");
+            cb.fail("that link has no message in it");
             return;
         }
         if (!link.inviteHash.isEmpty()) {
@@ -812,16 +886,16 @@ public final class Tg {
                 if (object instanceof TdApi.ChatInviteLinkInfo) {
                     long chatId = ((TdApi.ChatInviteLinkInfo) object).chatId;
                     if (chatId != 0L) {
-                        message(current, chatId, link.messageId, callback);
+                        message(current, chatId, link.messageId, cb);
                         return;
                     }
                 }
                 current.send(new TdApi.JoinChatByInviteLink(inviteUrl(link.inviteHash)), joined -> {
                     if (joined instanceof TdApi.ChatJoinResultSuccess) {
                         long chatId = ((TdApi.ChatJoinResultSuccess) joined).chatId;
-                        message(current, chatId, link.messageId, callback);
+                        message(current, chatId, link.messageId, cb);
                     } else {
-                        callback.fail("that invite link cannot be used to read the message");
+                        cb.fail("that invite link cannot be used to read the message");
                     }
                 });
             });
@@ -837,14 +911,14 @@ public final class Tg {
                 Media media = object instanceof TdApi.MessageLinkInfo
                         ? toMedia(((TdApi.MessageLinkInfo) object).message) : null;
                 if (media != null && media.fileId != 0) {
-                    withChatTitle(current, media, callback);
+                    withChatTitle(current, media, cb);
                     return;
                 }
-                byChat(current, link, callback);
+                byChat(current, link, cb);
             });
             return;
         }
-        byChat(current, link, callback);
+        byChat(current, link, cb);
     }
 
     /** The public https form of a link, or null when there is none. */
@@ -863,31 +937,32 @@ public final class Tg {
 
     /** Fallback: go through the chat itself and read the message. */
     private void byChat(Client current, TgLink link, Cb<Media> callback) {
+        final Cb<Media> cb = deliver(callback);
         if (link.privateLink) {
             long chatId = link.chatId != 0L ? link.chatId : link.privateChatId();
             if (chatId == 0L) {
-                callback.fail("that private link does not carry a chat number");
+                cb.fail("that private link does not carry a chat number");
                 return;
             }
-            message(current, chatId, link.messageId, callback);
+            message(current, chatId, link.messageId, cb);
             return;
         }
         if (link.chatId != 0L) {
-            message(current, link.chatId, link.messageId, callback);
+            message(current, link.chatId, link.messageId, cb);
             return;
         }
         if (!link.username.isEmpty()) {
             current.send(new TdApi.SearchPublicChat(link.username), found -> {
                 if (found instanceof TdApi.Error) {
-                    callback.fail("Telegram could not open that link. Check that this "
+                    cb.fail("Telegram could not open that link. Check that this "
                             + "account can read the chat and that the message exists.");
                     return;
                 }
-                message(current, ((TdApi.Chat) found).id, link.messageId, callback);
+                message(current, ((TdApi.Chat) found).id, link.messageId, cb);
             });
             return;
         }
-        callback.fail("that link does not name a chat");
+        cb.fail("that link does not name a chat");
     }
 
     private static String inviteUrl(String hash) {
@@ -895,24 +970,26 @@ public final class Tg {
     }
 
     private void message(Client current, long chatId, long messageId, Cb<Media> callback) {
+        final Cb<Media> cb = deliver(callback);
         current.send(new TdApi.GetMessage(chatId, messageId), object -> {
             if (object instanceof TdApi.Error) {
-                callback.fail(friendly(((TdApi.Error) object).message)
+                cb.fail(friendly(((TdApi.Error) object).message)
                         + " (message " + messageId + ")");
                 return;
             }
             Media media = toMedia((TdApi.Message) object);
             if (media == null) {
-                callback.fail("message " + messageId + " has no file or video in it");
+                cb.fail("message " + messageId + " has no file or video in it");
                 return;
             }
-            withChatTitle(current, media, callback);
+            withChatTitle(current, media, cb);
         });
     }
 
     private void withChatTitle(Client current, Media media, Cb<Media> callback) {
+        final Cb<Media> cb = deliver(callback);
         if (media.chatTitle != null && !media.chatTitle.isEmpty()) {
-            callback.ok(media);
+            cb.ok(media);
             return;
         }
         current.send(new TdApi.GetChat(media.chatId), object -> {
@@ -923,20 +1000,21 @@ public final class Tg {
                     media.chatTitle = row.title;
                 }
             }
-            callback.ok(media);
+            cb.ok(media);
         });
     }
 
     /** Recent media messages of a chat, newest first — "scan this chat". */
     public void scanChat(long chatId, int limit, Cb<List<Media>> callback) {
+        final Cb<List<Media>> cb = deliver(callback);
         Client current = client;
         if (current == null) {
-            callback.fail("the Telegram engine is not running");
+            cb.fail("the Telegram engine is not running");
             return;
         }
         current.send(new TdApi.GetChatHistory(chatId, 0L, 0, limit, false), object -> {
             if (object instanceof TdApi.Error) {
-                callback.fail(friendly(((TdApi.Error) object).message));
+                cb.fail(friendly(((TdApi.Error) object).message));
                 return;
             }
             TdApi.Messages messages = (TdApi.Messages) object;
@@ -957,12 +1035,12 @@ public final class Tg {
                             media.chatTitle = value.title;
                         }
                     }
-                    callback.ok(found);
+                    cb.ok(found);
                 }
 
                 @Override
                 public void fail(String message) {
-                    callback.ok(found);
+                    cb.ok(found);
                 }
             });
         });
@@ -1099,9 +1177,10 @@ public final class Tg {
     // ── downloads ─────────────────────────────────────────────────────────
 
     public void downloadFile(final int fileId, final Progress progress, final Cb<Integer> done) {
+        final Cb<Integer> answer = deliver(done);
         Client current = client;
         if (current == null) {
-            done.fail("the Telegram engine is not running");
+            answer.fail("the Telegram engine is not running");
             return;
         }
         //: The watch is registered before the request goes out.  Telegram can
@@ -1109,7 +1188,7 @@ public final class Tg {
         //: link is used, for instance) and the update that says so may even
         //: arrive first; registering late used to lose it and call a finished
         //: download a failure.
-        final FileWatch watch = new FileWatch(fileId, progress, done);
+        final FileWatch watch = new FileWatch(fileId, progress, answer);
         FileWatch previous = downloads.put(fileId, watch);
         if (previous != null && previous != watch && !previous.done) {
             previous.finishError("a newer request replaced this one");
@@ -1305,21 +1384,22 @@ public final class Tg {
 
     /** Let Telegram move an existing message: no bytes cross the phone. */
     public void forward(long destChatId, long fromChatId, long messageId, Cb<Long> callback) {
+        final Cb<Long> cb = deliver(callback);
         Client current = client;
         if (current == null) {
-            callback.fail("the Telegram engine is not running");
+            cb.fail("the Telegram engine is not running");
             return;
         }
         current.send(new TdApi.ForwardMessages(destChatId, null, fromChatId,
                 new long[]{messageId}, sendOptions(), false, false), object -> {
             if (object instanceof TdApi.Error) {
-                callback.fail(friendly(((TdApi.Error) object).message));
+                cb.fail(friendly(((TdApi.Error) object).message));
                 return;
             }
             TdApi.Messages messages = (TdApi.Messages) object;
             long sent = messages.messages != null && messages.messages.length > 0
                     ? messages.messages[0].id : 0L;
-            callback.ok(sent);
+            cb.ok(sent);
         });
     }
 
@@ -1696,6 +1776,20 @@ public final class Tg {
     private static String friendly(String message) {
         String text = message == null ? "Telegram refused that request" : message.trim();
         String lower = text.toLowerCase(Locale.US);
+        //: The app-key refusals are told apart from every other flood: their
+        //: names carry the word "flood" too, and the sign-in screen has to know
+        //: whether to try another key or to let the transfer wait.
+        if (lower.contains("api_id_published") || lower.contains("published_flood")) {
+            return "Telegram refused this app key: it is a published key that belongs to "
+                    + "another app (API_ID_PUBLISHED_FLOOD). Paste your own api_id and "
+                    + "api_hash from my.telegram.org";
+        }
+        if (lower.contains("api_id_invalid") || lower.contains("app_id_invalid")
+                || (lower.contains("api_id") && lower.contains("invalid"))
+                || (lower.contains("api_hash") && lower.contains("invalid"))) {
+            return "That api_id or api_hash is not valid. Copy both again from "
+                    + "my.telegram.org";
+        }
         if (lower.contains("message not found") || lower.contains("message_not_found")) {
             return "That message does not exist any more";
         }

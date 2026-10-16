@@ -432,9 +432,15 @@ APK.
 
 1. **Install** — download `Vmore.apk` from the stable Release link (or unzip `Vmore-apk.zip`) and allow
    "Install unknown apps" once.
-2. **Sign in** — paste the `api_id` and `api_hash` of your own Telegram application (my.telegram.org)
-   once; they are stored on the phone and can be changed later in Settings.  Then the number, the login
-   code Telegram sends you, and the two-step password if the account has one.
+2. **Sign in** — either paste the `api_id` and `api_hash` of your own Telegram application
+   (my.telegram.org), or tap **Try a ready-made key**: Vmore walks the keys that open-source Telegram
+   clients publish, gives each one up to sixty seconds, and stops the moment the login code is on its
+   way.  A key Telegram refuses is left behind at once and the next one goes; the whole attempt ends
+   with the screen back in your hands, one tap from your own pair.  Every step after the keys has a way
+   back (Change the API details), the number is remembered and filled in next time, and the code screen
+   offers **Send the code again**.  Then the code Telegram sends you, and the two-step password if the
+   account has one.  Telegram refuses a published key with `API_ID_PUBLISHED_FLOOD` more often than not,
+   which is exactly what the own-pair option is for.
 3. **Paste a link** — one link or a whole batch, public (`t.me/channel/123`), private
    (`t.me/c/…`) or a range (`t.me/channel/1-500`, one job per message, up to 500 per link).  A chat can
    also be scanned: Vmore takes the channel's recent media and queues it.

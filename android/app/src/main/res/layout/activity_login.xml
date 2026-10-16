@@ -133,6 +133,21 @@
                 android:layout_height="wrap_content"
                 style="@style/VmoreButtonGhost"
                 android:text="@string/login_open_my_telegram" />
+
+            <Button
+                android:id="@+id/apiButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                style="@style/VmoreButtonGhost"
+                android:text="@string/login_try_ready" />
+
+            <Button
+                android:id="@+id/backButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                style="@style/VmoreButtonGhost"
+                android:text="@string/login_change_keys"
+                android:visibility="gone" />
         </LinearLayout>
 
         <TextView

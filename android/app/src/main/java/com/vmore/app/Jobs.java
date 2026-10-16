@@ -263,11 +263,22 @@ public final class Jobs {
     }
 
     private void notifyListeners() {
-        for (Listener listener : listeners) {
-            listener.onJobsChanged();
-        }
-        //: The home screen and the Quick Settings panel see the same queue.
-        Widget.touch(app);
+        //: The queue is served on its own thread, but every listener is a
+        //: screen: the callbacks go to the main thread, and a listener that
+        //: throws is swallowed while the queue carries on.  Before this, a
+        //: repaint from the worker thread threw "Only the original thread that
+        //: created a view hierarchy can touch its views" and the running job was
+        //: marked failed with that sentence as its reason.
+        UiThread.safe(() -> {
+            for (Listener listener : listeners) {
+                try {
+                    listener.onJobsChanged();
+                } catch (Throwable ignored) {
+                }
+            }
+            //: The home screen and the Quick Settings panel see the same queue.
+            Widget.touch(app);
+        });
     }
 
     // --------------------------------------------------------- persistence //
