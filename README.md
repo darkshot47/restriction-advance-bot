@@ -558,11 +558,17 @@ The list below is the whole feature set, all of it on the phone, none of it need
   the real handle, the real bio and the real profile picture, cached on the phone so the card paints
   instantly, refreshed once per visit, and one tap from a **direct chat** (`tg://resolve`, the web
   fallback when Telegram is not installed).  Nothing about it is baked into the APK.
+* **That one card is alive.**  It is the single place the owner allowed colour, and it uses it: five soft
+  clouds of colour (blue, violet, cyan, rose and a little amber) drift on their own paths behind the
+  text, a band of light crosses the card, small dots rise, and the picture sits inside a multicolour
+  ring that keeps turning.  A dark wash keeps the white name, bio and button the first thing read, and
+  the animation stops with the screen instead of running in the background.
 * **The story ring**: the logo on the sign-in screen, the profile picture in the home header and the
   developer's picture at the end of Settings all sit inside the circle Telegram draws around a profile
-  with a story.  The arc travels around the logo without ever stopping; on the header and on the
-  developer card it turns slowly enough that it is noticed only when looked at.  It stops by itself when
-  the screen leaves the window.
+  with a story.  The arc travels around the logo without ever stopping; on the header it turns slowly
+  enough that it is noticed only when looked at.  On the developer card the ring is a multicolour
+  gradient turning once every seven seconds.  Every ring stops by itself when the screen leaves the
+  window.
 * **Buttons**: one radius (16dp), one weight, one letter spacing and a real ripple under the finger for
   the solid blue button, the outline button and every filter chip — so a screen with both reads as one
   design.

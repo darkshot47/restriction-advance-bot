@@ -31,6 +31,7 @@ public class SettingsActivity extends Activity {
 
     private LinearLayout box;
     private boolean devRefreshed;
+    private AuroraDrawable devAura;
     private ImageView devAvatar;
     private TextView devName;
     private TextView devHandle;
@@ -54,6 +55,17 @@ public class SettingsActivity extends Activity {
             return;
         }
         render();
+    }
+
+    @Override
+    protected void onPause() {
+        //: The moving card is the only thing on this screen that repaints by
+        //: itself; it stops with the screen instead of animating underneath
+        //: the next activity.
+        if (devAura != null) {
+            devAura.stop();
+        }
+        super.onPause();
     }
 
     private void render() {
@@ -556,9 +568,18 @@ public class SettingsActivity extends Activity {
         box.addView(Ui.section(this, getString(R.string.settings_developer)));
         Developer.Profile cached = Developer.cached(this);
 
+        //: The card is its own little sky: a dark rounded panel with colour
+        //: drifting behind the text, a band of light crossing it, small dots
+        //: rising and a multicolour story ring around the picture.  White on
+        //: dark keeps it readable in both skins.
+        if (devAura != null) {
+            devAura.stop();
+        }
+        devAura = new AuroraDrawable(getResources().getDisplayMetrics().density);
+
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setBackgroundResource(R.drawable.bg_card);
+        card.setBackground(devAura);
         card.setPadding(Ui.dp(this, 16), Ui.dp(this, 16),
                 Ui.dp(this, 16), Ui.dp(this, 14));
 
@@ -571,9 +592,11 @@ public class SettingsActivity extends Activity {
         LinearLayout.LayoutParams boxParams = new LinearLayout.LayoutParams(boxSize, boxSize);
         avatarBox.setLayoutParams(boxParams);
         StoryRingView ring = new StoryRingView(this);
-        //: The owner asked for a ring that really moves here too, slowly
-        //: enough to stay quiet next to the name and the bio.
-        ring.setTurnSeconds(9f);
+        //: The owner asked for a ring that really moves here too, and for the
+        //: one place in the app where colour is welcome.
+        ring.setRainbow(true);
+        ring.setTrackColor(0x4DFFFFFF);
+        ring.setTurnSeconds(7f);
         avatarBox.addView(ring, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
@@ -586,6 +609,7 @@ public class SettingsActivity extends Activity {
                 Ui.dp(this, 9), Ui.dp(this, 9));
         devAvatar.setScaleType(ImageView.ScaleType.CENTER_CROP);
         devAvatar.setImageResource(R.drawable.ic_person);
+        devAvatar.setImageTintList(android.content.res.ColorStateList.valueOf(0xFFE0E7FF));
         avatarBox.addView(devAvatar);
         head.addView(avatarBox);
 
@@ -597,7 +621,7 @@ public class SettingsActivity extends Activity {
         names.setLayoutParams(namesParams);
 
         devName = new TextView(this);
-        devName.setTextColor(getColor(R.color.vmore_text));
+        devName.setTextColor(0xFFFFFFFF);
         devName.setTextSize(16f);
         devName.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         devName.setSingleLine(true);
@@ -605,7 +629,7 @@ public class SettingsActivity extends Activity {
         names.addView(devName);
 
         devHandle = new TextView(this);
-        devHandle.setTextColor(getColor(R.color.vmore_blue));
+        devHandle.setTextColor(0xFF7DD3FC);
         devHandle.setTextSize(13f);
         LinearLayout.LayoutParams handleParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
@@ -617,7 +641,7 @@ public class SettingsActivity extends Activity {
         card.addView(head);
 
         devBio = new TextView(this);
-        devBio.setTextColor(getColor(R.color.vmore_text_dim));
+        devBio.setTextColor(0xFFD6E2FF);
         devBio.setTextSize(13f);
         devBio.setLineSpacing(0f, 1.12f);
         LinearLayout.LayoutParams bioParams = new LinearLayout.LayoutParams(
@@ -628,11 +652,11 @@ public class SettingsActivity extends Activity {
 
         Button contact = new Button(this);
         contact.setText(R.string.settings_developer_contact);
-        contact.setTextColor(getColor(R.color.vmore_blue));
+        contact.setTextColor(0xFFFFFFFF);
         contact.setTextSize(14f);
         contact.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
         contact.setAllCaps(false);
-        contact.setBackgroundResource(R.drawable.bg_button_ghost);
+        contact.setBackgroundResource(R.drawable.bg_button_glow);
         contact.setStateListAnimator(null);
         LinearLayout.LayoutParams contactParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, Ui.dp(this, 46));
@@ -647,6 +671,7 @@ public class SettingsActivity extends Activity {
         cardParams.bottomMargin = Ui.dp(this, 12);
         card.setLayoutParams(cardParams);
         box.addView(card);
+        devAura.start();
         paintDeveloper(cached);
         refreshDeveloper();
     }
@@ -662,6 +687,7 @@ public class SettingsActivity extends Activity {
         Bitmap picture = picture(profile.avatar);
         if (picture != null) {
             devAvatar.setPadding(0, 0, 0, 0);
+            devAvatar.setImageTintList(null);
             devAvatar.setImageBitmap(Ui.circle(this, picture, 46));
         }
     }
