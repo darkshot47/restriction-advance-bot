@@ -65,6 +65,28 @@ final class Retry {
                 || lower.contains("banned") || lower.contains("deleted");
     }
 
+    /**
+     * True when Telegram refused to *forward* the message, as opposed to
+     * refusing to move it at all.
+     *
+     * A chat that protects its content forbids forwarding and saving, and
+     * Telegram answers with exactly those words.  The bytes may still be
+     * downloaded for viewing, so the queue answers this refusal by moving the
+     * file as a copy instead of giving up on the job.
+     */
+    static boolean forwardBlocked(String reason) {
+        if (reason == null || reason.isEmpty()) {
+            return false;
+        }
+        String lower = reason.toLowerCase(Locale.US);
+        return lower.contains("protected")
+                || lower.contains("can't be forwarded")
+                || lower.contains("cannot be forwarded")
+                || lower.contains("forward")
+                && (lower.contains("not allowed") || lower.contains("restricted")
+                    || lower.contains("forbidden"));
+    }
+
     /** The simplest form: a step that failed with only words to judge it by. */
     static boolean worthIt(String reason) {
         return !fatal(reason);

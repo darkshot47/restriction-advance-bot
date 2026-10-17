@@ -49,6 +49,8 @@ public final class Prefs {
     private static final String KEY_LOCK_SALT = "lock_salt";
     private static final String KEY_SLOT = "account_slot";
     private static final String KEY_SLOTS = "account_slots";
+    /** The TDLib folder of one slot; a new sign-in gets a new name. */
+    private static final String KEY_SESSION = "session_dir";
     public static final int MAX_SLOTS = 3;
 
     /** Send mode: keep the original file, or let Telegram show it inline. */
@@ -110,7 +112,10 @@ public final class Prefs {
     }
 
     public static void setActiveSlot(Context context, int slot) {
-        prefs(context).edit().putInt(KEY_SLOT, Math.max(1, slot)).apply();
+        //: Committed, not applied: the app can be killed the moment the switch
+        //: starts, and coming back into the old slot would look like the
+        //: switch never happened.
+        prefs(context).edit().putInt(KEY_SLOT, Math.max(1, slot)).commit();
     }
 
     /** Opens one more account slot to sign into. */
@@ -137,6 +142,47 @@ public final class Prefs {
         return prefs(context).getInt(KEY_API_ID + "_s" + slot, 0) != 0;
     }
 
+    /**
+     * True when this slot holds an account someone actually signed into.
+     *
+     * An api_id can survive a sign-out, so it says very little on its own; a
+     * name or a number is written only once Telegram has answered with the
+     * account, which is the thing worth offering a way back to.
+     */
+    public static boolean slotHasAccount(Context context, int slot) {
+        String name = prefs(context).getString(KEY_NAME + "_s" + slot, "");
+        String phone = prefs(context).getString(KEY_PHONE + "_s" + slot, "");
+        return (name != null && !name.isEmpty()) || (phone != null && !phone.isEmpty());
+    }
+
+    /**
+     * The folder this slot's Telegram session lives in.
+     *
+     * A slot that has never been reset keeps the plain name older builds used,
+     * so an update never signs anybody out.  A reset picks a fresh name and the
+     * old folder is deleted afterwards, which is why wiping a session can no
+     * longer race the session that is still closing.
+     */
+    public static String sessionDirForSlot(Context context, int slot) {
+        String stored = prefs(context).getString(KEY_SESSION + "_s" + slot, "");
+        return stored == null || stored.isEmpty() ? "telegram_" + slot : stored;
+    }
+
+    public static String sessionDir(Context context) {
+        return sessionDirForSlot(context, activeSlot(context));
+    }
+
+    /** Reserves a new, empty session folder for the account in use. */
+    public static String newSessionDir(Context context) {
+        int slot = activeSlot(context);
+        String name = "telegram_" + slot + "_" + System.currentTimeMillis();
+        //: Committed for the same reason, and one more: the start-up tidy-up
+        //: deletes folders no slot claims, so a name that never reached the
+        //: disk would get the new session folder deleted under it.
+        prefs(context).edit().putString(KEY_SESSION + "_s" + slot, name).commit();
+        return name;
+    }
+
     /** Drops the credentials of one slot (used when switching accounts). */
     public static void clearSlot(Context context, int slot) {
         String suffix = "_s" + slot;
@@ -145,6 +191,7 @@ public final class Prefs {
                 .remove(KEY_PHONE + suffix).remove(KEY_NAME + suffix)
                 .remove(KEY_USERNAME + suffix).remove(KEY_AVATAR + suffix)
                 .remove(KEY_AVATAR_ID + suffix).remove(KEY_USER_ID + suffix)
+                .remove(KEY_SESSION + suffix)
                 .apply();
     }
 

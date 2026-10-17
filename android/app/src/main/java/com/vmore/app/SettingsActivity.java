@@ -347,7 +347,7 @@ public class SettingsActivity extends Activity {
         int active = Prefs.activeSlot(this);
         for (int slot = 1; slot <= Prefs.slotCount(this); slot++) {
             final int target = slot;
-            boolean used = Prefs.slotUsed(this, slot);
+            boolean used = Prefs.slotHasAccount(this, slot);
             String title = getString(R.string.settings_account) + " " + slot
                     + (used ? " \u2022 " + Prefs.slotLabel(this, slot) : "");
             String subtitle = slot == active
@@ -375,8 +375,12 @@ public class SettingsActivity extends Activity {
             Ui.toast(this, getString(R.string.settings_account_current));
             return;
         }
+        //: An empty slot is not a trap: the sign-in screen carries a button
+        //: back to whichever account is in use here, and this says so.
+        boolean empty = !Prefs.slotHasAccount(this, slot);
         Ui.confirm(this, getString(R.string.settings_account_switch),
-                getString(R.string.settings_account_switch_confirm),
+                getString(empty ? R.string.settings_account_switch_empty
+                        : R.string.settings_account_switch_confirm),
                 getString(R.string.settings_account_switch), () -> {
                     Tg.get(this).useSlot(slot);
                     startActivity(new Intent(this, LoginActivity.class));

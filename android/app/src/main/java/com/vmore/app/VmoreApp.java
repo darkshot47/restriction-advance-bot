@@ -20,6 +20,11 @@ public class VmoreApp extends Application implements Application.ActivityLifecyc
         super.onCreate();
         Skin.apply(this);
         registerActivityLifecycleCallbacks(this);
+        //: A session folder that a reset could not delete (it was still open,
+        //: the phone was shutting down) is taken here, once the process is new.
+        Thread tidy = new Thread(() -> Tg.get(this).tidySessions(), "vmore-session-tidy");
+        tidy.setDaemon(true);
+        tidy.start();
     }
 
     @Override

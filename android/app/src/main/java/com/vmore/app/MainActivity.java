@@ -61,6 +61,17 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
     private final Runnable watcher = new Runnable() {
         @Override
         public void run() {
+            //: Still no session and none coming: the sign-in screen is the one
+            //: that can explain why, so move there instead of pretending.
+            if (!Tg.get(this).isReady() && !Tg.get(this).starting()) {
+                goToSignIn();
+                return;
+            }
+            if (!Tg.get(this).isReady()) {
+                //: Idempotent: rebuilds the session only when there is none, so
+                //: a session TDLib closed comes back without leaving the screen.
+                Tg.get(this).start(null);
+            }
             paintLive();
             if (!avatarPainted()) {
                 paintProfile();
@@ -184,15 +195,18 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
     @Override
     protected void onResume() {
         super.onResume();
-        if (!Tg.get(this).isReady()) {
-            startActivity(new Intent(this, LoginActivity.class));
-            finish();
+        //: The session is asked for first: in a fresh process it is still being
+        //: rebuilt, and bouncing to the sign-in screen for those two seconds
+        //: made every cold start look like a logout.
+        Tg.get(this).start(null);
+        boolean ready = Tg.get(this).isReady();
+        if (!ready && !Tg.get(this).starting()) {
+            goToSignIn();
             return;
         }
         if (Lock.guard(this)) {
             return;
         }
-        Tg.get(this).start(null);
         takeSharedLink();
         Jobs.get(this).addListener(this);
         History.get(this).addListener(this);
@@ -217,7 +231,18 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
 
     // ------------------------------------------------------------- painting //
 
+    /** The sign-in screen, once, from anywhere on this one. */
+    private void goToSignIn() {
+        handler.removeCallbacks(watcher);
+        startActivity(new Intent(this, LoginActivity.class));
+        finish();
+    }
+
     private void paintAccount() {
+        if (!Tg.get(this).isReady()) {
+            accountText.setText(getString(R.string.login_working));
+            return;
+        }
         String phone = Prefs.phone(this);
         accountText.setText(phone.isEmpty() ? getString(R.string.settings_session) : phone);
     }

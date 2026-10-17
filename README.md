@@ -438,7 +438,10 @@ APK.
    way.  A key Telegram refuses is left behind at once and the next one goes; the whole attempt ends
    with the screen back in your hands, one tap from your own pair.  Every step after the keys has a way
    back (Change the API details), the number is remembered and filled in next time, and the code screen
-   offers **Send the code again**.  Then the code Telegram sends you, and the two-step password if the
+   offers **Send the code again**.  A refusal lands on the step it belongs to: a wrong code or a wrong
+   two-step password never throws you back to `api_id`, Continue keeps working under the error, and a
+   request that is never answered gives the screen back after forty-five seconds instead of waiting
+   forever.  Then the code Telegram sends you, and the two-step password if the
    account has one.  Telegram refuses a published key with `API_ID_PUBLISHED_FLOOD` more often than not,
    which is exactly what the own-pair option is for.
 3. **Paste a link** — one link or a whole batch, public (`t.me/channel/123`), private
@@ -503,9 +506,12 @@ The list below is the whole feature set, all of it on the phone, none of it need
 14. **Editor upgrade** — trim, caption, cover taken from the gallery **or from a frame of the video
     itself**, *Remove sound*, *Sound only* (the audio track saved as `.m4a`), and the upload quality
     (`File` / `Video` / `Photo`) for this upload only.
-15. **Three accounts** — Settings holds up to three Telegram accounts, each with its own session folder
-    (`telegram_<slot>`), its own profile picture and its own credentials; *Switch* goes through the
-    sign-in screen so Telegram is never left in a half state, and the queue, history and files stay.
+15. **Three accounts** — Settings holds up to three Telegram accounts, each with its own session folder,
+    its own profile picture and its own credentials; *Switch* goes through the sign-in screen so Telegram
+    is never left in a half state, and the queue, history and files stay.  Tapping *Switch* by accident is
+    no longer a one-way door: the sign-in screen always carries a **Back to <account>** button whenever
+    another slot holds a signed-in account, on every step and under every error, and a reset gets a fresh
+    session folder of its own so a closing session can never break the next sign-in.
 16. **Home-screen widget and Quick Settings tile** — the widget shows the job, the stage and the queue
     size with pause/resume and open; the Quick Settings tile does the same from the panel.
 
@@ -516,9 +522,14 @@ The list below is the whole feature set, all of it on the phone, none of it need
   hiccup into "download failed" on the first try.  Each attempt also re-requests a download that has
   stopped moving (45 seconds without a byte, twice), and Telegram resumes from the part it already sent,
   so nothing is downloaded twice.
-* **Only real dead ends stop early**: protected content, a chat this account may not read, an empty
-  destination, no room on the phone.  The queue names the reason it hit — and checks the free space
-  before the transfer, so "no room" is not discovered half way through.
+* **A chat that protects its content still moves.**  Telegram forbids forwarding and saving there, but it
+  still lets a signed-in client download the file to show it, which is what every official client does.
+  So the download is always attempted; and when a *forward* is refused with "protected content", the queue
+  does not fail the job — it downloads the file and sends a copy to the destination instead, exactly like
+  the bot did.  The queue says in the log which route it took.
+* **Only real dead ends stop early**: a chat this account may not read, an empty destination, no room on
+  the phone, a message that is gone.  The queue names the reason it hit — and checks the free space before
+  the transfer, so "no room" is not discovered half way through.
 * **The log**: Settings → Check the Telegram connection lists the session, the destination, the failed
   jobs and the *last steps the queue took*, with Telegram's own error text.  One tap copies the whole
   report, which is what to send when a link will not move.
@@ -553,9 +564,10 @@ data stays.
 3. Settings shows whether Android may stop the queue in the background; one tap opens the system dialog
    that lifts the restriction.  Some phones (Xiaomi, Oppo, Vivo) also have their own "Autostart" switch —
    without it, a very long batch can be cut short when the screen has been off for a while.
-4. The link's own rules still apply: a private link needs the account to be able to read the message, and
-   Telegram's own protected content cannot be saved by any client.  When Telegram asks Vmore to wait
-   (flood wait), the job pauses itself, says so in the queue, and retries up to three times.
+4. The link's own rules still apply: a private link needs the account to be able to read the message.  A
+   chat that protects its content cannot be forwarded, so Vmore downloads the file and sends it as a copy;
+   when Telegram asks Vmore to wait (flood wait), the job pauses itself, says so in the queue, and retries
+   up to three times.
 
 ### Look and feel
 

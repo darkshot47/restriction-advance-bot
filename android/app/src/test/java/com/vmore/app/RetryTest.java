@@ -44,6 +44,21 @@ public class RetryTest {
     }
 
     @Test
+    public void aRefusedForwardIsToldApartFromEveryOtherRefusal() {
+        //: The words Telegram uses when a chat protects its content.  The queue
+        //: answers these by moving a copy instead of failing the job.
+        assertTrue(Retry.forwardBlocked(
+                "Message has protected content and can't be forwarded"));
+        assertTrue(Retry.forwardBlocked("CHAT_FORWARDS_RESTRICTED"));
+        assertTrue(Retry.forwardBlocked("You are not allowed to forward messages here"));
+        //: Everything else must keep its own meaning.
+        assertFalse(Retry.forwardBlocked("not enough space on this phone"));
+        assertFalse(Retry.forwardBlocked("the Telegram engine is not running"));
+        assertFalse(Retry.forwardBlocked(""));
+        assertFalse(Retry.forwardBlocked(null));
+    }
+
+    @Test
     public void aStaleReferenceIsTemporaryAndNotPermanent() {
         String reason = "file reference has expired";
         assertFalse(Retry.fatal(reason));

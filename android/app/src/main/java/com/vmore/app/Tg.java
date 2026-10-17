@@ -161,9 +161,15 @@ public final class Tg {
         }
 
         /**
-         * True when Telegram is willing to hand these bytes over.  A chat whose
-         * owner protects its content, and any file this account may not read,
-         * comes back with the flag down — and no amount of retrying changes it.
+         * Telegram's own answer to "may these bytes come down right now".
+         *
+         * It is a snapshot, not a verdict: a file reference that went stale, a
+         * message read through a link, or a fresh cache all move it.  A chat
+         * whose owner protects its content marks the message as unsaveable
+         * (no forwarding, no saving) but still lets the client download the
+         * file to show it — Telegram clients do exactly that — so this flag is
+         * never a reason to refuse a job.  A real refusal comes back from
+         * Telegram as an error, and is reported in its own words.
          */
         public boolean downloadable = true;
     }
@@ -202,6 +208,9 @@ public final class Tg {
     private volatile Listener listener;
     private volatile Account account;
     private volatile String pendingPhone = "";
+    /** The last words worth showing, kept so a repaint does not lose them. */
+    private volatile String lastDetail = "";
+    private volatile String passwordHint = "";
 
     private Tg(Context context) {
         app = context;
@@ -249,6 +258,12 @@ public final class Tg {
             tell(STATE_CREDENTIALS, null);
             return;
         }
+        //: A session that TDLib closed (a second device removed it, the process
+        //: was killed mid-close) is rebuilt here instead of leaving the screens
+        //: on a dead object.
+        if (client != null && (STATE_CLOSED.equals(state) || STATE_NONE.equals(state))) {
+            closeSession();
+        }
         if (client == null) {
             try {
                 final int mine = ++generation;
@@ -266,7 +281,15 @@ public final class Tg {
                 return;
             }
         }
-        tell(state, null);
+        //: After the app was in the background the screen asks for the state
+        //: again; the reason has to come with it or "Failed" is all it says.
+        if (STATE_ERROR.equals(state)) {
+            tell(STATE_ERROR, lastDetail);
+        } else if (STATE_PASSWORD.equals(state)) {
+            tell(STATE_PASSWORD, passwordHint);
+        } else {
+            tell(state, null);
+        }
     }
 
     public void stopListening() {
@@ -274,6 +297,9 @@ public final class Tg {
     }
 
     private void tell(final String newState, final String detail) {
+        if (detail != null && !detail.isEmpty()) {
+            lastDetail = detail;
+        }
         final Listener auth = listener;
         if (auth != null) {
             main.post(() -> auth.onState(newState, detail));
@@ -298,6 +324,10 @@ public final class Tg {
         ready = false;
         account = null;
         chatCache.clear();
+        //: Bumped before the old client is let go: its last answers arrive
+        //: after this point, and without the bump they would clear the *new*
+        //: client or move the screen back to a step the user already left.
+        generation++;
         Client current = client;
         client = null;
         if (current != null) {
@@ -305,6 +335,8 @@ public final class Tg {
             });
         }
         state = STATE_NONE;
+        lastDetail = "";
+        passwordHint = "";
     }
 
     /** Called after the user typed the api_id and api_hash. */
@@ -324,14 +356,70 @@ public final class Tg {
      * one is created.
      */
     public void startOver() {
+        //: The old folder is left alone here.  TDLib closes in the background
+        //: and still writes into it for a moment; deleting it underneath that
+        //: is what made a fresh sign-in fail at random.  The next client gets
+        //: a folder of its own and the old one is removed when it is quiet.
+        String stale = Prefs.sessionDir(app);
         closeSession();
-        generation++;
-        File dir = new File(app.getFilesDir(), "telegram_" + Prefs.activeSlot(app));
-        wipe(dir);
+        Prefs.newSessionDir(app);
         ready = false;
         account = null;
         pendingPhone = "";
         state = STATE_NONE;
+        discardLater(stale);
+    }
+
+    /** Deletes a session folder once nobody can still be writing to it. */
+    private void discardLater(final String name) {
+        final File dir = new File(app.getFilesDir(), name);
+        Thread cleaner = new Thread(() -> {
+            for (int attempt = 0; attempt < 8 && dir.exists(); attempt++) {
+                try {
+                    Thread.sleep(600L);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                wipe(dir);
+            }
+            if (dir.exists()) {
+                Log.engine(app, "the old session folder stayed in place: " + name);
+            }
+        }, "vmore-session-clean");
+        cleaner.setDaemon(true);
+        cleaner.start();
+    }
+
+    /**
+     * Removes session folders no slot is using any more.
+     *
+     * Called once at start-up: a reset that could not delete its old folder
+     * (still open, phone shutting down) leaves a few megabytes behind, and the
+     * next launch is the safe moment to take them.
+     */
+    public void tidySessions() {
+        File root = app.getFilesDir();
+        File[] children = root.listFiles();
+        if (children == null) {
+            return;
+        }
+        for (File child : children) {
+            String name = child.getName();
+            if (!name.startsWith("telegram_")) {
+                continue;
+            }
+            boolean inUse = false;
+            for (int slot = 1; slot <= Prefs.slotCount(app); slot++) {
+                if (name.equals(Prefs.sessionDirForSlot(app, slot))) {
+                    inUse = true;
+                    break;
+                }
+            }
+            if (!inUse) {
+                wipe(child);
+            }
+        }
     }
 
     /** Empties a folder without touching anything outside it. */
@@ -376,6 +464,13 @@ public final class Tg {
         chatCache.clear();
         Prefs.forgetAvatar(app);
         Prefs.saveProfile(app, "", "");
+        //: The state moves now, not when TDLib gets round to it.  Leaving it on
+        //: READY meant the sign-in screen that opens after a sign-out asked the
+        //: engine for its state, heard READY, and walked straight back into the
+        //: home screen: a sign-out that did not sign out.
+        state = STATE_PHONE;
+        lastDetail = "";
+        passwordHint = "";
         sendOrError(new TdApi.LogOut());
     }
 
@@ -485,6 +580,15 @@ public final class Tg {
             state = STATE_PARAMETERS;
             sendParameters();
         } else if (auth instanceof TdApi.AuthorizationStateWaitPhoneNumber) {
+            if (!Prefs.hasCredentials(app)) {
+                //: The slot was cleared while this client was still running
+                //: (a forgotten PIN, a removed account).  Asking for a number
+                //: here would sign back in with an app key the owner just threw
+                //: away; the keys step is the honest screen.
+                state = STATE_CREDENTIALS;
+                tell(STATE_CREDENTIALS, null);
+                return;
+            }
             state = STATE_PHONE;
             tell(STATE_PHONE, null);
         } else if (auth instanceof TdApi.AuthorizationStateWaitCode) {
@@ -492,7 +596,8 @@ public final class Tg {
             tell(STATE_CODE, null);
         } else if (auth instanceof TdApi.AuthorizationStateWaitPassword) {
             state = STATE_PASSWORD;
-            tell(STATE_PASSWORD, ((TdApi.AuthorizationStateWaitPassword) auth).passwordHint);
+            passwordHint = ((TdApi.AuthorizationStateWaitPassword) auth).passwordHint;
+            tell(STATE_PASSWORD, passwordHint);
         } else if (auth instanceof TdApi.AuthorizationStateReady) {
             ready = true;
             state = STATE_READY;
@@ -525,7 +630,7 @@ public final class Tg {
         }
         //: Each account slot keeps its own TDLib databases, which is what makes
         //: switching accounts safe and instant.
-        File dir = new File(app.getFilesDir(), "telegram_" + Prefs.activeSlot(app));
+        File dir = new File(app.getFilesDir(), Prefs.sessionDir(app));
         //noinspection ResultOfMethodCallIgnored
         dir.mkdirs();
         current.send(new TdApi.SetTdlibParameters(
@@ -546,8 +651,12 @@ public final class Tg {
         if (current == null) {
             return;
         }
+        //: Switching accounts closes this client; its answer to GetMe can still
+        //: be on the way, and saving it would put one account's name and number
+        //: into the other slot.
+        final int mine = generation;
         current.send(new TdApi.GetMe(), object -> {
-            if (!(object instanceof TdApi.User)) {
+            if (mine != generation || !(object instanceof TdApi.User)) {
                 return;
             }
             TdApi.User user = (TdApi.User) object;
@@ -574,6 +683,7 @@ public final class Tg {
      * itself replaced is downloaded again.
      */
     private void loadAvatar(TdApi.User user) {
+        final int mine = generation;
         TdApi.ProfilePhoto photo = user.profilePhoto;
         TdApi.File picture = photo == null ? null : photo.big;
         if (picture == null || picture.id == 0) {
@@ -592,6 +702,9 @@ public final class Tg {
         downloadFile(picture.id, null, new Cb<Integer>() {
             @Override
             public void ok(Integer value) {
+                if (mine != generation) {
+                    return;
+                }
                 String path = localPath(value);
                 if (path != null) {
                     saveAvatar(path, value);
@@ -1790,8 +1903,41 @@ public final class Tg {
             return "That api_id or api_hash is not valid. Copy both again from "
                     + "my.telegram.org";
         }
+        //: The sign-in steps, in the order they happen.  Each one names the
+        //: field to fix, so a wrong code never sends anyone back to the api_id.
+        if (lower.contains("phone_number_invalid")) {
+            return "That phone number is not valid. Write it with the country code, "
+                    + "like +919876543210";
+        }
+        if (lower.contains("phone_number_banned")) {
+            return "Telegram will not send a code to that number";
+        }
+        if (lower.contains("phone_number_unoccupied")) {
+            return "No Telegram account uses that number yet. Create one in Telegram first";
+        }
+        if (lower.contains("phone_code_invalid") || lower.contains("phone_code_empty")) {
+            return "That code is not correct. Type the newest code Telegram sent";
+        }
+        if (lower.contains("phone_code_expired")) {
+            return "That code has expired. Ask for a new one";
+        }
+        if (lower.contains("password_hash_invalid")) {
+            return "The two-step password is not correct";
+        }
+        if (lower.contains("session_password_needed")) {
+            return "This account needs its two-step password";
+        }
         if (lower.contains("message not found") || lower.contains("message_not_found")) {
             return "That message does not exist any more";
+        }
+        if (lower.contains("database") || lower.contains("can't create directory")
+                || lower.contains("filesystem error")) {
+            return "The phone could not open its Telegram session. Tap Continue to try again";
+        }
+        if (lower.contains("can't download or generate") || lower.contains("can't be downloaded")
+                || lower.contains("file_reference_expired") || lower.contains("file reference expired")) {
+            return "Telegram did not hand this file over. Open the message in Telegram once, "
+                    + "then retry";
         }
         if (lower.contains("chat not found") || lower.contains("chat_not_found")
                 || lower.contains("username not occupied")) {
@@ -1805,9 +1951,17 @@ public final class Tg {
             return "This Telegram account is not allowed to read that content. Join the "
                     + "chat with this account first";
         }
+        if (lower.contains("flood_wait")) {
+            //: Telegram often says exactly how long: keep that number, it is
+            //: the difference between "wait" and "try again in 40 seconds".
+            String seconds = between(text, "FLOOD_WAIT_", " ");
+            return "Telegram asked to wait"
+                    + (seconds.isEmpty() ? "" : " " + seconds + " seconds")
+                    + " before trying again";
+        }
         if (lower.contains("too many requests") || lower.contains("flood")
                 || lower.contains("retry after")) {
-            return "Telegram asked to slow down (flood wait). The queue tries again by itself";
+            return "Telegram asked to slow down. Try again in a moment";
         }
         if (lower.contains("file is too big") || lower.contains("file_too_big")) {
             return "That file is too big for this chat";
@@ -1821,5 +1975,31 @@ public final class Tg {
             return "No connection to Telegram right now";
         }
         return text;
+    }
+
+    /** The digits between two markers, or "" when there are none. */
+    private static String between(String text, String after, String before) {
+        int start = text.toUpperCase(Locale.US).indexOf(after.toUpperCase(Locale.US));
+        if (start < 0) {
+            return "";
+        }
+        start += after.length();
+        int end = before == null || before.isEmpty()
+                ? text.length()
+                : text.indexOf(before, start);
+        if (end < 0) {
+            end = text.length();
+        }
+        String part = text.substring(start, Math.min(end, text.length())).trim();
+        StringBuilder digits = new StringBuilder();
+        for (int index = 0; index < part.length(); index++) {
+            char ch = part.charAt(index);
+            if (ch >= '0' && ch <= '9') {
+                digits.append(ch);
+            } else {
+                break;
+            }
+        }
+        return digits.toString();
     }
 }

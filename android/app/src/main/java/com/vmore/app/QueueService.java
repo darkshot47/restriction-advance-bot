@@ -239,6 +239,12 @@ public class QueueService extends Service {
                 if (jobs.pausedAll()) {
                     break;
                 }
+                //: Re-checked every turn: switching accounts closes the session
+                //: the queue was using, and a worker that trusted its first
+                //: answer would fail every remaining job on the spot.
+                if (!Tg.get(this).isReady()) {
+                    engineReady = Tg.get(this).awaitReady(WAIT_FOR_SESSION_MS);
+                }
                 //: "only on Wi-Fi", "only while charging" and a start time are
                 //: rules the queue obeys for every job, not just the first one.
                 String hold = holdReason();
@@ -430,8 +436,28 @@ public class QueueService extends Service {
         Log.step(this, "job " + job.id + " " + job.method + " " + shortText(job.raw, 120));
         try {
             if (QJob.METHOD_FORWARD.equals(job.method)) {
-                forwardOnly(jobs, job);
-                return;
+                try {
+                    forwardOnly(jobs, job);
+                    return;
+                } catch (Exception forwardRefused) {
+                    String why = forwardRefused.getMessage() == null
+                            ? "" : forwardRefused.getMessage();
+                    //: A chat that protects its content forbids the forward but
+                    //: still lets the file down for viewing, so the job carries
+                    //: on down the download path.  This is what the bot did,
+                    //: and it is the only way the file reaches the destination.
+                    if (job.destChatId == 0L || !Retry.forwardBlocked(why)) {
+                        throw forwardRefused;
+                    }
+                    Log.step(this, "job " + job.id + " Telegram refused the forward ("
+                            + why + "); moving a copy instead");
+                    job.method = QJob.METHOD_DOWNLOAD;
+                    job.uploadAfter = true;
+                    job.stage = QJob.QUEUED;
+                    job.error = "";
+                    job.note = "forward refused; sent a copy instead";
+                    jobs.update(job);
+                }
             }
             if (QJob.METHOD_SCAN.equals(job.method)) {
                 scanIntoQueue(jobs, job);
@@ -447,12 +473,6 @@ public class QueueService extends Service {
                     }
                     return;
                 }
-            }
-            if (job.remoteLocked) {
-                //: Telegram refuses these bytes to every app, so retrying is
-                //: pointless and the reason is worth saying plainly.
-                throw new Tg.Failure("that file cannot be saved: the chat's owner has "
-                        + "protected its content", "protected content", false);
             }
             String skip = skipReason(job);
             if (!skip.isEmpty()) {
@@ -527,7 +547,8 @@ public class QueueService extends Service {
                     History.get(this).record(job.title(), job.kind, job.size, job.destChatId,
                             job.destTitle, History.STATUS_UPLOADED, job.raw, "", job.path);
                 }
-                job.note = "sent as message " + sentId;
+                job.note = (job.note.isEmpty() ? "" : job.note + " \u2022 ")
+                        + "sent as message " + sentId;
                 Log.step(this, "job " + job.id + " uploaded to " + shortText(job.destTitle, 40)
                         + " as message " + sentId);
                 markFinished(job);
@@ -656,7 +677,13 @@ public class QueueService extends Service {
         link.valid = true;
 
         Tg.Media media = Tg.get(this).resolveBlocking(link, cancelled);
-        job.remoteLocked = !media.downloadable;
+        if (!media.downloadable) {
+            //: A flag, not a verdict — see Tg.Media.  The download is attempted
+            //: anyway; Telegram's own error, if it comes, is what the queue
+            //: reports, and a failed attempt retries with a fresh link.
+            Log.step(this, "job " + job.id + " Telegram has not offered this file yet; "
+                    + "asking for it anyway");
+        }
         job.chatId = media.chatId;
         job.messageId = media.messageId;
         job.fileId = media.fileId;
