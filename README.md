@@ -527,6 +527,13 @@ The list below is the whole feature set, all of it on the phone, none of it need
   So the download is always attempted; and when a *forward* is refused with "protected content", the queue
   does not fail the job — it downloads the file and sends a copy to the destination instead, exactly like
   the bot did.  The queue says in the log which route it took.
+* **The upload of protected content is a real upload.**  Telegram refuses a message that *points at* a
+  protected file (`CHAT_FORWARDS_RESTRICTED`), which is what kept failing after the file had downloaded:
+  TDLib recognised the saved file by its path and offered the old reference again.  The upload is now
+  built from a second name for the same file — a hard link where the phone can make one, a copy where it
+  cannot — so TDLib uploads the bytes as a brand-new file.  The link costs no storage, it is removed when
+  the upload ends, and if Telegram still refuses, the send happens once more this way before anything is
+  called failed.
 * **Only real dead ends stop early**: a chat this account may not read, an empty destination, no room on
   the phone, a message that is gone.  The queue names the reason it hit — and checks the free space before
   the transfer, so "no room" is not discovered half way through.

@@ -44,6 +44,20 @@ public class RetryTest {
     }
 
     @Test
+    public void theRefusalThatAnUploadCanAnswerIsRecognised() {
+        //: Telegram's answer when a message points at a protected file.  The
+        //: upload answers it by sending the bytes as a new file, so it must be
+        //: recognised even though the words say "forwarded".
+        assertTrue(Retry.forwardBlocked(
+                "Message has protected content and can't be forwarded"));
+        assertTrue(Retry.forwardBlocked("CHAT_FORWARDS_RESTRICTED"));
+        //: A refusal no fresh upload can fix must not start one.
+        assertFalse(Retry.forwardBlocked("FLOOD_WAIT_34"));
+        assertFalse(Retry.forwardBlocked("CHAT_WRITE_FORBIDDEN"));
+        assertFalse(Retry.forwardBlocked("file is too big"));
+    }
+
+    @Test
     public void aRefusedForwardIsToldApartFromEveryOtherRefusal() {
         //: The words Telegram uses when a chat protects its content.  The queue
         //: answers these by moving a copy instead of failing the job.

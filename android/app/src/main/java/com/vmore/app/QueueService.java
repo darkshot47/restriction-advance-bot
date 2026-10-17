@@ -647,6 +647,7 @@ public class QueueService extends Service {
             child.minSize = job.minSize;
             child.maxSize = job.maxSize;
             child.skipDuplicates = job.skipDuplicates;
+            child.protectedContent = item.protectedContent;
             child.stage = QJob.QUEUED;
             children.add(child);
         }
@@ -677,12 +678,11 @@ public class QueueService extends Service {
         link.valid = true;
 
         Tg.Media media = Tg.get(this).resolveBlocking(link, cancelled);
-        if (!media.downloadable) {
-            //: A flag, not a verdict — see Tg.Media.  The download is attempted
-            //: anyway; Telegram's own error, if it comes, is what the queue
-            //: reports, and a failed attempt retries with a fresh link.
-            Log.step(this, "job " + job.id + " Telegram has not offered this file yet; "
-                    + "asking for it anyway");
+        if (media.protectedContent) {
+            //: Worth saying once in the log: the download works, and the upload
+            //: goes up as a new file because the chat forbids forwarding.
+            Log.step(this, "job " + job.id + " the chat protects its content; "
+                    + "the copy goes up as a new file");
         }
         job.chatId = media.chatId;
         job.messageId = media.messageId;
@@ -694,6 +694,9 @@ public class QueueService extends Service {
         job.durationSec = media.durationSec;
         job.width = media.width;
         job.height = media.height;
+        //: Telegram's own verdict on the message.  The upload uses it to send
+        //: the bytes as a new file instead of pointing at protected content.
+        job.protectedContent = media.protectedContent;
         if (job.destTitle.isEmpty() && job.destChatId != 0L) {
             try {
                 Tg.Chat chat = Tg.get(this).chatBlocking(job.destChatId);

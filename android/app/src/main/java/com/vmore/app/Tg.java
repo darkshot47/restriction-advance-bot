@@ -172,6 +172,17 @@ public final class Tg {
          * Telegram as an error, and is reported in its own words.
          */
         public boolean downloadable = true;
+
+        /**
+         * True when the message is in a chat that protects its content.
+         *
+         * Telegram's own {@code can_be_saved} says so.  The bytes still come
+         * down, but the file cannot be re-sent by reference: the server answers
+         * CHAT_FORWARDS_RESTRICTED.  An upload from a fresh name gets around
+         * that, because then the bytes go up again as a new file instead of
+         * pointing at the protected one.
+         */
+        public boolean protectedContent;
     }
 
     private static volatile Tg instance;
@@ -275,6 +286,18 @@ public final class Tg {
                     }
                 }, null, null);
                 state = STATE_PARAMETERS;
+                //: A photo sent by path may be matched by its bytes and replaced
+                //: with a file Telegram already knows.  When that file came out
+                //: of a chat that protects its content, the send is refused; the
+                //: match is turned off so every upload is really an upload.
+                try {
+                    client.send(new TdApi.SetOption("reuse_uploaded_photos_by_hash",
+                            new TdApi.OptionValueBoolean(false)), object -> {
+                    }, error -> {
+                    });
+                } catch (Throwable ignored) {
+                    //: An older engine without the option still works without it.
+                }
             } catch (Throwable error) {
                 state = STATE_ERROR;
                 tell(STATE_ERROR, String.valueOf(error.getMessage()));
@@ -539,8 +562,16 @@ public final class Tg {
             TdApi.UpdateMessageSendFailed update = (TdApi.UpdateMessageSendFailed) object;
             SendWatch watch = sends.remove(update.oldMessageId);
             if (watch != null) {
-                watch.finish(0L, update.error == null ? "Telegram refused the upload"
-                        : friendly(update.error.message));
+                String raw = update.error == null ? "" : update.error.message;
+                //: A chat that protects its content refuses the message only
+                //: because it points at the protected file.  Uploading the same
+                //: bytes as a new file is allowed, and is what the bot did.
+                if (watch.retryWithFreshName(raw)) {
+                    watch.freshRetry.run();
+                } else {
+                    watch.finish(0L, update.error == null ? "Telegram refused the upload"
+                            : friendly(raw));
+                }
             }
         }
     }
@@ -1196,6 +1227,8 @@ public final class Tg {
         Media media = new Media();
         media.chatId = message.chatId;
         media.messageId = message.id;
+        //: can_be_saved is false exactly for content the chat protects.
+        media.protectedContent = !message.canBeSaved;
         TdApi.MessageContent content = message.content;
         TdApi.File file = null;
         if (content instanceof TdApi.MessageVideo) {
@@ -1476,32 +1509,84 @@ public final class Tg {
     public void sendMedia(long chatId, String path, String kind, String caption,
                           long durationSec, int width, int height, String sendAs,
                           String thumbPath, Progress progress, Cb<Long> callback) {
+        sendMedia(chatId, path, kind, caption, durationSec, width, height, sendAs, thumbPath,
+                progress, callback, false);
+    }
+
+    /**
+     * The send itself.
+     *
+     * {@code protectedContent} says the file came out of a chat that protects
+     * its content.  Those bytes cannot be re-sent by reference — Telegram
+     * answers CHAT_FORWARDS_RESTRICTED — so the message is built from a second
+     * name for the same file: a hard link where the phone can make one, a copy
+     * where it cannot.  TDLib then uploads the bytes as a new file, which is
+     * exactly what the bot did when it downloaded and re-uploaded.
+     */
+    private void sendMedia(long chatId, String path, String kind, String caption,
+                           long durationSec, int width, int height, String sendAs,
+                           String thumbPath, Progress progress, Cb<Long> callback,
+                           boolean protectedContent) {
         Client current = client;
         if (current == null) {
             callback.fail("the Telegram engine is not running");
             return;
         }
-        TdApi.InputMessageContent content = buildContent(path, kind, caption, durationSec,
+        final String scratch = protectedContent ? freshNameFor(path) : null;
+        final String uploadPath = scratch != null ? scratch : path;
+        final Cb<Long> answer = new Cb<Long>() {
+            @Override
+            public void ok(Long value) {
+                drop(scratch);
+                callback.ok(value);
+            }
+
+            @Override
+            public void fail(String message) {
+                drop(scratch);
+                callback.fail(message);
+            }
+        };
+        TdApi.InputMessageContent content = buildContent(uploadPath, kind, caption, durationSec,
                 width, height, sendAs, thumbPath);
         if (content == null) {
+            drop(scratch);
             callback.fail("the file is not on the phone any more");
             return;
         }
         current.send(new TdApi.SendMessage(chatId, null, null, sendOptions(), null, content),
                 object -> {
                     if (object instanceof TdApi.Error) {
-                        callback.fail(friendly(((TdApi.Error) object).message));
+                        String raw = ((TdApi.Error) object).message;
+                        //: A reference Telegram refused gets one immediate second
+                        //: go from a name the file has never had, which makes
+                        //: TDLib upload the bytes instead of reusing the refusal.
+                        if (scratch == null && Retry.forwardBlocked(raw)) {
+                            Log.engine(app, "upload refused (" + raw
+                                    + "); uploading the bytes as a new file");
+                            sendMedia(chatId, path, kind, caption, durationSec, width, height,
+                                    sendAs, thumbPath, progress, callback, true);
+                            return;
+                        }
+                        drop(scratch);
+                        callback.fail(friendly(raw));
                         return;
                     }
                     TdApi.Message message = (TdApi.Message) object;
                     TdApi.File file = mediaFileOf(message);
-                    long length = new File(path).length();
+                    long length = new File(uploadPath).length();
                     if (file == null) {
-                        callback.ok(message.id);
+                        answer.ok(message.id);
                         return;
                     }
+                    //: The one thing a refused upload may still do: go up again
+                    //: as a new file.  Only a send that has not tried that yet
+                    //: carries the way to do it, so this can never loop.
+                    final Runnable freshRetry = scratch != null ? null
+                            : () -> sendMedia(chatId, path, kind, caption, durationSec,
+                                    width, height, sendAs, thumbPath, progress, callback, true);
                     SendWatch watch = new SendWatch(message.id, file.id, length, progress,
-                            callback);
+                            answer, freshRetry);
                     sends.put(message.id, watch);
                     //: Uploads have no pause switch, so the cap covers the
                     //: download side only; the watch here is progress only.
@@ -1513,14 +1598,68 @@ public final class Tg {
                         TdApi.MessageSendingStateFailed failed =
                                 (TdApi.MessageSendingStateFailed) sending;
                         sends.remove(message.id);
+                        String raw = failed.error == null ? "" : failed.error.message;
+                        if (watch.retryWithFreshName(raw)) {
+                            freshRetry.run();
+                            return;
+                        }
                         watch.finish(0L, failed.error == null
                                 ? "Telegram refused the upload"
-                                : friendly(failed.error.message));
+                                : friendly(raw));
                     } else if (sending == null) {
                         sends.remove(message.id);
                         watch.finish(message.id, null);
                     }
                 });
+    }
+
+    /**
+     * A second name for one file, so TDLib uploads it instead of reusing the
+     * reference it already has.
+     *
+     * A hard link costs no storage at all: the same bytes with another path,
+     * which is all that is needed, because TDLib remembers local files by path.
+     * A phone or a folder that cannot link falls back to a real copy.
+     */
+    private String freshNameFor(String path) {
+        if (path == null || path.isEmpty()) {
+            return null;
+        }
+        File source = new File(path);
+        if (!source.isFile()) {
+            return null;
+        }
+        File dir = new File(app.getCacheDir(), "upload");
+        if (!dir.exists() && !dir.mkdirs()) {
+            return null;
+        }
+        File alias = new File(dir, "vmore_" + System.currentTimeMillis() + "_"
+                + source.getName());
+        try {
+            //noinspection Since15
+            java.nio.file.Files.createLink(alias.toPath(), source.toPath());
+            if (alias.isFile()) {
+                return alias.getAbsolutePath();
+            }
+        } catch (Throwable cannotLink) {
+            //: Another volume, a file system without links, or a policy against
+            //: them: a copy is slower but always right.
+        }
+        File copied = LocalFiles.copy(path, alias);
+        return copied == null ? null : copied.getAbsolutePath();
+    }
+
+    /** Deletes a scratch name, never the file it points at. */
+    private static void drop(String path) {
+        if (path == null || path.isEmpty()) {
+            return;
+        }
+        File scratch = new File(path);
+        File uploadDir = scratch.getParentFile();
+        if (uploadDir != null && "upload".equals(uploadDir.getName())) {
+            //noinspection ResultOfMethodCallIgnored
+            scratch.delete();
+        }
     }
 
     /** Let Telegram move an existing message: no bytes cross the phone. */
@@ -1716,7 +1855,8 @@ public final class Tg {
             throws Exception {
         final Sync<Long> sync = new Sync<>();
         sendMedia(job.destChatId, job.path, job.kind, job.caption, job.durationSec,
-                job.width, job.height, job.sendAs, progress, sync);
+                job.width, job.height, job.sendAs, null, progress, sync,
+                job.protectedContent);
         Long result = sync.await(0, cancelled);
         if (result == null) {
             String reason = sync.error == null || sync.error.isEmpty()
@@ -1813,15 +1953,34 @@ public final class Tg {
         final long expected;
         final Progress progress;
         final Cb<Long> callback;
+        /** How to send these bytes again as a new file, or null. */
+        final Runnable freshRetry;
         volatile boolean done;
 
         SendWatch(long messageId, int fileId, long expected, Progress progress,
-                  Cb<Long> callback) {
+                  Cb<Long> callback, Runnable freshRetry) {
             this.messageId = messageId;
             this.fileId = fileId;
             this.expected = expected;
             this.progress = progress;
             this.callback = callback;
+            this.freshRetry = freshRetry;
+        }
+
+        /**
+         * Ends this watch so the same bytes can be sent once more, as a file
+         * Telegram has never seen.  True when that is worth doing: only a
+         * protected-content refusal, and only before the retry was tried.
+         */
+        boolean retryWithFreshName(String raw) {
+            if (freshRetry == null || done || !Retry.forwardBlocked(raw)) {
+                return false;
+            }
+            done = true;
+            uploads.remove(fileId);
+            downloads.remove(fileId);
+            Log.engine(app, "upload refused (" + raw + "); uploading the bytes as a new file");
+            return true;
         }
 
         FileWatch progressWatch() {
@@ -1954,6 +2113,14 @@ public final class Tg {
         }
         if (lower.contains("session_password_needed")) {
             return "This account needs its two-step password";
+        }
+        if (lower.contains("protected content") || lower.contains("chat_forwards_restricted")
+                || lower.contains("can't be forwarded") || lower.contains("cannot be forwarded")) {
+            //: The word "protected" is deliberate: the queue's own rule treats
+            //: it as a dead end, so a job that already tried a fresh upload is
+            //: not retried four more times (each one a whole download).
+            return "That chat's protected content can't be saved again: Telegram "
+                    + "refused the copy";
         }
         if (lower.contains("message not found") || lower.contains("message_not_found")) {
             return "That message does not exist any more";

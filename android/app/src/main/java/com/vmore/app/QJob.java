@@ -81,6 +81,14 @@ public final class QJob {
     public boolean skipDuplicates = true;
     /** Set while the engine skips this job, so the screens can say why. */
     public boolean skipped;
+    /**
+     * The source chat protects its content.
+     *
+     * The file can still be downloaded, but not re-sent by reference: the
+     * upload has to use the bytes as a new file, which is what the engine does
+     * when this is set (and again if Telegram refuses anyway).
+     */
+    public boolean protectedContent;
 
     /** True when this media passes the batch's filter. */
     public boolean allows(String kind, long size) {
@@ -163,6 +171,7 @@ public final class QJob {
             json.put("min_size", minSize);
             json.put("max_size", maxSize);
             json.put("skip_duplicates", skipDuplicates);
+            json.put("protected_content", protectedContent);
         } catch (Exception ignored) {
         }
         return json;
@@ -207,6 +216,7 @@ public final class QJob {
         job.minSize = json.optLong("min_size", 0L);
         job.maxSize = json.optLong("max_size", 0L);
         job.skipDuplicates = json.optBoolean("skip_duplicates", true);
+        job.protectedContent = json.optBoolean("protected_content", false);
         //: A job that was running when the app died comes back as queued — the
         //: engine picks it up again instead of leaving it stuck on "downloading".
         if (job.isActive()) {
