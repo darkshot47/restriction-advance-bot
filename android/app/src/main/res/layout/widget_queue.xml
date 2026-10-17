@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:background="@drawable/bg_card"
+    android:orientation="vertical"
+    android:padding="14dp">
+
+    <TextView
+        android:id="@+id/widgetTitle"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:maxLines="1"
+        android:ellipsize="middle"
+        android:textColor="@color/vmore_text"
+        android:textSize="14sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/widgetLine"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:maxLines="1"
+        android:paddingTop="2dp"
+        android:textColor="@color/vmore_text_faint"
+        android:textSize="12sp" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:orientation="horizontal">
+
+        <Button
+            android:id="@+id/widgetToggle"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:minHeight="38dp"
+            android:background="@drawable/bg_chip_active"
+            android:stateListAnimator="@null"
+            android:textColor="@color/vmore_on_accent"
+            android:textSize="13sp"
+            android:text="@string/queue_pause_all" />
+
+        <Button
+            android:id="@+id/widgetOpen"
+            android:layout_width="0dp"
+            android:layout_weight="1"
+            android:layout_height="wrap_content"
+            android:layout_marginLeft="8dp"
+            android:minHeight="38dp"
+            android:background="@drawable/bg_chip"
+            android:stateListAnimator="@null"
+            android:textColor="@color/vmore_text"
+            android:textSize="13sp"
+            android:text="@string/queue_title" />
+    </LinearLayout>
+</LinearLayout>

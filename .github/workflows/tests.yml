@@ -23,6 +23,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
+      - name: Check the Android sources
+        #: Resources, layout ids, colour palette, emoji rules and a real parse
+        #: of every Java file: a bare apostrophe in a string or a dropped brace
+        #: is caught here in seconds instead of after a long APK build.
+        working-directory: android/app/src/main
+        run: python3 ../../../tools/check_sources.py
+
       - name: Byte-compile the bot
         run: python -m compileall -q main.py database.py ui.py config.py engines.py telemetry.py
 

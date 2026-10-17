@@ -3,6 +3,15 @@
 import os
 
 BOT_USERNAME = os.environ.get("BOT_USERNAME", "wantedkar99bot").lstrip("@")
+
+#: The released Vmore APK.  ``/apk`` only ever hands this link over: the app
+#: has no server and no token, so there is nothing to ask the user for first.
+#: ``VMORE_APK_URL`` overrides it for a fork that publishes elsewhere.
+VMORE_APK_URL = os.environ.get(
+    "VMORE_APK_URL",
+    "https://github.com/darkshot47/restriction-advance-bot/releases/download/"
+    "vmore-latest/Vmore.apk",
+)
 FREE_DAILY_LIMIT = 3
 FREE_PRIVATE_LINKS = False
 WATERMARK = "Extracted by @wantedkar99bot"

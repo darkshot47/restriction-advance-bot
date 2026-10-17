@@ -10,8 +10,8 @@ android {
         applicationId "com.vmore.app"
         minSdk 26
         targetSdk 34
-        versionCode 1
-        versionName "1.0.0"
+        versionCode 15
+        versionName "2.2.11"
         resValue "string", "app_name", "Vmore"
         ndk {
             //: TDLib direct mode ships one libtdjni.so per ABI (built by
@@ -21,15 +21,43 @@ android {
         }
     }
 
+    //: The update key.
+    //:
+    //: Android only installs an APK over an existing app when both are signed
+    //: with the same key.  Signing every build with the *debug* key looked
+    //: convenient, but a debug keystore is generated fresh on each CI runner —
+    //: so every release was signed with a different key and every update ended
+    //: in "App not installed".
+    //:
+    //: The release build is therefore signed with one keystore that lives in
+    //: the repository itself, under android/signing/, and the workflow exports
+    //: it here (the password file sits next to it).  A secret cannot be used:
+    //: the workflow has to read the key on every run, and a value only the
+    //: owner can see cannot be read by a runner.  The key is therefore public
+    //: by design — see android/signing/README.md for what that trades away and
+    //: how to rotate it.
+    def updateKeystore = System.getenv('VMORE_STORE_FILE')
+    if (updateKeystore != null && !updateKeystore.isEmpty()) {
+        signingConfigs {
+            update {
+                storeFile file(updateKeystore)
+                storePassword System.getenv('VMORE_STORE_PASSWORD')
+                keyAlias System.getenv('VMORE_KEY_ALIAS')
+                keyPassword System.getenv('VMORE_KEY_PASSWORD')
+            }
+        }
+    }
+
     buildTypes {
         debug {
             minifyEnabled false
         }
         release {
             minifyEnabled false
-            //: Signed with the debug key so every CI build is installable
-            //: without shipping a private keystore to GitHub.
-            signingConfig signingConfigs.debug
+            //: The stable key when the workflow provides it, the debug key when
+            //: someone builds by hand — a local build still has to work.
+            signingConfig updateKeystore != null && !updateKeystore.isEmpty()
+                    ? signingConfigs.update : signingConfigs.debug
         }
     }
 

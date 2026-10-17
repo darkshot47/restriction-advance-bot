@@ -1,13 +1,39 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Vmore's whole palette: WHITE, BLUE and BLACK — nothing else exists.
+
+  This file is the DAY skin (white background, black text).  The night skin in
+  values-night/colors.xml carries exactly the same names with the same roles,
+  so every screen and every drawable flips with one setting and no other hue
+  ever appears.  The "greys" are alpha values of black here and of white at
+  night; the blue family is one blue with its own alphas.
+-->
 <resources>
-    <color name="vmore_bg">#0E1117</color>
-    <color name="vmore_surface">#161B22</color>
-    <color name="vmore_surface_alt">#1D232C</color>
-    <color name="vmore_stroke">#2A313C</color>
-    <color name="vmore_text">#E6EDF3</color>
-    <color name="vmore_text_dim">#8B949E</color>
-    <color name="vmore_accent">#2EA043</color>
-    <color name="vmore_accent_dim">#238636</color>
-    <color name="vmore_danger">#DA3633</color>
-    <color name="vmore_primary">#1F6FEB</color>
+    <!-- Surfaces -->
+    <color name="vmore_bg">#FFFFFF</color>
+    <color name="vmore_surface">#14000000</color>
+    <color name="vmore_surface_alt">#1F000000</color>
+    <color name="vmore_stroke">#33000000</color>
+    <color name="vmore_stroke_soft">#24000000</color>
+    <!-- The player keeps a dark stage in both skins, like every video app. -->
+    <color name="vmore_media_bg">#000000</color>
+
+    <!-- Text -->
+    <color name="vmore_text">#000000</color>
+    <color name="vmore_text_dim">#B8000000</color>
+    <color name="vmore_text_faint">#7A000000</color>
+    <!-- Text and icons that sit on blue or on the dark media stage. -->
+    <color name="vmore_on_accent">#FFFFFF</color>
+    <color name="vmore_on_accent_dim">#B8FFFFFF</color>
+    <color name="vmore_on_accent_faint">#7AFFFFFF</color>
+    <color name="vmore_icon">#000000</color>
+
+    <!-- Blue family (the only accent) -->
+    <color name="vmore_blue">#1B6EF3</color>
+    <color name="vmore_blue_deep">#0F4FBF</color>
+    <color name="vmore_blue_soft">#331B6EF3</color>
+    <color name="vmore_blue_ghost">#1A1B6EF3</color>
+    <!-- The touch glow on a blue button: white, at a low alpha. -->
+    <color name="vmore_ripple">#33FFFFFF</color>
+
 </resources>

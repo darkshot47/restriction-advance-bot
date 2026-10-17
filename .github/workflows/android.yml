@@ -2,8 +2,11 @@ name: android
 
 # Builds the Vmore app, packs the APK into a zip and publishes it twice:
 #   • as a workflow artifact (every build), and
-#   • as a GitHub Release asset — the stable link the bot's "Unlimited Download"
-#     button points at (the owner copies that link into /apk's caption).
+#   • as a GitHub Release asset — the stable download link users install from.
+#
+# The app is fully standalone: it signs in with the phone's own Telegram account
+# and talks to Telegram directly (TDLib), so no server address, token or api
+# credential is baked into the build.
 #
 # The zip is what the owner asked for: "build the app and extract the APK from a
 # zip file".  Both files are verified (unzip -t + aapt2 badging) before release.
@@ -21,10 +24,6 @@ on:
       - ".github/workflows/android.yml"
   workflow_dispatch:
     inputs:
-      base_url:
-        description: "Server address baked into the app as the starting value (optional)"
-        required: false
-        default: ""
       release_tag:
         description: "Release tag to publish (default: vmore-latest)"
         required: false
@@ -70,6 +69,14 @@ jobs:
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
           echo "SDKMANAGER=$SDKMANAGER" >> "$GITHUB_ENV"
           ls "$SDK/platforms"
+
+      - name: Check the Android sources
+        #: The same check the tests job runs, so a resource that aapt2 would
+        #: refuse does not wait for the TDLib build to be reported.
+        run: |
+          python -m pip install -q javalang
+          cd android/app/src/main
+          python3 ../../../tools/check_sources.py
 
       - name: TDLib host prerequisites (the code generator's toolchain)
         run: |
@@ -119,6 +126,110 @@ jobs:
           path: tdlib-build.log
           if-no-files-found: warn
 
+      - name: The update signing key (stable across builds)
+        #: Android refuses to install an APK over an app signed with a different
+        #: key ("App not installed").  The debug keystore is regenerated on every
+        #: runner, which is exactly why updates used to fail, so the release key
+        #: is committed under android/signing/ and used here.  When it is missing
+        #: it is created and committed once; when the branch cannot be written to
+        #: (a pull request from a fork, say) the build falls back to the debug key
+        #: and says so instead of failing.
+        run: |
+          set -o pipefail
+          KEYSTORE="android/signing/vmore.jks"
+          PASSFILE="android/signing/storepass.txt"
+          EXPECTED="android/tools/expected_signing.txt"
+
+          fingerprint() {
+            keytool -list -v -keystore "$1" -storepass "$2" -alias "$3" \
+              | grep -m1 'SHA256:' | sed 's/.*SHA256: //' \
+              | tr -d '[:space:]:' | tr 'A-F' 'a-f'
+          }
+
+          #: The first 64 hex characters of expected_signing.txt, however the
+          #: file is laid out (a comment header, a line per key, colons or not).
+          recorded() {
+            tr -d '[:space:]:' < "$EXPECTED" 2>/dev/null \
+              | grep -o -E '[0-9a-fA-F]{64}' | head -1 | tr 'A-F' 'a-f'
+          }
+
+          if [ -f "$KEYSTORE" ] && [ -f "$PASSFILE" ]; then
+            PASSWORD="$(head -1 "$PASSFILE" | tr -d '[:space:]')"
+            ALIAS="$(sed -n '2p' "$PASSFILE" | tr -d '[:space:]')"
+            ALIAS="${ALIAS:-vmore}"
+            FINGERPRINT="$(fingerprint "$KEYSTORE" "$PASSWORD" "$ALIAS")"
+            if [ -z "$FINGERPRINT" ]; then
+              echo "::error::the committed update key could not be read"
+              exit 1
+            fi
+            RECORDED="$(recorded)"
+            if [ -n "$RECORDED" ] && [ "$RECORDED" != "$FINGERPRINT" ]; then
+              echo "::error::the committed update key is not the recorded one"
+              echo "::error::recorded $RECORDED"
+              echo "::error::found    $FINGERPRINT"
+              echo "::error::Android would refuse to update every installed Vmore. Restore the key, or update android/tools/expected_signing.txt on purpose."
+              exit 1
+            fi
+            if [ -z "$RECORDED" ]; then
+              echo "$FINGERPRINT" >> "$EXPECTED"
+              echo "::notice::recorded the update key fingerprint $FINGERPRINT"
+            fi
+            echo "::notice::signing with the committed update key, certificate SHA256 $FINGERPRINT"
+          else
+            echo "no committed update key: creating one"
+            mkdir -p android/signing
+            PASSWORD="$(openssl rand -hex 24)"
+            if keytool -genkeypair -v -noprompt -keystore "$KEYSTORE" -alias vmore \
+                -keyalg RSA -keysize 4096 -validity 10950 -storetype PKCS12 \
+                -storepass "$PASSWORD" -keypass "$PASSWORD" \
+                -dname "CN=Vmore, O=Vmore, C=IN" 2>&1 | tail -2; then
+              printf '%s\nvmore\n' "$PASSWORD" > "$PASSFILE"
+              FINGERPRINT="$(fingerprint "$KEYSTORE" "$PASSWORD" vmore)"
+              {
+                echo
+                echo "$FINGERPRINT"
+              } >> "$EXPECTED"
+              if [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF_TYPE" = "branch" ]; then
+                git config user.email "actions@github.com"
+                git config user.name "Vmore CI"
+                git add "$KEYSTORE" "$PASSFILE" "$EXPECTED"
+                if git commit -m "Signing: the update key every release is signed with" >/dev/null \
+                    && git push origin "HEAD:$GITHUB_REF_NAME"; then
+                  echo "::notice::the update key is committed; an already installed Vmore must be uninstalled once before it can take this build"
+                else
+                  #: A key that stays in the runner is a key the next build does
+                  #: not have, so the next build would be signed differently and
+                  #: every phone would refuse it.  That is the exact bug this
+                  #: whole step exists for, so it stops the release instead.
+                  echo "::error::the update key was created but could not be committed to $GITHUB_REF_NAME"
+                  echo "::error::without it committed, this build and the next one would be signed with different keys"
+                  echo "::error::re-run the job, or commit the key by hand from the run's artifacts"
+                  exit 1
+                fi
+              else
+                #: Pull requests publish nothing, so a throwaway key is harmless
+                #: there; anything else must already have refused above.
+                echo "::warning::this is not a branch push, so the update key is not committed"
+              fi
+              echo "::notice::signing with a freshly created update key, certificate SHA256 $FINGERPRINT"
+            elif [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+              echo "::warning::the update key could not be created; falling back to the debug key for this pull request, which publishes nothing"
+              FINGERPRINT=""
+            else
+              echo "::error::the update key could not be created, and this run publishes a release"
+              echo "::error::refusing to publish an APK that no installed Vmore could ever update"
+              exit 1
+            fi
+          fi
+
+          if [ -n "${FINGERPRINT:-}" ]; then
+            echo "VMORE_STORE_FILE=$PWD/$KEYSTORE" >> "$GITHUB_ENV"
+            echo "VMORE_STORE_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
+            echo "VMORE_KEY_ALIAS=${ALIAS:-vmore}" >> "$GITHUB_ENV"
+            echo "VMORE_KEY_PASSWORD=$PASSWORD" >> "$GITHUB_ENV"
+            echo "VMORE_FINGERPRINT=$FINGERPRINT" >> "$GITHUB_ENV"
+          fi
+
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -126,31 +237,13 @@ jobs:
           #: installs this exact Gradle — the version AGP 8.5 wants.
           gradle-version: "8.7"
 
-      - name: Point the app at the owner's server (optional)
-        if: ${{ inputs.base_url != '' }}
-        working-directory: android
-        run: |
-          #: The address stays editable in the app; this only pre-fills it so a
-          #: fresh install already knows the deployment.
-          python3 - "${{ inputs.base_url }}" <<'PY'
-          import pathlib, sys
-          url = sys.argv[1].strip().rstrip("/")
-          if not url.startswith(("http://", "https://")):
-              url = "https://" + url
-          path = pathlib.Path("app/src/main/res/values/strings.xml")
-          text = path.read_text(encoding="utf-8")
-          start = text.index('<string name="default_base_url"')
-          end = text.index("</string>", start) + len("</string>")
-          text = text[:start] + f'<string name="default_base_url" translatable="false">{url}</string>' + text[end:]
-          path.write_text(text, encoding="utf-8")
-          print("baked base url:", url)
-          PY
-
-      - name: Build the debug APK (and run its unit tests)
+      - name: Build the APK (and run its unit tests)
         working-directory: android
         run: |
           set -o pipefail
-          gradle --no-daemon testDebugUnitTest assembleDebug --stacktrace 2>&1 | tee ../build.log
+          #: assembleRelease: the file people install is a real release build,
+          #: signed with the update key so the next build installs over it.
+          gradle --no-daemon testDebugUnitTest assembleRelease --stacktrace 2>&1 | tee ../build.log
           tail -5 ../build.log
 
       - name: Report the app's unit tests
@@ -176,9 +269,52 @@ jobs:
       - name: Pack it the way the owner wants it (zip → APK)
         working-directory: android
         run: |
+          set -o pipefail
           mkdir -p dist
-          cp app/build/outputs/apk/debug/app-debug.apk dist/Vmore.apk
+          APK=app/build/outputs/apk/release/app-release.apk
+          if [ ! -f "$APK" ]; then
+            #: Only reachable before the first release build existed; a debug
+            #: APK is better than no download link.
+            APK=app/build/outputs/apk/debug/app-debug.apk
+            echo "::warning::no release APK was produced; packing the debug one"
+          fi
+          cp "$APK" dist/Vmore.apk
           cd dist
+          #: The signature is the thing Android judges an update by, so it is
+          #: checked here and printed: every future build must show the same
+          #: certificate, or phones will refuse to install over the old app.
+          APKSIGNER="$(ls "$ANDROID_SDK_ROOT"/build-tools/*/apksigner 2>/dev/null | head -1)"
+          if [ -n "$APKSIGNER" ]; then
+            "$APKSIGNER" verify --print-certs Vmore.apk | grep -E "Signer #1 certificate (DN|SHA-256)" || true
+            ACTUAL="$("$APKSIGNER" verify --print-certs Vmore.apk \
+              | sed -n 's/.*certificate SHA-256 digest: //p' | head -1 \
+              | tr 'A-F' 'a-f' | tr -d ':')"
+            #: The APK must carry the very key this run exported to Gradle.  A
+            #: silent fall back to the debug key would install on a fresh phone
+            #: and then refuse every update, which is the bug this guards.
+            WANTED="${VMORE_FINGERPRINT:-}"
+            if [ -z "$WANTED" ]; then
+              WANTED="$(tr -d '[:space:]:' < tools/expected_signing.txt 2>/dev/null \
+                | grep -o -E '[0-9a-fA-F]{64}' | head -1 | tr 'A-F' 'a-f')"
+            fi
+            if [ -z "$WANTED" ] && [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+              echo "::error::no update key to check this APK against, and this run publishes a release"
+              exit 1
+            fi
+            if [ -n "$WANTED" ] && [ "$ACTUAL" != "$WANTED" ]; then
+              echo "::error::this APK is signed with the wrong key"
+              echo "::error::wanted $WANTED"
+              echo "::error::actual $ACTUAL"
+              echo "::error::Android would refuse to update an installed Vmore with it."
+              exit 1
+            fi
+            echo "::notice::announcing certificate SHA256 $ACTUAL"
+            if [ -n "${WANTED:-}" ]; then
+              echo "::notice::signature matches the update key"
+            else
+              echo "::warning::no update key was available; this APK is debug signed and will not update an installed app"
+            fi
+          fi
           zip -9 Vmore-apk.zip Vmore.apk
           unzip -t Vmore-apk.zip
           #: Prove the APK inside the zip is a real, installable package.
@@ -201,8 +337,20 @@ jobs:
           while IFS= read -r line; do
             echo "::notice::$(printf '%s' "$line" | cut -c1-900)"
           done < <(grep -E "^(package|application-label:|launchable-activity:|sdkVersion|targetSdkVersion)" badging.txt)
+          VERSION_NAME="$(sed -n "s/.*versionName='\([^']*\)'.*/\1/p" badging.txt | head -1)"
+          VERSION_CODE="$(sed -n "s/.*versionCode='\([^']*\)'.*/\1/p" badging.txt | head -1)"
+          echo "::notice::this build is Vmore $VERSION_NAME (versionCode $VERSION_CODE)"
+          #: A copy under its own version number: the stable link below always
+          #: serves the newest build, and this one lets anyone see at a glance
+          #: which build they actually hold.
+          if [ -n "$VERSION_NAME" ]; then
+            cp Vmore.apk "Vmore-$VERSION_NAME.apk"
+          fi
           sha256sum Vmore.apk Vmore-apk.zip > SHA256SUMS.txt
+          sha256sum "Vmore-$VERSION_NAME.apk" >> SHA256SUMS.txt
           cat SHA256SUMS.txt
+          echo "$VERSION_NAME" > version.txt
+          echo "$VERSION_CODE" > versioncode.txt
           ls -lh
 
       - name: Upload the zip (artifact)
@@ -224,28 +372,78 @@ jobs:
           #: `gh release upload` would be silently reported as a green publish.
           set -o pipefail
           {
-            cat > release-notes.md <<'NOTES'
-          Automated build of the Vmore Android app.
-
+            VERSION_NAME="$(cat android/dist/version.txt 2>/dev/null || echo unknown)"
+            VERSION_CODE="$(cat android/dist/versioncode.txt 2>/dev/null || echo unknown)"
+            {
+              echo "Automated build of the Vmore Android app."
+              echo
+              echo "**This build**"
+              echo
+              echo "- Vmore ${VERSION_NAME} (versionCode ${VERSION_CODE})"
+              FINGERPRINT="${VMORE_FINGERPRINT:-}"
+              if [ -n "$FINGERPRINT" ]; then
+                #: Grouped the way Settings shows it on the phone, so the two
+                #: can be compared by eye instead of by trust.
+                GROUPED="$(printf '%s' "$FINGERPRINT" | fold -w2 | paste -sd: -)"
+                echo "- Signed with: \`$GROUPED\`"
+              else
+                echo "- Signed with: the debug key (no stable key was reachable in this run)"
+              fi
+              echo
+              cat <<'NOTES'
           **Install**
-          1. Download `Vmore.apk` (or `Vmore-apk.zip` and unzip it).
+          1. Download `Vmore.apk` (or the same file under its version number,
+             or `Vmore-apk.zip` and unzip it).
           2. Open it on the phone and allow "Install unknown apps" once.
-          3. Enter the server address and your access token (send /gentoken to the bot).
+          3. If the phone says "App not installed", the installed Vmore was
+             signed with an older, per-build key: uninstall it once, then
+             install this. From this build on, every update installs over the
+             previous one.
+          4. Sign in with your phone number and the code, or with your own
+             api_id and api_hash from my.telegram.org.
 
-          The bot's **♾️ Unlimited Download (App)** button points at this release,
-          and the file is replaced with every build — so the link never rots.
+          Everything runs on the phone: links are downloaded and uploaded with
+          your own Telegram account, and the local copy is deleted right after a
+          successful upload.
+
+          `Vmore.apk` is replaced with every build, so the stable link never
+          rots; the version-named copy is what tells two builds apart.
           NOTES
+            } > release-notes.md
+            head -8 release-notes.md
             #: Deleting and recreating the release would briefly break the stable
             #: link (and race the tag); replacing the assets in place cannot.
+            #: The stable names plus a copy named after the version, so the
+            #: owner can tell which build he is holding.
+            ASSETS="android/dist/Vmore.apk android/dist/Vmore-apk.zip android/dist/SHA256SUMS.txt"
+            VERSION_NAME="$(cat android/dist/version.txt 2>/dev/null || true)"
+            if [ -n "$VERSION_NAME" ] && [ -f "android/dist/Vmore-$VERSION_NAME.apk" ]; then
+              ASSETS="$ASSETS android/dist/Vmore-$VERSION_NAME.apk"
+            fi
             if gh release view "$TAG" >/dev/null 2>&1; then
-              gh release upload "$TAG" android/dist/Vmore.apk android/dist/Vmore-apk.zip \
-                android/dist/SHA256SUMS.txt --clobber
+              gh release upload "$TAG" $ASSETS --clobber
               gh release edit "$TAG" --title "Vmore APK (latest)" --notes-file release-notes.md \
                 --latest
             else
-              gh release create "$TAG" android/dist/Vmore.apk android/dist/Vmore-apk.zip \
-                android/dist/SHA256SUMS.txt --title "Vmore APK (latest)" \
+              gh release create "$TAG" $ASSETS --title "Vmore APK (latest)" \
                 --notes-file release-notes.md --latest
+            fi
+            #: A download list that still offers the build this one replaces is
+            #: how the previous version gets installed by mistake, so the older
+            #: version-named copies go.  Vmore.apk and Vmore-apk.zip stay: they
+            #: are the stable link and are always the newest build.
+            OLD_ASSETS="${RUNNER_TEMP:-/tmp}/old-assets.txt"
+            if gh release view "$TAG" --json assets --jq '.assets[].name' > "$OLD_ASSETS"; then
+              while IFS= read -r asset; do
+                case "$asset" in
+                  Vmore-*.apk)
+                    if [ "$asset" != "Vmore-${VERSION_NAME}.apk" ]; then
+                      if gh release delete-asset "$TAG" "$asset" --yes; then
+                        echo "::notice::removed the older asset $asset"
+                      fi
+                    fi;;
+                esac
+              done < "$OLD_ASSETS"
             fi
           } 2>&1 | tee release.log
           echo "::notice::release $TAG now serves Vmore.apk $(cat android/dist/SHA256SUMS.txt | head -1)"

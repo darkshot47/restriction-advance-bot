@@ -1,143 +1,207 @@
 package com.vmore.app;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Intent;
 import android.os.Bundle;
+import android.view.LayoutInflater;
 import android.view.View;
+import android.widget.Button;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 
-import org.json.JSONArray;
-import org.json.JSONObject;
-
-import java.io.File;
 import java.util.List;
 
 /**
- * Downloads **and** history in one list, exactly as the owner asked: what this
- * phone downloaded (tap to open / edit) and what the account did on the server.
+ * Everything the app ever moved — one row per job, with a filter for uploaded
+ * and failed ones. Rows whose local copy was auto-deleted stay in the list on
+ * purpose: the history is the record, the storage is what gets freed.
  */
-public class HistoryActivity extends Activity {
+public class HistoryActivity extends Activity implements History.Listener {
 
-    private LinearLayout list;
+    private LinearLayout historyList;
     private TextView empty;
+    private TextView summary;
+    private String filter = "all";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        Skin.prepare(this);
         setContentView(R.layout.activity_history);
-        list = findViewById(R.id.historyList);
+        historyList = findViewById(R.id.historyList);
         empty = findViewById(R.id.historyEmpty);
-        findViewById(R.id.refreshButton).setOnClickListener(v -> load());
-        load();
+        summary = findViewById(R.id.historySummary);
+
+        findViewById(R.id.backButton).setOnClickListener(v -> finish());
+        findViewById(R.id.clearButton).setOnClickListener(v -> confirmClear());
+
+        bindFilter(R.id.filterAll, "all");
+        bindFilter(R.id.filterUploaded, History.STATUS_UPLOADED);
+        bindFilter(R.id.filterFailed, History.STATUS_FAILED);
+
+        Anim.pageIn(findViewById(R.id.historyHeader));
+        render();
     }
 
-    private void load() {
-        list.removeAllViews();
-        List<LocalStore.Item> local = LocalStore.all(this);
-        int index = 0;
-        for (LocalStore.Item item : local) {
-            addRow("📥 " + item.name,
-                    Notifications.human(item.size) + " • " + when(item.date)
-                            + (new File(item.path).exists() ? "" : " • file removed"),
-                    v -> openDownloaded(item));
-            index++;
-        }
-        if (index == 0) {
-            empty.setText("Nothing downloaded on this phone yet.\n\n"
-                    + "Paste a private link on the home screen to start.");
-            empty.setVisibility(View.VISIBLE);
-        } else {
-            empty.setVisibility(View.GONE);
-        }
-        addHeader("Server history");
-        Api.get(Api.tokenUrl(Prefs.baseUrl(this), Prefs.token(this)) + "/history?limit=50",
-                result -> {
-                    if (!result.ok || result.json == null) {
-                        addRow("⚠️ Could not load history",
-                                result.error == null ? "unknown error" : result.error, null);
-                        return;
-                    }
-                    JSONArray items = result.json.optJSONArray("items");
-                    if (items == null || items.length() == 0) {
-                        addRow("Nothing yet", "Public links you send and app downloads show up here.",
-                                null);
-                        return;
-                    }
-                    for (int i = 0; i < items.length(); i++) {
-                        JSONObject item = items.optJSONObject(i);
-                        if (item == null) {
-                            continue;
-                        }
-                        String icon = "app".equals(item.optString("source")) ? "📱" : "🤖";
-                        String status = item.optString("status", "done");
-                        String title = icon + " " + ("done".equals(status) ? "" : status + " • ")
-                                + item.optString("kind", "download");
-                        String detail = firstNonEmpty(item.optString("file_name", ""),
-                                item.optString("caption", ""), item.optString("link", ""));
-                        addRow(title, (detail.isEmpty() ? "" : detail + "\n")
-                                + prettyDate(item.optString("date", "")), null);
-                    }
-                });
+    private void bindFilter(int viewId, String value) {
+        Button button = findViewById(viewId);
+        button.setOnClickListener(v -> {
+            filter = value;
+            paintFilters();
+            render();
+        });
+        Anim.pressible(button);
     }
 
-    private void openDownloaded(LocalStore.Item item) {
-        File file = new File(item.path);
-        if (!file.exists()) {
-            LocalStore.forget(this, item.path);
-            load();
+    private void paintFilters() {
+        paintChip(findViewById(R.id.filterAll), "all".equals(filter));
+        paintChip(findViewById(R.id.filterUploaded), History.STATUS_UPLOADED.equals(filter));
+        paintChip(findViewById(R.id.filterFailed), History.STATUS_FAILED.equals(filter));
+    }
+
+    private void paintChip(Button chip, boolean active) {
+        chip.setBackgroundResource(active ? R.drawable.bg_chip_active : R.drawable.bg_chip);
+        chip.setTextColor(active ? getColor(R.color.vmore_on_accent)
+                : getColor(R.color.vmore_text_dim));
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (Lock.guard(this)) {
             return;
         }
-        Intent intent = new Intent(this, ViewerActivity.class);
-        intent.putExtra("path", item.path);
-        startActivity(intent);
+        History.get(this).addListener(this);
+        render();
     }
 
-    private void addHeader(String text) {
-        TextView header = new TextView(this);
-        header.setText(text);
-        header.setPadding(8, 24, 8, 8);
-        header.setTextSize(14f);
-        header.setAllCaps(false);
-        list.addView(header);
+    @Override
+    protected void onPause() {
+        History.get(this).removeListener(this);
+        super.onPause();
     }
 
-    private void addRow(String title, String subtitle, View.OnClickListener click) {
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        int pad = (int) (12 * getResources().getDisplayMetrics().density);
-        box.setPadding(pad, pad, pad, pad);
-        TextView head = new TextView(this);
-        head.setText(title);
-        head.setTextSize(15f);
-        TextView sub = new TextView(this);
-        sub.setText(subtitle);
-        sub.setTextSize(12f);
-        box.addView(head);
-        box.addView(sub);
-        if (click != null) {
-            box.setOnClickListener(click);
+    @Override
+    public void onHistoryChanged() {
+        render();
+    }
+
+    private void render() {
+        paintFilters();
+        List<History.Entry> entries = History.get(this).byStatus(filter);
+        long bytes = 0;
+        for (History.Entry entry : entries) {
+            bytes += entry.size;
         }
-        list.addView(box);
-    }
-
-    private String firstNonEmpty(String... values) {
-        for (String value : values) {
-            if (value != null && !value.isEmpty()) {
-                return value;
-            }
+        summary.setText(entries.size() + " entries • " + Format.size(bytes));
+        historyList.removeAllViews();
+        if (entries.isEmpty()) {
+            empty.setVisibility(View.VISIBLE);
+            return;
         }
-        return "";
-    }
-
-    private String when(long stamp) {
-        return prettyDate(new java.util.Date(stamp).toInstant().toString());
-    }
-
-    private String prettyDate(String iso) {
-        if (iso == null || iso.length() < 16) {
-            return iso == null ? "" : iso;
+        empty.setVisibility(View.GONE);
+        int index = 0;
+        for (History.Entry entry : entries) {
+            View row = LayoutInflater.from(this).inflate(R.layout.item_history,
+                    historyList, false);
+            bind(row, entry);
+            historyList.addView(row);
+            Anim.itemIn(row, index++);
         }
-        return iso.substring(0, 10) + " " + iso.substring(11, 16);
+    }
+
+    private void bind(View row, History.Entry entry) {
+        ImageView icon = row.findViewById(R.id.historyIcon);
+        TextView title = row.findViewById(R.id.historyName);
+        TextView info = row.findViewById(R.id.historyInfo);
+        TextView status = row.findViewById(R.id.historyStatus);
+
+        icon.setImageResource(Ui.iconForKind(entry.kind));
+        title.setText(entry.name.isEmpty() ? "Job" : entry.name);
+
+        StringBuilder builder = new StringBuilder();
+        if (entry.size > 0) {
+            builder.append(Format.size(entry.size)).append(" • ");
+        }
+        builder.append(Format.when(entry.when));
+        if (!entry.destTitle.isEmpty()) {
+            builder.append(" • ").append(entry.destTitle);
+        }
+        if (History.STATUS_FAILED.equals(entry.status) && !entry.error.isEmpty()) {
+            builder.append(" • ").append(entry.error);
+        } else if (!entry.local) {
+            builder.append(" • local copy removed");
+        }
+        info.setText(builder.toString());
+
+        if (History.STATUS_FAILED.equals(entry.status)) {
+            status.setText(R.string.common_failed);
+            status.setTextColor(getColor(R.color.vmore_text));
+        } else {
+            status.setText(History.STATUS_UPLOADED.equals(entry.status)
+                    ? "uploaded" : "downloaded");
+            status.setTextColor(getColor(R.color.vmore_blue));
+        }
+
+        row.setOnClickListener(v -> open(entry));
+        row.setOnLongClickListener(v -> {
+            confirmDelete(entry);
+            return true;
+        });
+        Anim.pressible(row);
+    }
+
+    private void open(History.Entry entry) {
+        if (entry.local && LocalFiles.exists(entry.path)) {
+            Intent intent = new Intent(this, ViewerActivity.class);
+            intent.putExtra("path", entry.path);
+            startActivity(intent);
+            return;
+        }
+        showDetails(entry);
+    }
+
+    private void showDetails(History.Entry entry) {
+        StringBuilder message = new StringBuilder();
+        message.append("File: ").append(entry.name).append('\n');
+        if (entry.size > 0) {
+            message.append("Size: ").append(Format.size(entry.size)).append('\n');
+        }
+        message.append("When: ").append(Format.when(entry.when)).append('\n');
+        if (!entry.destTitle.isEmpty()) {
+            message.append("Sent to: ").append(entry.destTitle).append('\n');
+        }
+        if (!entry.link.isEmpty()) {
+            message.append("Link: ").append(entry.link).append('\n');
+        }
+        if (!entry.error.isEmpty()) {
+            message.append("Reason: ").append(entry.error).append('\n');
+        }
+        message.append(entry.local ? "The file is still on the phone."
+                : "The local copy was removed after the upload.");
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.history_title)
+                .setMessage(message.toString())
+                .setPositiveButton(R.string.common_ok, null)
+                .setNeutralButton(R.string.common_delete, (dialog, which) ->
+                        History.get(this).remove(entry.id))
+                .show();
+    }
+
+    private void confirmDelete(History.Entry entry) {
+        Ui.confirm(this, getString(R.string.common_delete),
+                entry.name, getString(R.string.common_delete),
+                () -> History.get(this).remove(entry.id));
+    }
+
+    private void confirmClear() {
+        Ui.confirm(this, getString(R.string.history_clear),
+                "Every entry leaves the list. Files already deleted from the phone stay deleted.",
+                getString(R.string.history_clear), () -> {
+                    History.get(this).clear();
+                    Ui.toast(this, getString(R.string.history_cleared));
+                });
     }
 }
