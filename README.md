@@ -541,6 +541,24 @@ The list below is the whole feature set, all of it on the phone, none of it need
   jobs and the *last steps the queue took*, with Telegram's own error text.  One tap copies the whole
   report, which is what to send when a link will not move.
 
+### The developer card, the ring and the buttons
+
+* **Settings ends with the developer's own profile**, read through the signed-in account: the real name,
+  the real handle, the real bio and the real profile picture, cached on the phone so the card paints
+  instantly, refreshed once per visit, and one tap from a **direct chat** (`tg://resolve`, the web
+  fallback when Telegram is not installed).  Nothing about it is baked into the APK.
+* **The story ring**: the logo on the sign-in screen and the profile picture in the home header sit inside
+  the circle Telegram draws around a profile with a story.  The arc travels around the logo without ever
+  stopping; on the header it turns slowly enough that it is noticed only when looked at.  It stops by
+  itself when the screen leaves the window.
+* **Buttons**: one radius (16dp), one weight, one letter spacing and a real ripple under the finger for
+  the solid blue button, the outline button and every filter chip — so a screen with both reads as one
+  design.
+* **Signing in without typing a key**: Telegram will not send a login code to any client that has no
+  `api_id`/`api_hash`; it is a server rule, not an app one.  Vmore therefore keeps the built-in key pool,
+  but it is no longer random: the key that last produced a code on this phone is tried first, the others
+  follow, and the user's own pair stays one tap away on the same screen.
+
 ### Updates and the signing key
 
 Android only installs an APK over an existing app when both carry the **same signature**.  Every build up

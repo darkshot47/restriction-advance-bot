@@ -119,6 +119,10 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         profileName = findViewById(R.id.profileName);
         profileUser = findViewById(R.id.profileUser);
         emptyText = findViewById(R.id.emptyText);
+        //: The header picture gets the same ring, turning slowly enough to be
+        //: noticed only when looked at.
+        StoryRingView profileRing = findViewById(R.id.profileRing);
+        profileRing.setTurnSeconds(14f);
 
         findViewById(R.id.themeButton).setOnClickListener(v -> Skin.toggle(this));
         findViewById(R.id.profileBox).setOnClickListener(v ->

@@ -20,11 +20,26 @@
             android:layout_height="wrap_content"
             android:orientation="vertical">
 
-            <ImageView
-                android:layout_width="46dp"
-                android:layout_height="46dp"
-                android:src="@drawable/ic_vmore"
-                android:contentDescription="@string/app_name" />
+            <!-- The logo wears the ring Telegram draws around a profile with a
+                 story; the arc travels around it for as long as the app is on
+                 screen, which is the endless animation the owner asked for. -->
+            <FrameLayout
+                android:layout_width="68dp"
+                android:layout_height="68dp">
+
+                <com.vmore.app.StoryRingView
+                    android:id="@+id/logoRing"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent"
+                    android:contentDescription="@string/app_name" />
+
+                <ImageView
+                    android:layout_width="46dp"
+                    android:layout_height="46dp"
+                    android:layout_gravity="center"
+                    android:src="@drawable/ic_vmore"
+                    android:contentDescription="@string/app_name" />
+            </FrameLayout>
 
             <TextView
                 android:layout_width="wrap_content"

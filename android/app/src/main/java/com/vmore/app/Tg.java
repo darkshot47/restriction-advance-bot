@@ -120,6 +120,24 @@ public final class Tg {
         public String phone = "";
     }
 
+    /**
+     * A public Telegram profile, as the signed-in account sees it.
+     *
+     * Only what Telegram shows to everyone: the name, the handle, the bio and
+     * the profile picture.  The developer card in Settings reads the owner's
+     * profile this way, with the user's own session, so it is the real picture
+     * and the real bio rather than a copy baked into the APK.
+     */
+    public static final class Profile {
+        public long id;
+        public String name = "";
+        public String username = "";
+        public String bio = "";
+        public int photoFileId;
+        /** Already on the phone, when Telegram had the picture cached. */
+        public String photoPath = "";
+    }
+
     /** One row of the chat list. */
     public static final class Chat {
         public long id;
@@ -1006,6 +1024,63 @@ public final class Tg {
             }
             cb.ok(row);
         });
+    }
+
+    // ── profiles ──────────────────────────────────────────────────────────
+
+    /**
+     * Reads one public profile by its handle.
+     *
+     * SearchPublicChat turns the handle into a chat the account may see, GetUser
+     * brings the name and the picture, and GetUserFullInfo the bio.  A missing
+     * bio is not a failure: the profile comes back without one.
+     */
+    public void userProfile(final String username, Cb<Profile> callback) {
+        final Cb<Profile> cb = deliver(callback);
+        Client current = client;
+        if (current == null) {
+            cb.fail("the Telegram engine is not running");
+            return;
+        }
+        if (username == null || username.isEmpty()) {
+            cb.fail("no profile was named");
+            return;
+        }
+        current.send(new TdApi.SearchPublicChat(username.replace("@", "")), found -> {
+            if (!(found instanceof TdApi.Chat)
+                    || !(((TdApi.Chat) found).type instanceof TdApi.ChatTypePrivate)) {
+                cb.fail("that profile is not a Telegram account this session can open");
+                return;
+            }
+            final long userId = ((TdApi.ChatTypePrivate) ((TdApi.Chat) found).type).userId;
+            current.send(new TdApi.GetUser(userId), userObject -> {
+                if (!(userObject instanceof TdApi.User)) {
+                    cb.fail("Telegram did not return that profile");
+                    return;
+                }
+                TdApi.User user = (TdApi.User) userObject;
+                final Profile profile = new Profile();
+                profile.id = user.id;
+                String first = user.firstName == null ? "" : user.firstName;
+                String last = user.lastName == null ? "" : user.lastName;
+                profile.name = (first + " " + last).trim();
+                profile.username = firstUsername(user.usernames);
+                TdApi.File photo = user.profilePhoto == null ? null : user.profilePhoto.big;
+                if (photo != null && photo.id != 0) {
+                    profile.photoFileId = photo.id;
+                    if (isComplete(photo)) {
+                        profile.photoPath = photo.local.path;
+                    }
+                }
+                current.send(new TdApi.GetUserFullInfo(userId), fullObject -> {
+                    if (fullObject instanceof TdApi.UserFullInfo) {
+                        TdApi.FormattedText bio = ((TdApi.UserFullInfo) fullObject).bio;
+                        profile.bio = bio == null || bio.text == null ? "" : bio.text.trim();
+                    }
+                    cb.ok(profile);
+                }, bioError -> cb.ok(profile));
+            }, userError -> cb.fail("Telegram did not return that profile"));
+        }, error -> cb.fail("Telegram could not open that profile"));
     }
 
     // ── resolving links ───────────────────────────────────────────────────

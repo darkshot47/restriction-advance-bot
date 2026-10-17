@@ -17,15 +17,15 @@
     <string name="login_open_my_telegram">Open my.telegram.org</string>
     <string name="login_working">Connecting to Telegram…</string>
     <string name="login_done">Signed in</string>
-    <string name="login_try_ready">Try a ready-made key</string>
-    <string name="login_ready_help">Vmore can also try keys that open-source Telegram clients publish. It walks them one after another and stops the moment the login code is on its way — no typing needed.</string>
+    <string name="login_try_ready">Continue with a built-in key</string>
+    <string name="login_ready_help">Telegram requires every client to carry an app key before it will send a login code, so a key is always needed. Vmore carries the keys open-source Telegram clients publish: it starts with the one that worked on this phone before, tries the others in turn, and stops the moment the login code is on its way. If Telegram refuses them all, your own api_id and api_hash above always work.</string>
     <string name="login_trying_key">Trying ready-made key</string>
     <string name="login_trying_left">seconds left on this key</string>
     <string name="login_key_worked">A ready-made key was accepted. The login code is on its way to your Telegram apps.</string>
     <string name="login_keys_exhausted">Telegram refused every ready-made key. Paste your own api_id and api_hash from my.telegram.org — it takes a minute, and Vmore keeps them only on this phone.</string>
     <string name="login_key_refused">That key was refused, trying the next one</string>
     <string name="login_change_keys">Change the API details</string>
-    <string name="login_key_accepted">That key was accepted. Type your number and tap Continue — Telegram will send the code, and if it then refuses the key Vmore moves on to the next one by itself.</string>
+    <string name="login_key_accepted">That key was accepted. Type your number and tap Continue — Telegram will send the code. If it refuses the key later, Vmore moves to the next one by itself.</string>
     <string name="login_stop_trying">Stop and enter my own key</string>
     <string name="login_back_to_account">Back to</string>
     <string name="login_no_answer">Telegram did not answer. Check the connection, then tap Continue again.</string>
@@ -151,6 +151,7 @@
     <string name="settings_day">Day</string>
     <string name="settings_night">Night</string>
     <string name="settings_developer">Developer</string>
+    <string name="settings_developer_contact">Message on Telegram</string>
     <string name="settings_check">Check the Telegram connection</string>
     <string name="settings_check_hint">Reads your account, the destination chat and the last failed jobs</string>
     <string name="settings_check_title">Connection check</string>

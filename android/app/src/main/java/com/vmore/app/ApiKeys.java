@@ -66,4 +66,36 @@ final class ApiKeys {
         Collections.shuffle(keys);
         return keys;
     }
+
+    /**
+     * The same order, but the key that worked on this phone goes first.
+     *
+     * The owner did not want a random key tried every time.  A shuffle alone
+     * means the sign-in may start with a key Telegram has already refused for
+     * this account; starting with the one that last produced a login code makes
+     * the attempt short and predictable, and the rest of the list stays behind
+     * it in case that key is refused too.
+     */
+    static List<Key> order(int preferredId, String preferredHash) {
+        List<Key> keys = order();
+        Key preferred = find(preferredId, preferredHash);
+        if (preferred != null) {
+            keys.remove(preferred);
+            keys.add(0, preferred);
+        }
+        return keys;
+    }
+
+    /** The pool entry for a pair, or null when the pair is not one of ours. */
+    static Key find(int apiId, String apiHash) {
+        if (apiId <= 0 || apiHash == null || apiHash.isEmpty()) {
+            return null;
+        }
+        for (Key key : POOL) {
+            if (key.id == apiId && key.hash.equalsIgnoreCase(apiHash.trim())) {
+                return key;
+            }
+        }
+        return null;
+    }
 }

@@ -147,6 +147,9 @@ public class LoginActivity extends Activity implements Tg.Listener {
         Anim.pressible(backButton);
         Anim.pressible(otherAccountButton);
         Anim.pageIn(brand);
+        //: The logo wears the story ring, and the arc never stops travelling.
+        StoryRingView ring = findViewById(R.id.logoRing);
+        ring.setTurnSeconds(6f);
     }
 
     @Override
@@ -395,6 +398,12 @@ public class LoginActivity extends Activity implements Tg.Listener {
     }
 
     private void onSignedIn() {
+        //: Remember which built-in key this account accepted, so the next
+        //: sign-in does not start with a random one.
+        ApiKeys.Key used = ApiKeys.find(Prefs.apiId(this), Prefs.apiHash(this));
+        if (used != null) {
+            Prefs.saveLastGoodKey(this, used.id, used.hash);
+        }
         stepTitle.setText(R.string.login_done);
         stepHelp.setText(Prefs.accountName(this));
         progress.setVisibility(View.GONE);
@@ -482,7 +491,10 @@ public class LoginActivity extends Activity implements Tg.Listener {
         ownApiId = apiIdField.getText().toString().trim();
         ownApiHash = apiHashField.getText().toString().trim();
         candidates.clear();
-        candidates.addAll(ApiKeys.order());
+        //: The key that produced a code on this phone last time goes first;
+        //: the rest follow in a fresh order.
+        candidates.addAll(ApiKeys.order(Prefs.lastGoodKeyId(this),
+                Prefs.lastGoodKeyHash(this)));
         candidate = -1;
         trying = true;
         Log.step(this, "key attempt: trying " + candidates.size() + " ready-made keys");

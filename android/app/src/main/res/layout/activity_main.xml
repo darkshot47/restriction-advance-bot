@@ -85,16 +85,28 @@
                             android:textSize="11sp" />
                     </LinearLayout>
 
-                    <ImageView
-                        android:id="@+id/profileAvatar"
-                        android:layout_width="42dp"
-                        android:layout_height="42dp"
-                        android:layout_marginLeft="10dp"
-                        android:background="@drawable/bg_avatar"
-                        android:padding="9dp"
-                        android:scaleType="fitCenter"
-                        android:src="@drawable/ic_person"
-                        android:contentDescription="@string/home_nav_profile" />
+                    <FrameLayout
+                        android:layout_width="52dp"
+                        android:layout_height="52dp"
+                        android:layout_marginLeft="6dp">
+
+                        <!-- The same story ring as the logo, turning slowly. -->
+                        <com.vmore.app.StoryRingView
+                            android:id="@+id/profileRing"
+                            android:layout_width="match_parent"
+                            android:layout_height="match_parent" />
+
+                        <ImageView
+                            android:id="@+id/profileAvatar"
+                            android:layout_width="42dp"
+                            android:layout_height="42dp"
+                            android:layout_gravity="center"
+                            android:background="@drawable/bg_avatar"
+                            android:padding="9dp"
+                            android:scaleType="fitCenter"
+                            android:src="@drawable/ic_person"
+                            android:contentDescription="@string/home_nav_profile" />
+                    </FrameLayout>
                 </LinearLayout>
             </LinearLayout>
 

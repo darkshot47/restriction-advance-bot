@@ -49,6 +49,11 @@ final class LocalFiles {
         return new File(context.getFilesDir(), "avatar_" + Prefs.activeSlot(context) + ".jpg");
     }
 
+    /** Where the developer's picture is kept, once, in app storage. */
+    static File developerAvatar(Context context) {
+        return new File(context.getFilesDir(), "developer.jpg");
+    }
+
     /** Copy a file (or move-and-replace) to an exact target path. */
     static File copy(String sourcePath, File target) {
         if (sourcePath == null || sourcePath.isEmpty() || target == null) {

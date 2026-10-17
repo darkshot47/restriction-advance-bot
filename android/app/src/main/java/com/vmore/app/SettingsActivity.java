@@ -3,12 +3,15 @@ package com.vmore.app;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.Bundle;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -27,6 +30,11 @@ public class SettingsActivity extends Activity {
     private static final int PICK_CHAT = 701;
 
     private LinearLayout box;
+    private boolean devRefreshed;
+    private ImageView devAvatar;
+    private TextView devName;
+    private TextView devHandle;
+    private TextView devBio;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -201,11 +209,13 @@ public class SettingsActivity extends Activity {
                 signatureSummary(), v -> copy(signatureText()));
         addRow(R.drawable.ic_refresh, getString(R.string.settings_check),
                 getString(R.string.settings_check_hint), v -> checkConnection());
-        addRow(R.drawable.ic_person, getString(R.string.settings_developer),
-                "@XyrDeveloper", v -> openTelegram());
         addRow(R.drawable.ic_help, getString(R.string.settings_help),
                 "a short guide to every screen", v -> startActivity(
                         new Intent(this, HelpActivity.class)));
+
+        //: The owner's own card, last on the page, read through this account so
+        //: the user sees the real picture, name and bio instead of a copy.
+        developerCard();
 
         Anim.stagger(box);
     }
@@ -486,12 +496,174 @@ public class SettingsActivity extends Activity {
                 });
     }
 
-    private void openTelegram() {
+    // -------------------------------------------------- the developer card //
+
+    /**
+     * The owner's profile, at the end of Settings.
+     *
+     * It is painted from the copy on the phone first, so it is never empty, and
+     * then refreshed through the signed-in account: Telegram's own answer is
+     * what the name, the bio and the picture become.  A direct chat is one tap
+     * away, in the Telegram app when it is installed and on the web otherwise.
+     */
+    private void developerCard() {
+        box.addView(Ui.section(this, getString(R.string.settings_developer)));
+        Developer.Profile cached = Developer.cached(this);
+
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackgroundResource(R.drawable.bg_card);
+        card.setPadding(Ui.dp(this, 16), Ui.dp(this, 16),
+                Ui.dp(this, 16), Ui.dp(this, 14));
+
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.HORIZONTAL);
+        head.setGravity(Gravity.CENTER_VERTICAL);
+
+        FrameLayout avatarBox = new FrameLayout(this);
+        int boxSize = Ui.dp(this, 58);
+        LinearLayout.LayoutParams boxParams = new LinearLayout.LayoutParams(boxSize, boxSize);
+        avatarBox.setLayoutParams(boxParams);
+        StoryRingView ring = new StoryRingView(this);
+        avatarBox.addView(ring, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+        devAvatar = new ImageView(this);
+        int face = Ui.dp(this, 46);
+        FrameLayout.LayoutParams faceParams = new FrameLayout.LayoutParams(face, face, Gravity.CENTER);
+        devAvatar.setLayoutParams(faceParams);
+        devAvatar.setBackgroundResource(R.drawable.bg_avatar);
+        devAvatar.setPadding(Ui.dp(this, 9), Ui.dp(this, 9),
+                Ui.dp(this, 9), Ui.dp(this, 9));
+        devAvatar.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        devAvatar.setImageResource(R.drawable.ic_person);
+        avatarBox.addView(devAvatar);
+        head.addView(avatarBox);
+
+        LinearLayout names = new LinearLayout(this);
+        names.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams namesParams = new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+        namesParams.leftMargin = Ui.dp(this, 14);
+        names.setLayoutParams(namesParams);
+
+        devName = new TextView(this);
+        devName.setTextColor(getColor(R.color.vmore_text));
+        devName.setTextSize(16f);
+        devName.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        devName.setSingleLine(true);
+        devName.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        names.addView(devName);
+
+        devHandle = new TextView(this);
+        devHandle.setTextColor(getColor(R.color.vmore_blue));
+        devHandle.setTextSize(13f);
+        LinearLayout.LayoutParams handleParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        handleParams.topMargin = Ui.dp(this, 3);
+        devHandle.setLayoutParams(handleParams);
+        names.addView(devHandle);
+
+        head.addView(names);
+        card.addView(head);
+
+        devBio = new TextView(this);
+        devBio.setTextColor(getColor(R.color.vmore_text_dim));
+        devBio.setTextSize(13f);
+        devBio.setLineSpacing(0f, 1.12f);
+        LinearLayout.LayoutParams bioParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        bioParams.topMargin = Ui.dp(this, 12);
+        devBio.setLayoutParams(bioParams);
+        card.addView(devBio);
+
+        Button contact = new Button(this);
+        contact.setText(R.string.settings_developer_contact);
+        contact.setTextColor(getColor(R.color.vmore_blue));
+        contact.setTextSize(14f);
+        contact.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        contact.setAllCaps(false);
+        contact.setBackgroundResource(R.drawable.bg_button_ghost);
+        contact.setStateListAnimator(null);
+        LinearLayout.LayoutParams contactParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, Ui.dp(this, 46));
+        contactParams.topMargin = Ui.dp(this, 14);
+        contact.setLayoutParams(contactParams);
+        contact.setOnClickListener(v -> openDeveloper());
+        Anim.pressible(contact);
+        card.addView(contact);
+
+        LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        cardParams.bottomMargin = Ui.dp(this, 12);
+        card.setLayoutParams(cardParams);
+        box.addView(card);
+        paintDeveloper(cached);
+        refreshDeveloper();
+    }
+
+    /** Puts one reading of the profile on the cards that are on screen. */
+    private void paintDeveloper(Developer.Profile profile) {
+        if (devName == null || devHandle == null || devBio == null) {
+            return;
+        }
+        devName.setText(profile.name);
+        devHandle.setText("@" + profile.username);
+        devBio.setText(profile.bio);
+        Bitmap picture = picture(profile.avatar);
+        if (picture != null) {
+            devAvatar.setPadding(0, 0, 0, 0);
+            devAvatar.setImageBitmap(Ui.circle(this, picture, 46));
+        }
+    }
+
+    private Bitmap picture(String path) {
+        if (path == null || path.isEmpty()) {
+            return null;
+        }
         try {
-            startActivity(new Intent(Intent.ACTION_VIEW,
-                    Uri.parse("https://t.me/" + Vmore.DEVELOPER)));
-        } catch (Exception error) {
-            Ui.toast(this, "@" + Vmore.DEVELOPER);
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inSampleSize = 2;
+            return BitmapFactory.decodeFile(path, options);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /** One quiet read per visit; the card is already readable without it. */
+    private void refreshDeveloper() {
+        //: The page is rebuilt whenever a switch changes; the profile is read
+        //: once per visit, not once per repaint.
+        if (devRefreshed) {
+            return;
+        }
+        devRefreshed = true;
+        Developer.refresh(this, new Tg.Cb<Developer.Profile>() {
+            @Override
+            public void ok(Developer.Profile value) {
+                if (!isFinishing() && !isDestroyed()) {
+                    paintDeveloper(value);
+                }
+            }
+
+            @Override
+            public void fail(String message) {
+                //: Offline, or the session is not up yet: the saved copy stays.
+            }
+        });
+    }
+
+    private void openDeveloper() {
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(Developer.deepLink())));
+            return;
+        } catch (Exception noApp) {
+            //: No Telegram app: the browser opens the same chat.
+        }
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(Developer.webUrl())));
+        } catch (Exception noBrowser) {
+            Ui.toast(this, "@" + Developer.USERNAME);
         }
     }
 

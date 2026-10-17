@@ -2,6 +2,8 @@ package com.vmore.app;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
@@ -13,6 +15,14 @@ import java.util.Set;
 /** The ready-made key pool behind the sign-in screen. */
 public class ApiKeysTest {
 
+    private static java.util.List<Integer> ids(List<ApiKeys.Key> keys) {
+        java.util.List<Integer> out = new java.util.ArrayList<>();
+        for (ApiKeys.Key key : keys) {
+            out.add(key.id);
+        }
+        return out;
+    }
+
     @Test
     public void everyKeyIsCompleteEnoughToAskTelegram() {
         for (ApiKeys.Key key : ApiKeys.order()) {
@@ -21,6 +31,29 @@ public class ApiKeysTest {
             assertTrue(key.hash.matches("[0-9a-f]{32}"));
             assertFalse(key.label.isEmpty());
         }
+    }
+
+    @Test
+    public void theKeyThatWorkedLastTimeGoesFirst() {
+        List<ApiKeys.Key> plain = ApiKeys.order();
+        ApiKeys.Key chosen = plain.get(plain.size() - 1);
+        List<ApiKeys.Key> ordered = ApiKeys.order(chosen.id, chosen.hash);
+        assertEquals("the remembered key leads the attempt", chosen.id,
+                ordered.get(0).id);
+        assertEquals("and the list still holds every key", plain.size(), ordered.size());
+        assertEquals("still one pass per key",
+                plain.size(), new HashSet<>(ids(ordered)).size());
+    }
+
+    @Test
+    public void aPairThatIsNotOursIsNotPromised() {
+        assertNull(ApiKeys.find(12345, "00000000000000000000000000000000"));
+        assertNull(ApiKeys.find(0, ""));
+        assertNull(ApiKeys.find(ApiKeys.order().get(0).id, "ffff"));
+        ApiKeys.Key first = ApiKeys.order().get(0);
+        assertNotNull(ApiKeys.find(first.id, first.hash));
+        //: The handle this app is signed in with is never one of the pool.
+        assertNull(ApiKeys.find(2040, "not-the-hash-of-it"));
     }
 
     @Test

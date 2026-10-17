@@ -33,5 +33,7 @@
     <color name="vmore_blue_deep">#0F4FBF</color>
     <color name="vmore_blue_soft">#331B6EF3</color>
     <color name="vmore_blue_ghost">#1A1B6EF3</color>
+    <!-- The touch glow on a blue button: white, at a low alpha. -->
+    <color name="vmore_ripple">#33FFFFFF</color>
 
 </resources>

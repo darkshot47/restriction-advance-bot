@@ -51,6 +51,14 @@ public final class Prefs {
     private static final String KEY_SLOTS = "account_slots";
     /** The TDLib folder of one slot; a new sign-in gets a new name. */
     private static final String KEY_SESSION = "session_dir";
+    /** The developer card, the same for every account on this phone. */
+    private static final String KEY_DEV_NAME = "dev_name";
+    private static final String KEY_DEV_BIO = "dev_bio";
+    private static final String KEY_DEV_AVATAR = "dev_avatar";
+    private static final String KEY_DEV_FILE = "dev_file";
+    /** The built-in key that last worked, so the next sign-in starts with it. */
+    private static final String KEY_GOOD_KEY = "good_key_id";
+    private static final String KEY_GOOD_HASH = "good_key_hash";
     public static final int MAX_SLOTS = 3;
 
     /** Send mode: keep the original file, or let Telegram show it inline. */
@@ -263,6 +271,51 @@ public final class Prefs {
         prefs(context).edit()
                 .putString(slotKey(context, KEY_NAME), name == null ? "" : name)
                 .putString(slotKey(context, KEY_USERNAME), username == null ? "" : username)
+                .apply();
+    }
+
+    // ------------------------------------------------------- the developer //
+
+    public static String developerName(Context context) {
+        return prefs(context).getString(KEY_DEV_NAME, "");
+    }
+
+    public static String developerBio(Context context) {
+        return prefs(context).getString(KEY_DEV_BIO, "");
+    }
+
+    public static String developerAvatar(Context context) {
+        return prefs(context).getString(KEY_DEV_AVATAR, "");
+    }
+
+    public static int developerAvatarFile(Context context) {
+        return prefs(context).getInt(KEY_DEV_FILE, 0);
+    }
+
+    public static void saveDeveloper(Context context, String name, String bio,
+                                     String avatarPath, int fileId) {
+        prefs(context).edit()
+                .putString(KEY_DEV_NAME, name == null ? "" : name)
+                .putString(KEY_DEV_BIO, bio == null ? "" : bio)
+                .putString(KEY_DEV_AVATAR, avatarPath == null ? "" : avatarPath)
+                .putInt(KEY_DEV_FILE, fileId)
+                .apply();
+    }
+
+    // ------------------------------------------------------ the built-in key //
+
+    public static int lastGoodKeyId(Context context) {
+        return prefs(context).getInt(KEY_GOOD_KEY, 0);
+    }
+
+    public static String lastGoodKeyHash(Context context) {
+        return prefs(context).getString(KEY_GOOD_HASH, "");
+    }
+
+    public static void saveLastGoodKey(Context context, int apiId, String apiHash) {
+        prefs(context).edit()
+                .putInt(KEY_GOOD_KEY, apiId)
+                .putString(KEY_GOOD_HASH, apiHash == null ? "" : apiHash)
                 .apply();
     }
 

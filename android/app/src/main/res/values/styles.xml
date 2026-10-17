@@ -66,20 +66,34 @@
         <item name="android:layout_marginBottom">12dp</item>
     </style>
 
+    <!--
+      The two buttons.  The same 16dp radius, the same 0.02 letter spacing and
+      the same weight, so a screen with one of each reads as one design instead
+      of two widgets: the main one solid blue, the second one an outline.
+    -->
     <style name="VmoreButton" parent="@android:style/Widget.Material.Button">
         <item name="android:background">@drawable/bg_button</item>
         <item name="android:textColor">@color/vmore_on_accent</item>
         <item name="android:textStyle">bold</item>
         <item name="android:textSize">15sp</item>
+        <item name="android:letterSpacing">0.02</item>
+        <item name="android:textAllCaps">false</item>
         <item name="android:minHeight">52dp</item>
+        <item name="android:paddingLeft">18dp</item>
+        <item name="android:paddingRight">18dp</item>
         <item name="android:stateListAnimator">@null</item>
     </style>
 
     <style name="VmoreButtonGhost" parent="@android:style/Widget.Material.Button">
         <item name="android:background">@drawable/bg_button_ghost</item>
         <item name="android:textColor">@color/vmore_blue</item>
+        <item name="android:textStyle">bold</item>
         <item name="android:textSize">14sp</item>
+        <item name="android:letterSpacing">0.02</item>
+        <item name="android:textAllCaps">false</item>
         <item name="android:minHeight">48dp</item>
+        <item name="android:paddingLeft">18dp</item>
+        <item name="android:paddingRight">18dp</item>
         <item name="android:stateListAnimator">@null</item>
     </style>
 
@@ -105,6 +119,8 @@
         <item name="android:background">@drawable/bg_chip</item>
         <item name="android:textColor">@color/vmore_text</item>
         <item name="android:textSize">13sp</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:letterSpacing">0.01</item>
         <item name="android:minWidth">0dp</item>
         <item name="android:minHeight">40dp</item>
         <item name="android:paddingLeft">14dp</item>
@@ -117,6 +133,8 @@
         <item name="android:textColor">@color/vmore_on_accent</item>
         <item name="android:textSize">13sp</item>
         <item name="android:textStyle">bold</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:letterSpacing">0.01</item>
         <item name="android:minWidth">0dp</item>
         <item name="android:minHeight">40dp</item>
         <item name="android:paddingLeft">14dp</item>
