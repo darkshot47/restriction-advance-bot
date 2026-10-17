@@ -520,10 +520,11 @@ The list below is the whole feature set, all of it on the phone, none of it need
     session folder of its own so a closing session can never break the next sign-in.
 16. **Home-screen widget and Quick Settings tile** — the widget shows the job, the stage and the queue
     size with pause/resume and open; the Quick Settings tile does the same from the panel.
-17. **Clear all data in one place** — Settings → App data → **Clear all app data** empties the app in a
-    single go: the queue stops, the Telegram session closes, the queue, history, downloaded files,
-    statistics and every setting are deleted, and the app returns to its first-run sign-in.  One
-    confirmation guards it; nothing is left half-cleared.
+17. **Delete the downloaded files only** — Settings → Downloaded data shows how much is on the phone
+    and **Delete downloaded files** removes those files in one go, after one confirmation.  Nothing else
+    is touched: the history stays (each record simply stops offering a file that is gone), and the
+    queue, every setting and the Telegram account stay signed in.  A file a waiting or running job
+    still needs is left alone, so a batch is never broken by the cleanup.
 
 ### When something goes wrong
 

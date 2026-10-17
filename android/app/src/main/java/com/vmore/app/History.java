@@ -168,6 +168,30 @@ public final class History {
         notifyListeners();
     }
 
+    /**
+     * Clears the "on the phone" mark of every record whose file is gone.
+     *
+     * Called after the downloaded files are deleted from Settings: the record
+     * itself stays, which is the point of the history — it says what happened,
+     * not what is still on disk.
+     */
+    public synchronized void forgetMissingFiles() {
+        boolean changed = false;
+        for (Entry entry : entries) {
+            if (!entry.local) {
+                continue;
+            }
+            if (entry.path == null || entry.path.isEmpty() || !new File(entry.path).exists()) {
+                entry.local = false;
+                changed = true;
+            }
+        }
+        if (changed) {
+            persist();
+            notifyListeners();
+        }
+    }
+
     public synchronized void remove(String id) {
         entries.removeIf(entry -> entry.id.equals(id));
         persist();

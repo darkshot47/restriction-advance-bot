@@ -7,7 +7,7 @@ package com.vmore.app;
 public final class Vmore {
 
     /** Reported to no server at all — only shown on the About screen. */
-    public static final String VERSION = "2.2.9";
+    public static final String VERSION = "2.2.10";
 
     /** The Telegram handle of whoever built the app — the only credit in it. */
     public static final String DEVELOPER = "XyrDeveloper";

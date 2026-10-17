@@ -183,28 +183,29 @@ public class SettingsActivity extends Activity {
                 getString(R.string.settings_stats_hint),
                 v -> startActivity(new Intent(this, StatsActivity.class)));
 
-        box.addView(Ui.section(this, getString(R.string.settings_app_data)));
+        box.addView(Ui.section(this, getString(R.string.settings_downloaded_data)));
         TextView clearHint = new TextView(this);
-        clearHint.setText(R.string.settings_clear_all_hint);
+        clearHint.setText(Format.size(LocalFiles.totalBytes(this)) + " "
+                + getString(R.string.settings_delete_downloads_hint));
         clearHint.setTextColor(getColor(R.color.vmore_text_faint));
         clearHint.setTextSize(12f);
         clearHint.setPadding(Ui.dp(this, 4), 0, Ui.dp(this, 4), Ui.dp(this, 10));
         box.addView(clearHint);
-        Button clearAll = new Button(this);
-        clearAll.setText(R.string.settings_clear_all);
-        clearAll.setTextColor(getColor(R.color.vmore_blue));
-        clearAll.setTextSize(14f);
-        clearAll.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
-        clearAll.setAllCaps(false);
-        clearAll.setBackgroundResource(R.drawable.bg_button_ghost);
-        clearAll.setStateListAnimator(null);
-        LinearLayout.LayoutParams clearParams = new LinearLayout.LayoutParams(
+        Button deleteFiles = new Button(this);
+        deleteFiles.setText(R.string.settings_delete_downloads);
+        deleteFiles.setTextColor(getColor(R.color.vmore_blue));
+        deleteFiles.setTextSize(14f);
+        deleteFiles.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        deleteFiles.setAllCaps(false);
+        deleteFiles.setBackgroundResource(R.drawable.bg_button_ghost);
+        deleteFiles.setStateListAnimator(null);
+        LinearLayout.LayoutParams deleteParams = new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, Ui.dp(this, 46));
-        clearParams.bottomMargin = Ui.dp(this, 12);
-        clearAll.setLayoutParams(clearParams);
-        clearAll.setOnClickListener(v -> confirmClearAll());
-        Anim.pressible(clearAll);
-        box.addView(clearAll);
+        deleteParams.bottomMargin = Ui.dp(this, 12);
+        deleteFiles.setLayoutParams(deleteParams);
+        deleteFiles.setOnClickListener(v -> confirmDeleteDownloads());
+        Anim.pressible(deleteFiles);
+        box.addView(deleteFiles);
 
         box.addView(Ui.section(this, getString(R.string.settings_privacy)));
         addSwitch(R.string.settings_lock, Prefs.lockEnabled(this), value -> {
@@ -507,24 +508,25 @@ public class SettingsActivity extends Activity {
     }
 
     /**
-     * The one destructive button.  It asks once, and then everything the app
-     * stored on this phone is gone: the queue, the history, the files, the
-     * settings and every Telegram session.
+     * The one destructive button, kept as small as the owner asked: it deletes
+     * the downloaded files, and only those.  The account, the queue, the
+     * history and every setting stay.
      */
-    private void confirmClearAll() {
-        Ui.confirm(this, getString(R.string.settings_clear_all),
-                getString(R.string.settings_clear_all_confirm),
-                getString(R.string.settings_clear_all_do), this::clearEverything);
+    private void confirmDeleteDownloads() {
+        Ui.confirm(this, getString(R.string.settings_delete_downloads),
+                getString(R.string.settings_delete_downloads_confirm),
+                getString(R.string.common_delete), this::deleteDownloads);
     }
 
-    private void clearEverything() {
-        Wipe.everything(this);
-        Ui.toast(this, getString(R.string.settings_clear_all_done));
-        Intent login = new Intent(this, LoginActivity.class);
-        //: The wiped app starts on the sign-in screen, not on the old home.
-        login.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
-        startActivity(login);
-        finish();
+    private void deleteDownloads() {
+        Cleanup.Freed freed = Cleanup.downloads(this);
+        if (freed.files == 0) {
+            Ui.toast(this, getString(R.string.settings_delete_downloads_none));
+        } else {
+            Ui.toast(this, getString(R.string.settings_delete_downloads_done) + " "
+                    + Format.size(freed.bytes));
+        }
+        render();
     }
 
     private void confirmSignOut() {
