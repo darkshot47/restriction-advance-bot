@@ -2880,6 +2880,7 @@ def admin_command_lines(commands) -> str:
 USER_MENU = (
     ("start", "🚀", "Start the bot and open the main menu"),
     ("help", "📖", "Learn how to use the bot"),
+    ("apk", "📲", "Download the Vmore app"),
     ("login", "🔐", "Log in to your Telegram account"),
     ("logout", "🚪", "Log out of your Telegram account"),
     ("status", "🔎", "Check your login status"),
@@ -4133,6 +4134,29 @@ def giveaway_end_invalid_text() -> str:
             f"time like `2026-11-01 20:00` (max {int(GIVEAWAY_MAX_DAYS)} days "
             "from now). Nothing was scheduled yet.")
 
+
+
+# --------------------------------------------------------------------------- #
+#  The Android app (/apk)
+# --------------------------------------------------------------------------- #
+
+def apk_text() -> str:
+    """The whole ``/apk`` screen.
+
+    The owner was clear about this: the app has no server, so the command must
+    not ask for a server address, a token or anything else.  It hands the file
+    over, explains the one-time install permission, and stops.
+    """
+    return (
+        "📲 **VMORE FOR ANDROID**\n\n"
+        "Vmore runs entirely on your own phone with your own Telegram account. "
+        "There is no server address and no token to enter. Nothing to configure.\n\n"
+        "1. Tap **Download Vmore** below and open the file.\n"
+        "2. Allow **Install unknown apps** once, for the app you downloaded it with.\n"
+        "3. Sign in with your own Telegram number and the code, or with your own "
+        "api_id and api_hash.\n\n"
+        "Every next build installs over the old one, so signing in again is not needed."
+    )
 
 
 # --------------------------------------------------------------------------- #

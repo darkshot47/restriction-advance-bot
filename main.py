@@ -31,7 +31,7 @@ import database
 import engines
 import telemetry
 import native_engine
-from config import (BOT_USERNAME, FREE_DAILY_LIMIT, FREE_PRIVATE_LINKS, WATERMARK, REFER_POINTS,
+from config import (BOT_USERNAME, VMORE_APK_URL, FREE_DAILY_LIMIT, FREE_PRIVATE_LINKS, WATERMARK, REFER_POINTS,
                     REDEEM_POINTS, REDEEM_PREMIUM_DAYS, REDEEM_PREMIUM_MONTHS, PAYMENT_CONTACT,
                     PREMIUM_PLANS, PREMIUM_BENEFITS, REDEEM_LIMITATION, RUPEE,
                     PREMIUM_SOURCE_MANUAL, PREMIUM_SOURCE_PUBLIC, PREMIUM_SOURCE_MODELS,
@@ -2548,7 +2548,7 @@ NEW_COMMAND_NAMES = [
     "setdump", "deldump", "dump", "post", "native",
     "giveaway", "participants", "endgiveaway", "giveawaystatus",
 ]
-COMMAND_NAMES = NEW_COMMAND_NAMES + ["start", "help", "login", "logout", "status", "cancel", "setcaption", "delcaption", "setthumb", "delthumb", "setprefix", "setsuffix", "mystats", "myinfo", "history", "settings", "language", "refer", "bookmark", "bookmarks", "favorite", "favorites", "share", "feedback", "invite", "premium", "stats", "users", "loggedusers", "activeusers", "newusers", "topusers", "broadcast", "botcast", "superbroadcast", "menu", "cmsg", "unpin", "ban", "unban", "banlist", "finduser", "userinfo", "addpremium", "removepremium", "premiumlist", "addadmin", "removeadmin", "adminlist", "setfsub", "fsublist", "delfsub", "fsublabel", "fsubcheck", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export", "adminhelp", "admin", "admins", "addqr", "delqr", "removeqr", "payments", "redeem", "setchat", "delchat", "models", "engine", "mychannels", "setengine"]
+COMMAND_NAMES = NEW_COMMAND_NAMES + ["start", "help", "apk", "login", "logout", "status", "cancel", "setcaption", "delcaption", "setthumb", "delthumb", "setprefix", "setsuffix", "mystats", "myinfo", "history", "settings", "language", "refer", "bookmark", "bookmarks", "favorite", "favorites", "share", "feedback", "invite", "premium", "stats", "users", "loggedusers", "activeusers", "newusers", "topusers", "broadcast", "botcast", "superbroadcast", "menu", "cmsg", "unpin", "ban", "unban", "banlist", "finduser", "userinfo", "addpremium", "removepremium", "premiumlist", "addadmin", "removeadmin", "adminlist", "setfsub", "fsublist", "delfsub", "fsublabel", "fsubcheck", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export", "adminhelp", "admin", "admins", "addqr", "delqr", "removeqr", "payments", "redeem", "setchat", "delchat", "models", "engine", "mychannels", "setengine"]
 ABORT_GROUP = -1
 #: Runs before everything else: the one-time clean-up of a leftover picker keyboard.
 SWEEP_GROUP = -3
@@ -2677,6 +2677,19 @@ async def start_handler(client, message):
 @bot.on_message(filters.command("help") & filters.private)
 async def help_handler(client, message):
     await show_help(message)
+
+
+@bot.on_message(filters.command("apk") & filters.private)
+async def apk_handler(client, message):
+    """``/apk`` hands the app over without asking a single question.
+
+    There is no server to point the app at any more, so the old deployment
+    question is gone on purpose: one message, one download button.
+    """
+    keyboard = ui.keyboard([[ui.button("⬇️ Download Vmore", url=VMORE_APK_URL,
+                                      style="primary")]])
+    await say(message, ui.apk_text(), reply_markup=keyboard,
+              disable_web_page_preview=True)
 
 
 @bot.on_message(filters.command("login") & filters.private)
@@ -8324,6 +8337,7 @@ COMMAND_HANDLERS = {
     "giveawaystatus": giveaway_status_handler,
     "start": start_handler,
     "help": help_handler,
+    "apk": apk_handler,
     "login": login_handler,
     "logout": logout_handler,
     "status": status_handler,

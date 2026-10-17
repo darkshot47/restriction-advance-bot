@@ -192,6 +192,22 @@ public final class Prefs {
     }
 
     /** Drops the credentials of one slot (used when switching accounts). */
+    /**
+     * Forgets every value this app stored: the accounts, the settings, the
+     * PIN, the statistics counters and the remembered developer card.
+     *
+     * Only the preferences are touched here; the files are removed by
+     * {@link Wipe}, which calls this last so a half-cleared app can never be
+     * seen.
+     */
+    static void clearAll(Context context) {
+        SharedPreferences store = context.getSharedPreferences(FILE, Context.MODE_PRIVATE);
+        store.edit().clear().commit();
+        //: A cleared file is a fresh install: the one-time migration runs again
+        //: and creates slot 1 exactly as it does on a new phone.
+        migrated = false;
+    }
+
     public static void clearSlot(Context context, int slot) {
         String suffix = "_s" + slot;
         prefs(context).edit()

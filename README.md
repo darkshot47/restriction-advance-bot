@@ -315,7 +315,7 @@ comes first, and every command name/alias is retained:
 
 | Who | Where | Commands |
 | --- | --- | --- |
-| everybody | all private chats | `/start` and the 31 user commands (e.g. `🚀 Start the bot and open the main menu`, `📖 Learn how to use the bot`, `🔐 Log in to your Telegram account` …) |
+| everybody | all private chats | `/start` and the 33 user commands (e.g. `🚀 Start the bot and open the main menu`, `📖 Learn how to use the bot`, `📲 Download the Vmore app`, `🔐 Log in to your Telegram account` …) |
 | admins | their own chat | the user commands plus the admin commands |
 | the owner | their own chat | every command |
 
@@ -469,6 +469,12 @@ APK.
   video, `Photo` sends a fast preview.
 * **Forward without download** — a job can be forwarded with TDLib, so zero bytes cross the phone.
 
+### Getting the app from the bot
+
+Send **/apk** in a private chat.  The bot hands over the current APK with one download button and asks
+nothing first: there is no server address and no token any more, because the app does not have one.  It
+also appears in the command menu as *Download the Vmore app*.
+
 ### Everything the app does
 
 The list below is the whole feature set, all of it on the phone, none of it needing a server.
@@ -514,6 +520,10 @@ The list below is the whole feature set, all of it on the phone, none of it need
     session folder of its own so a closing session can never break the next sign-in.
 16. **Home-screen widget and Quick Settings tile** — the widget shows the job, the stage and the queue
     size with pause/resume and open; the Quick Settings tile does the same from the panel.
+17. **Clear all data in one place** — Settings → App data → **Clear all app data** empties the app in a
+    single go: the queue stops, the Telegram session closes, the queue, history, downloaded files,
+    statistics and every setting are deleted, and the app returns to its first-run sign-in.  One
+    confirmation guards it; nothing is left half-cleared.
 
 ### When something goes wrong
 
@@ -547,10 +557,11 @@ The list below is the whole feature set, all of it on the phone, none of it need
   the real handle, the real bio and the real profile picture, cached on the phone so the card paints
   instantly, refreshed once per visit, and one tap from a **direct chat** (`tg://resolve`, the web
   fallback when Telegram is not installed).  Nothing about it is baked into the APK.
-* **The story ring**: the logo on the sign-in screen and the profile picture in the home header sit inside
-  the circle Telegram draws around a profile with a story.  The arc travels around the logo without ever
-  stopping; on the header it turns slowly enough that it is noticed only when looked at.  It stops by
-  itself when the screen leaves the window.
+* **The story ring**: the logo on the sign-in screen, the profile picture in the home header and the
+  developer's picture at the end of Settings all sit inside the circle Telegram draws around a profile
+  with a story.  The arc travels around the logo without ever stopping; on the header and on the
+  developer card it turns slowly enough that it is noticed only when looked at.  It stops by itself when
+  the screen leaves the window.
 * **Buttons**: one radius (16dp), one weight, one letter spacing and a real ripple under the finger for
   the solid blue button, the outline button and every filter chip — so a screen with both reads as one
   design.

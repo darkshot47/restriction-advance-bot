@@ -183,6 +183,29 @@ public class SettingsActivity extends Activity {
                 getString(R.string.settings_stats_hint),
                 v -> startActivity(new Intent(this, StatsActivity.class)));
 
+        box.addView(Ui.section(this, getString(R.string.settings_app_data)));
+        TextView clearHint = new TextView(this);
+        clearHint.setText(R.string.settings_clear_all_hint);
+        clearHint.setTextColor(getColor(R.color.vmore_text_faint));
+        clearHint.setTextSize(12f);
+        clearHint.setPadding(Ui.dp(this, 4), 0, Ui.dp(this, 4), Ui.dp(this, 10));
+        box.addView(clearHint);
+        Button clearAll = new Button(this);
+        clearAll.setText(R.string.settings_clear_all);
+        clearAll.setTextColor(getColor(R.color.vmore_blue));
+        clearAll.setTextSize(14f);
+        clearAll.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        clearAll.setAllCaps(false);
+        clearAll.setBackgroundResource(R.drawable.bg_button_ghost);
+        clearAll.setStateListAnimator(null);
+        LinearLayout.LayoutParams clearParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, Ui.dp(this, 46));
+        clearParams.bottomMargin = Ui.dp(this, 12);
+        clearAll.setLayoutParams(clearParams);
+        clearAll.setOnClickListener(v -> confirmClearAll());
+        Anim.pressible(clearAll);
+        box.addView(clearAll);
+
         box.addView(Ui.section(this, getString(R.string.settings_privacy)));
         addSwitch(R.string.settings_lock, Prefs.lockEnabled(this), value -> {
             if (value) {
@@ -483,6 +506,27 @@ public class SettingsActivity extends Activity {
                 .show();
     }
 
+    /**
+     * The one destructive button.  It asks once, and then everything the app
+     * stored on this phone is gone: the queue, the history, the files, the
+     * settings and every Telegram session.
+     */
+    private void confirmClearAll() {
+        Ui.confirm(this, getString(R.string.settings_clear_all),
+                getString(R.string.settings_clear_all_confirm),
+                getString(R.string.settings_clear_all_do), this::clearEverything);
+    }
+
+    private void clearEverything() {
+        Wipe.everything(this);
+        Ui.toast(this, getString(R.string.settings_clear_all_done));
+        Intent login = new Intent(this, LoginActivity.class);
+        //: The wiped app starts on the sign-in screen, not on the old home.
+        login.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+        startActivity(login);
+        finish();
+    }
+
     private void confirmSignOut() {
         Ui.confirm(this, getString(R.string.settings_sign_out),
                 getString(R.string.settings_sign_out_confirm),
@@ -525,6 +569,9 @@ public class SettingsActivity extends Activity {
         LinearLayout.LayoutParams boxParams = new LinearLayout.LayoutParams(boxSize, boxSize);
         avatarBox.setLayoutParams(boxParams);
         StoryRingView ring = new StoryRingView(this);
+        //: The owner asked for a ring that really moves here too, slowly
+        //: enough to stay quiet next to the name and the bio.
+        ring.setTurnSeconds(9f);
         avatarBox.addView(ring, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
