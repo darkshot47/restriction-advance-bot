@@ -467,8 +467,11 @@ public final class Tg {
         //: The state moves now, not when TDLib gets round to it.  Leaving it on
         //: READY meant the sign-in screen that opens after a sign-out asked the
         //: engine for its state, heard READY, and walked straight back into the
-        //: home screen: a sign-out that did not sign out.
-        state = STATE_PHONE;
+        //: home screen: a sign-out that did not sign out.  It moves to
+        //: "working", not to the number step: the number may only be asked for
+        //: once TDLib has really finished logging out, or the first tap is sent
+        //: into a session that is still closing.
+        state = STATE_PARAMETERS;
         lastDetail = "";
         passwordHint = "";
         sendOrError(new TdApi.LogOut());

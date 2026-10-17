@@ -10,8 +10,8 @@ android {
         applicationId "com.vmore.app"
         minSdk 26
         targetSdk 34
-        versionCode 9
-        versionName "2.2.5"
+        versionCode 10
+        versionName "2.2.6"
         resValue "string", "app_name", "Vmore"
         ndk {
             //: TDLib direct mode ships one libtdjni.so per ABI (built by

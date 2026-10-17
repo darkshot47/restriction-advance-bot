@@ -46,6 +46,16 @@ public class LoginActivity extends Activity implements Tg.Listener {
     private String lastDetail = "";
     /** One line the next paint of the keys step should carry. */
     private String note = "";
+    /**
+     * The pair that was in the boxes when the ready-made walk started.
+     *
+     * The walk stores each candidate as the app's credentials, so without this
+     * a user who pasted their own api_id and api_hash and then tried the keys
+     * got them silently overwritten — and the step that asks for them again
+     * was asking for something it had just thrown away.
+     */
+    private String ownApiId = "";
+    private String ownApiHash = "";
 
     //: The ready-made key attempt: which keys are left, how long the current
     //: one has had, and the countdown that gives up on it.
@@ -469,6 +479,8 @@ public class LoginActivity extends Activity implements Tg.Listener {
      * with the screen back in the user's hands.
      */
     private void tryReadyKeys() {
+        ownApiId = apiIdField.getText().toString().trim();
+        ownApiHash = apiHashField.getText().toString().trim();
         candidates.clear();
         candidates.addAll(ApiKeys.order());
         candidate = -1;
@@ -487,6 +499,8 @@ public class LoginActivity extends Activity implements Tg.Listener {
             //: Every key was refused: the user's own pair is the way forward.
             Tg.get(this).forgetCredentials();
             Tg.get(this).startOver();
+            //: Whatever the user had typed is still theirs.
+            restoreOwnPair();
             note = getString(R.string.login_keys_exhausted);
             showCredentials();
             Log.step(this, "key attempt: every ready-made key was refused");
@@ -517,11 +531,29 @@ public class LoginActivity extends Activity implements Tg.Listener {
         handler.removeCallbacks(keyWatch);
     }
 
+    /** Puts the pair that was in the boxes back into the stored credentials. */
+    private void restoreOwnPair() {
+        int id = 0;
+        try {
+            id = Integer.parseInt(ownApiId);
+        } catch (Exception ignored) {
+            id = 0;
+        }
+        if (id > 0 && ownApiHash != null && ownApiHash.length() >= 8) {
+            Prefs.saveCredentials(this, id, ownApiHash);
+        } else {
+            Prefs.clearCredentials(this);
+        }
+    }
+
     /** The way out of any step that is not the keys step. */
     private void secondary() {
         if (trying) {
-            //: Stop the hunt and hand the screen back for the user's own key.
+            //: Stop the hunt and hand the screen back for the user's own key,
+            //: with the pair they had typed put back where it was.
             stopTrying();
+            Tg.get(this).startOver();
+            restoreOwnPair();
             note = getString(R.string.login_attempt_stopped);
             showCredentials();
             return;
