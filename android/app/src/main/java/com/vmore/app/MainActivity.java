@@ -63,14 +63,18 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         public void run() {
             //: Still no session and none coming: the sign-in screen is the one
             //: that can explain why, so move there instead of pretending.
-            if (!Tg.get(this).isReady() && !Tg.get(this).starting()) {
+            //: Inside the Runnable `this` is the Runnable, not the screen:
+            //: the activity has to be named, or Tg.get asks it for a Context
+            //: and the build stops exactly here.
+            if (!Tg.get(MainActivity.this).isReady()
+                    && !Tg.get(MainActivity.this).starting()) {
                 goToSignIn();
                 return;
             }
-            if (!Tg.get(this).isReady()) {
+            if (!Tg.get(MainActivity.this).isReady()) {
                 //: Idempotent: rebuilds the session only when there is none, so
                 //: a session TDLib closed comes back without leaving the screen.
-                Tg.get(this).start(null);
+                Tg.get(MainActivity.this).start(null);
             }
             paintLive();
             if (!avatarPainted()) {
@@ -85,11 +89,10 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         super.onCreate(savedInstanceState);
         Skin.prepare(this);
         captureShareIntent();
-        if (!Tg.get(this).isReady()) {
-            startActivity(new Intent(this, LoginActivity.class));
-            finish();
-            return;
-        }
+        //: Not "is it ready right now": a fresh process is still rebuilding the
+        //: session, and this check ran before onResume could ask for one.  The
+        //: screen is built either way and onResume decides where to go, so a
+        //: cold start no longer flashes the sign-in screen on its way home.
         setContentView(R.layout.activity_main);
         askForNotifications();
 
