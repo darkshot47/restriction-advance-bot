@@ -63,6 +63,13 @@ final class Wipe {
 
         //: 5. The settings, accounts, PIN and statistics counters last.
         Prefs.clearAll(app);
+
+        //: 6. A brand-new session folder is reserved for the first account.
+        //: TDLib may still be closing while the folders above are deleted, and
+        //: a database it recreates a moment later must never be the one the
+        //: next sign-in opens: the new name points somewhere empty, and
+        //: Tg.tidySessions removes the old folder on the next launch.
+        Prefs.newSessionDir(app);
     }
 
     /** Empties a folder without ever following a path outside it. */
