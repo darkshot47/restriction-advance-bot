@@ -1023,11 +1023,36 @@ public final class Tg {
             current.send(new TdApi.GetMessageLinkInfo(canonical), object -> {
                 Media media = object instanceof TdApi.MessageLinkInfo
                         ? toMedia(((TdApi.MessageLinkInfo) object).message) : null;
-                if (media != null && media.fileId != 0) {
+                if (media != null && media.fileId != 0 && media.downloadable) {
                     withChatTitle(current, media, cb);
                     return;
                 }
-                byChat(current, link, cb);
+                //: The link reader sometimes answers with a message whose file
+                //: Telegram has not offered a fresh reference for; that is the
+                //: one a download then refuses.  Reading the same message
+                //: through the chat itself replaces it with the real thing, and
+                //: if the chat cannot be read the first answer is still worth
+                //: trying rather than failing here.
+                byChat(current, link, new Cb<Media>() {
+                    @Override
+                    public void ok(Media better) {
+                        Media chosen = better != null && better.fileId != 0 ? better : media;
+                        if (chosen == null || chosen.fileId == 0) {
+                            cb.fail("that link has no file in it");
+                            return;
+                        }
+                        withChatTitle(current, chosen, cb);
+                    }
+
+                    @Override
+                    public void fail(String message) {
+                        if (media != null && media.fileId != 0) {
+                            withChatTitle(current, media, cb);
+                        } else {
+                            cb.fail(message);
+                        }
+                    }
+                });
             });
             return;
         }
