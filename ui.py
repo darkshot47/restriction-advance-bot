@@ -273,12 +273,16 @@ upsell_keyboard = premium_upsell_keyboard
 
 
 def private_access_keyboard() -> InlineKeyboardMarkup:
-    """What a private link offers here: premium delivery in the DM.
+    """What a private link offers here: premium delivery in the DM, or the app.
 
     The phone app runs with the user's own Telegram session and needs nothing
-    from this deployment, so the premium upsell is the whole keyboard.
+    from this deployment, so **♾️ Unlimited Download (App)** sits under the
+    premium row: it asks no question, it only sends the file.
     """
-    return premium_upsell_keyboard()
+    rows = [list(row) for row in premium_upsell_keyboard().inline_keyboard]
+    rows.append([button("♾️ Unlimited Download (App)", callback_data="app:apk",
+                        style="success")])
+    return keyboard(rows)
 
 
 def daily_limit_keyboard() -> InlineKeyboardMarkup:
@@ -327,12 +331,12 @@ def start_keyboard(show_admin: bool = False) -> InlineKeyboardMarkup:
     """Main menu of /start — every button runs its action directly.
 
     Layout budget (mobile): 7 rows maximum, 2 buttons maximum per row.  The
-    last row is always the red **🧠 Models Architecture** button, so the
-    dual-engine explainer is one tap away from every menu.
+    last row is always the full-width **📱 Vmore App** button: unlimited
+    downloading is the one thing the bot cannot do inside a chat.
 
     User commands are listed first with emojis.  Admin tools are kept out of
-    the main menu — only the ``/admins`` panel link appears for admins, at the
-    very bottom, so regular users never see owner-only actions.
+    the main menu — only the ``/admins`` panel link appears for admins, so
+    regular users never see owner-only actions.
     """
     rows = [
         # ── User commands (everyone) ──────────────────────────────────────
@@ -366,6 +370,9 @@ def start_keyboard(show_admin: bool = False) -> InlineKeyboardMarkup:
          if show_admin else
          [button("🌐 Language", callback_data="cmd_language", style="primary"),
           button("📤 Share Bot", callback_data="cmd_share", style="success")]),
+        # ── The app, full width, last ─────────────────────────────────────
+        # The one thing the bot cannot do itself: unlimited downloading.
+        [app_menu_button()],
     ]
     return keyboard(rows)
 
@@ -454,12 +461,13 @@ def refer_keyboard(link: str) -> InlineKeyboardMarkup:
 
 
 def help_keyboard() -> InlineKeyboardMarkup:
-    """The help screen carries the red engines page."""
+    """The help screen carries the app page and the red engines page."""
     return keyboard([
         [button("🔐 Login", callback_data="cmd_login", style="success"),
          button("💎 Premium", callback_data="cmd_premium", style="success")],
         [button("⚙️ Settings", callback_data="cmd_settings", style="primary"),
          button("💬 Feedback", callback_data="cmd_feedback", style="primary")],
+        [app_menu_button()],
         [models_architecture_button()],
         [home_button()],
     ])
@@ -635,7 +643,8 @@ def help_text() -> str:
         "**🔐 Account:**\n"
         "Login / Logout / Status — use the buttons below\n\n"
         "**📥 Download:**\n"
-        "Send a link or a range: `t.me/ch/1-20`\n\n"
+        "Send a link or a range: `t.me/ch/1-20`\n"
+        f"/app — the {APP_NAME} page · /apk — the app file in this chat\n\n"
         "**🧠 Engines:**\n"
         "/models — Python Standard ⚙️ or C++ Turbo 🚀\n"
         "/mychannels — your dump-channel dashboard\n\n"
@@ -2834,6 +2843,9 @@ ADMIN_COMMAND_LABELS = {
     "giveaway": "Giveaway Control",
     "participants": "Giveaway Participants",
     "endgiveaway": "End Giveaway & Draw",
+    # The Android app: the page itself, and the APK the owner publishes.
+    "app": "Vmore App Page",
+    "apk": "Send or Publish the APK",
 }
 
 #: Emoji shown in front of each command in the panel text.
@@ -2851,6 +2863,7 @@ ADMIN_COMMAND_ICONS = {
     "redeem": "🎁", "pin": "📌", "pinned": "📍", "setdump": "🗄", "deldump": "🗑️",
     "dump": "📊", "post": "📰", "native": "⚡", "giveaway": "🎁",
     "participants": "👥", "endgiveaway": "🏆",
+    "app": "📱", "apk": "📦",
 }
 
 
@@ -2880,6 +2893,7 @@ def admin_command_lines(commands) -> str:
 USER_MENU = (
     ("start", "🚀", "Start the bot and open the main menu"),
     ("help", "📖", "Learn how to use the bot"),
+    ("app", "📱", "Open the Vmore App page"),
     ("apk", "📲", "Download the Vmore app"),
     ("login", "🔐", "Log in to your Telegram account"),
     ("logout", "🚪", "Log out of your Telegram account"),
@@ -4137,8 +4151,185 @@ def giveaway_end_invalid_text() -> str:
 
 
 # --------------------------------------------------------------------------- #
-#  The Android app (/apk)
+#  The Android app (/app, /apk)
+#
+#  Nothing in this section mentions a server address, an access token or a
+#  token-revoking wizard, on purpose: the app signs into Telegram on the phone
+#  itself, so there is no deployment step to explain.  The only link any of
+#  these screens uses is the release APK, and it always lives in a ``url=``
+#  button — never in body copy.
 # --------------------------------------------------------------------------- #
+
+#: The line that answers the question these screens used to provoke.
+APP_NO_SERVER_LINE = ("There is no server address and no token to enter — the app signs "
+                      "into Telegram on your phone, with your own account.")
+
+
+def app_download_button(label: str = "⬇️ Download App (Unlimited)") -> InlineKeyboardButton:
+    """The direct release link — the only URL on any app screen."""
+    from config import VMORE_APK_URL
+    return button(clamp_label(label), url=VMORE_APK_URL, style="success")
+
+
+def app_menu_button() -> InlineKeyboardButton:
+    """``📱 Vmore App`` — opens the app page (``/app``) from any menu."""
+    return button("📱 Vmore App", callback_data="cmd_app", style="primary")
+
+
+def app_send_button() -> InlineKeyboardButton:
+    """``📩 Send APK in chat`` — the bot posts the owner's own upload here."""
+    return button("📩 Send APK in chat", callback_data="app:apk", style="primary")
+
+
+def app_size_label(size) -> str:
+    """``"14.2 MB"`` for a byte count; an empty string when there is nothing to say."""
+    try:
+        value = float(size or 0)
+    except (TypeError, ValueError):
+        return ""
+    if value <= 0:
+        return ""
+    for unit, divisor in (("GB", 1024 ** 3), ("MB", 1024 ** 2), ("KB", 1024)):
+        if value >= divisor:
+            return f"{value / divisor:.1f} {unit}"
+    return f"{int(value)} B"
+
+
+def app_build_line(apk=None) -> str:
+    """What the user is about to install, straight from the owner's upload."""
+    if not apk:
+        return "📦 **Latest build:** the button below always serves the newest release."
+    version = str(apk.get("version") or "").strip()
+    parts = [f"{APP_NAME} {version}".strip()]
+    size = app_size_label(apk.get("size"))
+    if size:
+        parts.append(size)
+    stamp = getattr(apk.get("uploaded_at"), "strftime", None)
+    if callable(stamp):
+        try:
+            parts.append(stamp("published %d %b %Y"))
+        except Exception:  # pragma: no cover - a stored non-date
+            pass
+    return "📦 **Current build:** " + " • ".join(parts)
+
+
+def app_details_text(apk=None) -> str:
+    """The ``/app`` screen: what the app is, in the same words for every entry point."""
+    return (
+        "📱 **VMORE APP**\n\n"
+        f"{APP_NAME} saves restricted Telegram content on your own phone with your own "
+        "Telegram account. It is a plain Android app: install it, sign in once, and it "
+        "keeps working on its own.\n\n"
+        "♾️ **Unlimited downloads** — no daily count and no quota to run out of.\n"
+        "🔒 **Private and restricted links** — whatever your account can open, it saves.\n"
+        "📤 **Upload to any chat** — a channel, a group, or Saved Messages.\n\n"
+        "1. Tap **Download App** below and open the file.\n"
+        "2. Allow **Install unknown apps** once, for the app you downloaded it with.\n"
+        "3. Sign in with your number and the code Telegram sends.\n\n"
+        f"💡 {APP_NO_SERVER_LINE}\n\n"
+        f"{app_build_line(apk)}"
+    )
+
+
+def app_details_keyboard() -> InlineKeyboardMarkup:
+    """The app page: the file, the guide, the owner, home."""
+    from config import OWNER_CONTACT_URL, PAYMENT_CONTACT
+    return keyboard([
+        [app_download_button()],
+        [app_send_button()],
+        [button("❓ How to use?", callback_data="app:howto", style="primary"),
+         button(f"👤 @{PAYMENT_CONTACT}", url=OWNER_CONTACT_URL, style="primary")],
+        [home_button()],
+    ])
+
+
+def app_howto_text() -> str:
+    """The phone-side walkthrough: install, sign in, save — nothing else."""
+    return (
+        "❓ **HOW TO USE VMORE**\n\n"
+        "**1. Install**\n"
+        "Download the APK, open it, and allow *Install unknown apps* for that one app. "
+        "Every later build installs over this one, so you sign in once.\n\n"
+        "**2. Sign in**\n"
+        "Type your number with the country code, then the code Telegram sends. If your "
+        "account has a two-step password, type that too. The session lives on the phone.\n\n"
+        "**3. If Telegram asks for API credentials**\n"
+        "Open my.telegram.org, create an api_id and api_hash for your own account, and "
+        "type them on the first screen. That pair is Telegram's own key for your login — "
+        "it is not a server address and not a bot token, and it goes nowhere else.\n\n"
+        "**4. Save something**\n"
+        f"Paste one link, a list, or a range like `t.me/channel/10-25`, pick the chat that "
+        f"should receive the files, and tap Start. {APP_NAME} does the rest.\n\n"
+        f"💡 {APP_NO_SERVER_LINE}"
+    )
+
+
+def app_howto_keyboard() -> InlineKeyboardMarkup:
+    return keyboard([
+        [app_download_button()],
+        [app_send_button()],
+        [home_button()],
+    ])
+
+
+def app_sent_text(apk=None) -> str:
+    """The note that travels with the APK the bot drops into the chat."""
+    return (
+        "📦 **VMORE APK**\n\n"
+        f"The {APP_NAME} build the owner publishes here — install it once and open it.\n\n"
+        "1. Allow **Install unknown apps** for the app that downloaded it.\n"
+        "2. Sign in with your number and the code Telegram sends.\n"
+        "3. Paste your links and tap Start.\n\n"
+        f"{app_build_line(apk)}\n\n"
+        f"💡 {APP_NO_SERVER_LINE}"
+    )
+
+
+def app_sent_keyboard() -> InlineKeyboardMarkup:
+    """Attached to the document itself: the release link, the guide, home."""
+    return keyboard([
+        [app_download_button()],
+        [button("❓ How to use?", callback_data="app:howto", style="primary"), home_button()],
+    ])
+
+
+def app_missing_text() -> str:
+    """Owner-only: the **Send APK** button was pressed before anything was published.
+
+    Everyone else lands on :func:`apk_text` with the release link, so this screen
+    exists only to tell the owner the one step that is still missing.
+    """
+    return (
+        "📦 **NO APK PUBLISHED YET**\n\n"
+        f"No copy of {APP_NAME} is attached to this bot, so there is no file to send.\n\n"
+        f"👑 **Owner:** send /apk with the ``.apk`` document — or reply /apk to one — and it "
+        "becomes the file everybody is handed.\n"
+        "🔗 Until then the download button below serves the latest release.\n\n"
+        f"💡 {APP_NO_SERVER_LINE}"
+    )
+
+
+def app_saved_text(apk=None) -> str:
+    """Owner confirmation after a successful ``/apk`` upload."""
+    return (
+        "✅ **APK CONNECTED**\n\n"
+        f"{APP_NAME} is now the file the bot sends to anyone who asks for it.\n\n"
+        f"{app_build_line(apk)}\n\n"
+        "📩 Tap **Send APK in chat** to pull the same file back and check it.\n"
+        "🔁 Upload another one the same way to replace it.\n\n"
+        f"💡 {APP_NO_SERVER_LINE}"
+    )
+
+
+def app_private_link_text() -> str:
+    """The private-link pitch with the app offered next to premium."""
+    return (
+        f"{private_access_text()}\n\n"
+        f"♾️ **{APP_NAME} App** — the same links, unlimited, on your own phone. The app uses "
+        "your own Telegram session, so anything your account can already open it can save.\n\n"
+        f"💡 {APP_NO_SERVER_LINE}"
+    )
+
 
 def apk_text() -> str:
     """The whole ``/apk`` screen.

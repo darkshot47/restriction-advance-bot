@@ -988,29 +988,17 @@ class FakeDB:
     async def cleanup_app_activity(self, days=30):
         return 0
 
-    async def set_app_apk(self, *, file_id, file_name=None, size=None, base_url=None,
-                          version=None, apk_hash=None, uploaded_by=None):
+    async def set_app_apk(self, *, file_id, file_name=None, size=None, version=None,
+                          apk_hash=None, uploaded_by=None):
+        """The APK the owner published with /apk — a file id, nothing else."""
         row = {"file_id": file_id, "file_name": file_name, "size": size,
-               "base_url": base_url, "version": version, "apk_hash": apk_hash,
+               "version": version, "apk_hash": apk_hash,
                "uploaded_by": uploaded_by, "uploaded_at": _dt.datetime.now()}
-        config = self.__dict__.setdefault("app_config", {})
-        config["apk"] = row
-        config["base_url"] = base_url
-        config["version"] = version
+        self.__dict__.setdefault("app_config", {})["apk"] = row
         return row
 
     async def get_app_apk(self):
         return self.__dict__.setdefault("app_config", {}).get("apk")
-
-    async def get_app_config(self):
-        return dict(self.__dict__.setdefault("app_config", {}))
-
-    async def set_app_base_url(self, base_url, *, version=None):
-        config = self.__dict__.setdefault("app_config", {})
-        config["base_url"] = str(base_url).rstrip("/") if base_url else None
-        if version:
-            config["version"] = version
-        return config
 
     async def purge_created_bot_data(self, *, force=False):
         self.__dict__["createbot_purged"] = True
@@ -1058,6 +1046,8 @@ DB_NAMES = [
     # Auto-delete and the Telegram Stars ledger
     "cleanup_old_records", "add_stars_payment", "get_stars_payment", "complete_stars_payment",
     "get_stars_payments",
+    # The Android app the owner publishes with /apk (a file id, no server).
+    "set_app_apk", "get_app_apk",
     # The retired child-bot purge still runs on startup
     "purge_created_bot_data",
 ]
@@ -1247,6 +1237,8 @@ class FakeBot:
         self.declined: list = []
         self.joined_chats: list = []
         self.invoked: list = []
+        #: Every ``send_document`` as ``(chat_id, file_id, kwargs)`` — the APK hand-over.
+        self.documents: list = []
         #: Round 12 bookkeeping: mirror copies, deletes, pins and edits.
         self.copies: list = []
         self.deleted: list = []
@@ -1295,6 +1287,13 @@ class FakeBot:
 
     async def send_photo(self, chat_id, photo, **kwargs):
         self.sent.append({"chat_id": chat_id, "photo": photo, **kwargs})
+
+    async def send_document(self, chat_id, document, **kwargs):
+        """The APK hand-over: the owner's file id, straight into the chat."""
+        self.documents.append((chat_id, document, kwargs))
+        self.sent.append({"chat_id": chat_id, "document": document, **kwargs})
+        return FakeMessage(text="", user=FakeUser(chat_id if isinstance(chat_id, int) else 1001),
+                           message_id=len(self.sent) + 3000)
 
     async def get_chat_member(self, chat_id, user_id):
         if (int(chat_id), user_id) in self.not_members:

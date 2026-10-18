@@ -138,14 +138,20 @@
                 android:id="@+id/primaryButton"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="18dp"
+                android:layout_marginTop="20dp"
                 style="@style/VmoreButton"
                 android:text="@string/login_continue" />
 
+            <!--
+              Every step offers one action per button, so the buttons need
+              room of their own: the ghost style carries no margin, and
+              without these they sat flush against each other.
+            -->
             <Button
                 android:id="@+id/linkButton"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:layout_marginTop="13dp"
                 style="@style/VmoreButtonGhost"
                 android:text="@string/login_open_my_telegram" />
 
@@ -153,6 +159,7 @@
                 android:id="@+id/apiButton"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:layout_marginTop="13dp"
                 style="@style/VmoreButtonGhost"
                 android:text="@string/login_try_ready" />
 
@@ -160,6 +167,7 @@
                 android:id="@+id/backButton"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:layout_marginTop="13dp"
                 style="@style/VmoreButtonGhost"
                 android:text="@string/login_change_keys"
                 android:visibility="gone" />
