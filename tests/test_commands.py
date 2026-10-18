@@ -61,6 +61,33 @@ async def test_help_command(db):
 
 
 @pytest.mark.asyncio
+async def test_the_apk_command_hands_the_app_over_without_asking_for_a_server(db):
+    message = FakeMessage(text="/apk")
+    await main.apk_handler(None, message)
+
+    text = message.shown_text
+    assert sc("VMORE FOR ANDROID") in text
+    assert sc("no server address") in text
+    assert sc("api_id") in text
+
+    buttons = [b for row in message.shown_markup.inline_keyboard for b in row]
+    assert len(buttons) == 1, "one download button, nothing to fill in"
+    assert buttons[0].url == main.VMORE_APK_URL
+
+    #: One answer and no question: the old flow asked for a deployment URL.
+    assert len(message.replies) == 1
+    assert sc("server") in text
+    assert sc("download vmore") in text
+
+
+@pytest.mark.asyncio
+async def test_the_apk_command_is_in_the_users_menu(db):
+    names = {command.command for command in main.telegram_commands("user")}
+    assert "apk" in names
+    assert main.COMMAND_HANDLERS["apk"] is main.apk_handler
+
+
+@pytest.mark.asyncio
 async def test_settings_command(db):
     message = FakeMessage(text="/settings")
     await main.settings_handler(None, message)

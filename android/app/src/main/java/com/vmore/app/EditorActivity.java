@@ -3,504 +3,477 @@ package com.vmore.app;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
-import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.provider.MediaStore;
 import android.os.Bundle;
 import android.view.View;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageView;
+import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.SeekBar;
 import android.widget.TextView;
-import android.widget.Toast;
-
-import org.drinkless.tdlib.TdApi;
-import org.json.JSONObject;
 
 import java.io.File;
-import java.io.FileOutputStream;
-import java.io.InputStream;
 
 /**
- * The editing tools that appear after a private download: change the **caption**,
- * set a **thumbnail** and **trim the video from the front or the back** — then
- * upload the result, which goes out through the user's own Telegram session.
+ * Caption, thumbnail and trim — then the upload goes out with the user's own
+ * Telegram session, straight to the chosen chat.
  */
 public class EditorActivity extends Activity {
 
     private static final int PICK_IMAGE = 501;
+    private static final int PICK_CHAT = 502;
 
     private File file;
+    private File thumbnail;
     private EditText captionField;
     private TextView fileLabel;
     private TextView trimLabel;
+    private TextView destLabel;
     private SeekBar startBar;
     private SeekBar endBar;
-    private TextView trimSwitch;
     private ProgressBar progress;
-    private Button uploadButton;
-    private File thumbnail;
-    private long durationMs = 0;
-    private boolean trimming = false;
-    /** Where the file came from — lets an untouched file be re-sent server-side. */
-    private String link;
-    /** The download job id (the server may still hold the very same bytes). */
-    private String jobId;
-    /** Direct-mode origin of the file (chat/message), for the zero-byte forward. */
-    private long tdChatId;
-    private long tdMessageId;
+    private LinearLayout trimBox;
+    private ImageView thumbPreview;
+    private long durationMs;
+    private boolean trimming;
+    private long destChatId;
+    private String destTitle = "";
+    private String sendAs = Prefs.SEND_FILE;
+    private boolean muted;
+    private SeekBar frameBar;
+    private TextView frameLabel;
+    private Button muteChip;
+    private boolean hasVideo;
+    private boolean hasAudio;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        Skin.prepare(this);
         setContentView(R.layout.activity_editor);
+
         String path = getIntent().getStringExtra("path");
         file = path == null ? null : new File(path);
         if (file == null || !file.exists()) {
-            toast("Nothing to edit");
+            Ui.toast(this, getString(R.string.viewer_missing));
             finish();
             return;
         }
-        link = getIntent().getStringExtra("link");
-        jobId = getIntent().getStringExtra("jobId");
-        if (link == null || link.isEmpty()) {
-            //: Every download lands in the history with its link and its job id —
-            //: find this file's entry so an unedited upload costs no new bytes.
-            for (LocalStore.Item item : LocalStore.all(this)) {
-                if (item.path != null && item.path.equals(path)) {
-                    link = item.link;
-                    jobId = item.kind;
-                    break;
-                }
-            }
-        }
-        if (jobId != null && jobId.startsWith("td:")) {
-            //: Direct downloads remember the source message — the key to a
-            //: zero-byte re-send (ForwardMessages) from the phone itself.
-            String[] parts = jobId.split(":");
-            if (parts.length == 3) {
-                try {
-                    tdChatId = Long.parseLong(parts[1]);
-                    tdMessageId = Long.parseLong(parts[2]);
-                } catch (NumberFormatException ignored) {
-                }
-            }
-        }
+
         captionField = findViewById(R.id.captionField);
         fileLabel = findViewById(R.id.fileLabel);
         trimLabel = findViewById(R.id.trimLabel);
+        destLabel = findViewById(R.id.destLabel);
         startBar = findViewById(R.id.startBar);
         endBar = findViewById(R.id.endBar);
-        trimSwitch = findViewById(R.id.trimSwitch);
         progress = findViewById(R.id.uploadProgress);
-        uploadButton = findViewById(R.id.uploadButton);
+        trimBox = findViewById(R.id.trimBox);
+        thumbPreview = findViewById(R.id.thumbPreview);
 
-        fileLabel.setText(file.getName() + " • " + Notifications.human(file.length()));
-        captionField.setText(Prefs.lastCaption(this));
+        destChatId = Prefs.destChatId(this);
+        destTitle = Prefs.destTitle(this);
+        if (destChatId == 0L) {
+            destTitle = getString(R.string.home_no_destination);
+        }
+        destLabel.setText(destTitle);
 
-        findViewById(R.id.captionFromFile).setOnClickListener(v ->
-                captionField.setText(stripExtension(file.getName())));
+        sendAs = Prefs.sendAs(this);
+        findViewById(R.id.qualityFile).setOnClickListener(v -> setQuality(Prefs.SEND_FILE));
+        findViewById(R.id.qualityVideo).setOnClickListener(v -> setQuality(Prefs.SEND_VIDEO));
+        findViewById(R.id.qualityPhoto).setOnClickListener(v -> setQuality(Prefs.SEND_PHOTO));
 
+        String template = Prefs.captionTemplate(this);
+        captionField.setText(template == null || template.isEmpty()
+                ? Format.withoutExtension(file.getName()) : template);
+
+        fileLabel.setText(file.getName() + " • " + Format.size(file.length()));
+
+        findViewById(R.id.backButton).setOnClickListener(v -> finish());
+        findViewById(R.id.captionFromName).setOnClickListener(v ->
+                captionField.setText(Format.withoutExtension(file.getName())));
         findViewById(R.id.pickThumb).setOnClickListener(v -> pickThumbnail());
         findViewById(R.id.grabThumb).setOnClickListener(v -> grabThumbnail());
         findViewById(R.id.uploadButton).setOnClickListener(v -> upload());
-        findViewById(R.id.viewButton).setOnClickListener(v -> {
+        findViewById(R.id.previewButton).setOnClickListener(v -> {
             Intent intent = new Intent(this, ViewerActivity.class);
             intent.putExtra("path", file.getAbsolutePath());
             startActivity(intent);
         });
+        findViewById(R.id.destRow).setOnClickListener(v -> pickChat());
         findViewById(R.id.trimSwitch).setOnClickListener(v -> toggleTrim());
+        paintQuality();
+
+        for (View view : new View[]{findViewById(R.id.uploadButton),
+                findViewById(R.id.previewButton), findViewById(R.id.pickThumb),
+                findViewById(R.id.grabThumb)}) {
+            Anim.pressible(view);
+        }
+        Anim.pageIn(findViewById(R.id.editorHeader));
 
         long[] meta = MediaUtils.videoMeta(file);
         durationMs = meta[0];
-        boolean video = MediaUtils.isVideo(file) && MediaUtils.canTrim(file) && durationMs > 0;
-        findViewById(R.id.trimBox).setVisibility(video ? View.VISIBLE : View.GONE);
+        hasVideo = MediaUtils.isVideo(file) && MediaUtils.canTrim(file);
+        hasAudio = MediaUtils.isAudio(file) || (hasVideo && durationMs > 0);
+        boolean video = hasVideo && durationMs > 0;
+        trimBox.setVisibility(video ? View.VISIBLE : View.GONE);
         if (video) {
             setupTrim();
-        } else if (MediaUtils.isVideo(file)) {
-            findViewById(R.id.trimBox).setVisibility(View.VISIBLE);
-            findViewById(R.id.trimSwitch).setEnabled(false);
-            trimLabel.setText("Trimming works on MP4 videos (this file is "
-                    + MediaUtils.extension(file.getName()) + ").");
         }
-        String existing = Prefs.thumbnailPath(this);
-        if (existing != null && !existing.isEmpty() && new File(existing).exists()) {
-            thumbnail = new File(existing);
-            showThumbnail(thumbnail);
-        }
+        setupTools(video);
     }
 
-    // ------------------------------------------------------------- caption //
+    // -------------------------------------------------------------- quality //
 
-    private String stripExtension(String name) {
-        int dot = name.lastIndexOf('.');
-        return dot <= 0 ? name : name.substring(0, dot);
+    private void paintQuality() {
+        Button file = findViewById(R.id.qualityFile);
+        Button video = findViewById(R.id.qualityVideo);
+        Button photo = findViewById(R.id.qualityPhoto);
+        file.setBackgroundResource(Prefs.SEND_FILE.equals(sendAs)
+                ? R.drawable.bg_chip_active : R.drawable.bg_chip);
+        video.setBackgroundResource(Prefs.SEND_VIDEO.equals(sendAs)
+                ? R.drawable.bg_chip_active : R.drawable.bg_chip);
+        photo.setBackgroundResource(Prefs.SEND_PHOTO.equals(sendAs)
+                ? R.drawable.bg_chip_active : R.drawable.bg_chip);
     }
 
-    // ----------------------------------------------------------- thumbnail //
-
-    private void pickThumbnail() {
-        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
-        intent.setType("image/*");
-        startActivityForResult(intent, PICK_IMAGE);
+    private void setQuality(String value) {
+        sendAs = value;
+        //: The choice is remembered, so the next upload starts from it too.
+        Prefs.setSendAs(this, value);
+        paintQuality();
     }
 
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != PICK_IMAGE || resultCode != RESULT_OK || data == null
-                || data.getData() == null) {
-            return;
-        }
-        try (InputStream in = getContentResolver().openInputStream(data.getData())) {
-            if (in == null) {
-                toast("Could not read that image");
-                return;
-            }
-            File target = new File(getCacheDir(), "thumb_edit.jpg");
-            try (FileOutputStream out = new FileOutputStream(target)) {
-                byte[] buffer = new byte[64 * 1024];
-                int read;
-                while ((read = in.read(buffer)) > 0) {
-                    out.write(buffer, 0, read);
-                }
-            }
-            thumbnail = target;
-            Prefs.setThumbnailPath(this, target.getAbsolutePath());
-            showThumbnail(target);
-            toast("Thumbnail set");
-        } catch (Exception exc) {
-            toast("Could not read that image");
-        }
-    }
-
-    private void grabThumbnail() {
-        if (!MediaUtils.isVideo(file)) {
-            toast("Thumbnails come from videos");
-            return;
-        }
-        File target = new File(getCacheDir(), "thumb_frame.jpg");
-        File grabbed = MediaUtils.thumbnailFrom(file, target);
-        if (grabbed == null) {
-            toast("Could not grab a frame");
-            return;
-        }
-        thumbnail = grabbed;
-        Prefs.setThumbnailPath(this, grabbed.getAbsolutePath());
-        showThumbnail(grabbed);
-        toast("Thumbnail taken from the video");
-    }
-
-    private void showThumbnail(File source) {
-        ImageView view = findViewById(R.id.thumbPreview);
-        Bitmap bitmap = BitmapFactory.decodeFile(source.getAbsolutePath());
-        if (bitmap != null) {
-            view.setImageBitmap(bitmap);
-            view.setVisibility(View.VISIBLE);
-        }
-    }
-
-    // ---------------------------------------------------------------- trim //
+    // ----------------------------------------------------------------- trim //
 
     private void setupTrim() {
-        startBar.setMax(1000);
-        endBar.setMax(1000);
-        endBar.setProgress(1000);
+        startBar.setMax((int) durationMs);
+        endBar.setMax((int) durationMs);
+        endBar.setProgress((int) durationMs);
+        paintTrim();
         SeekBar.OnSeekBarChangeListener listener = new SeekBar.OnSeekBarChangeListener() {
             @Override
-            public void onProgressChanged(SeekBar seekBar, int value, boolean fromUser) {
-                if (startBar.getProgress() > endBar.getProgress() - 10) {
-                    if (seekBar == startBar) {
-                        endBar.setProgress(Math.min(1000, startBar.getProgress() + 10));
+            public void onProgressChanged(SeekBar bar, int value, boolean fromUser) {
+                if (startBar.getProgress() > endBar.getProgress() - 500) {
+                    if (bar == startBar) {
+                        startBar.setProgress(Math.max(0, endBar.getProgress() - 500));
                     } else {
-                        startBar.setProgress(Math.max(0, endBar.getProgress() - 10));
+                        endBar.setProgress(startBar.getProgress() + 500);
                     }
                 }
                 paintTrim();
             }
 
             @Override
-            public void onStartTrackingTouch(SeekBar seekBar) {
+            public void onStartTrackingTouch(SeekBar bar) {
             }
 
             @Override
-            public void onStopTrackingTouch(SeekBar seekBar) {
+            public void onStopTrackingTouch(SeekBar bar) {
             }
         };
         startBar.setOnSeekBarChangeListener(listener);
         endBar.setOnSeekBarChangeListener(listener);
-        paintTrim();
-        Prefs.setTrimEnabled(this, Prefs.trimEnabled(this));
-        paintTrimSwitch();
     }
 
     private void paintTrim() {
-        long start = startMs();
-        long end = endMs();
-        trimLabel.setText("Front cut: " + time(start) + " • Back cut: " + time(end)
-                + "  (new length " + time(end - start) + ")");
-    }
-
-    private void paintTrimSwitch() {
-        trimSwitch.setText(trimming ? "Trim: ON — tap to upload the full video"
-                : "Trim: OFF — tap to cut it here");
-        startBar.setEnabled(trimming);
-        endBar.setEnabled(trimming);
+        trimLabel.setText(Format.duration(startBar.getProgress()) + " - "
+                + Format.duration(endBar.getProgress()) + " • "
+                + getString(trimming ? R.string.editor_trim_on : R.string.editor_trim_off));
     }
 
     private void toggleTrim() {
+        if (durationMs <= 0) {
+            return;
+        }
         trimming = !trimming;
-        Prefs.setTrimEnabled(this, trimming);
-        paintTrimSwitch();
+        paintTrim();
     }
 
-    private long startMs() {
-        return durationMs * startBar.getProgress() / 1000;
+    // ---------------------------------------------------------------- tools //
+
+    private void setupTools(boolean video) {
+        muteChip = findViewById(R.id.muteChip);
+        Button audioChip = findViewById(R.id.audioChip);
+        frameBar = findViewById(R.id.frameBar);
+        frameLabel = findViewById(R.id.frameLabel);
+        Button frameButton = findViewById(R.id.frameButton);
+        TextView hint = findViewById(R.id.toolsHint);
+
+        hint.setText(R.string.editor_tools_hint);
+        muteChip.setEnabled(hasVideo && hasAudio);
+        audioChip.setEnabled(hasAudio);
+        frameBar.setEnabled(video);
+        frameButton.setEnabled(video);
+        frameBar.setVisibility(video ? View.VISIBLE : View.GONE);
+        frameLabel.setVisibility(video ? View.VISIBLE : View.GONE);
+        frameButton.setVisibility(video ? View.VISIBLE : View.GONE);
+        frameLabel.setText(R.string.editor_frame_hint);
+
+        muteChip.setOnClickListener(v -> {
+            muted = !muted;
+            paintTools();
+        });
+        audioChip.setOnClickListener(v -> extractAudio());
+        frameButton.setOnClickListener(v -> useFrame());
+        frameBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar bar, int value, boolean fromUser) {
+                if (durationMs > 0) {
+                    frameLabel.setText(Format.duration(durationMs * value / 100));
+                }
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar bar) {
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar bar) {
+            }
+        });
+        if (durationMs > 0) {
+            frameBar.setProgress(10);
+        }
+        paintTools();
+        Anim.pressible(muteChip);
+        Anim.pressible(audioChip);
+        Anim.pressible(frameButton);
     }
 
-    private long endMs() {
-        long end = durationMs * endBar.getProgress() / 1000;
-        return end <= 0 ? durationMs : end;
+    private void paintTools() {
+        muteChip.setText(muted ? R.string.editor_mute_on : R.string.editor_mute);
+        muteChip.setBackgroundResource(muted ? R.drawable.bg_chip_active : R.drawable.bg_chip);
     }
 
-    private String time(long ms) {
-        long total = ms / 1000;
-        return String.format(java.util.Locale.US, "%02d:%02d", total / 60, total % 60);
+    /** Takes the frame the slider points at and uses it as the cover. */
+    private void useFrame() {
+        if (!hasVideo || durationMs <= 0) {
+            Ui.toast(this, getString(R.string.editor_need_video));
+            return;
+        }
+        long when = durationMs * frameBar.getProgress() / 100;
+        File target = new File(getCacheDir(), "cover.jpg");
+        File result = MediaUtils.frameAt(file, when, target);
+        if (result == null) {
+            Ui.toast(this, getString(R.string.editor_thumb_failed));
+            return;
+        }
+        thumbnail = result;
+        thumbPreview.setImageBitmap(BitmapFactory.decodeFile(result.getAbsolutePath()));
+        thumbPreview.setVisibility(View.VISIBLE);
+        Ui.toast(this, getString(R.string.editor_frame_used) + " " + Format.duration(when));
     }
 
-    // -------------------------------------------------------------- upload //
+    /** Writes the sound of this file next to it, as a playable .m4a. */
+    private void extractAudio() {
+        if (!hasAudio) {
+            Ui.toast(this, getString(R.string.editor_no_audio));
+            return;
+        }
+        File target = LocalFiles.targetFile(this,
+                Format.withoutExtension(file.getName()) + ".m4a");
+        Ui.toast(this, getString(R.string.editor_working));
+        new Thread(() -> {
+            File result = null;
+            try {
+                result = MediaUtils.keepTracks(file, target, "audio/");
+            } catch (Exception error) {
+                result = null;
+            }
+            final File written = result;
+            runOnUiThread(() -> {
+                if (written == null) {
+                    Ui.toast(this, getString(R.string.editor_audio_failed));
+                    return;
+                }
+                History.get(this).record(written.getName(), "audio", written.length(), 0L, "",
+                        History.STATUS_DONE, "", "", written.getAbsolutePath());
+                Intent intent = new Intent(this, ViewerActivity.class);
+                intent.putExtra("path", written.getAbsolutePath());
+                startActivity(intent);
+            });
+        }, "vmore-editor-audio").start();
+    }
+
+    // ------------------------------------------------------------ thumbnail //
+
+    private void pickThumbnail() {
+        //: Picking straight from the gallery keeps the chooser to images; no
+        //: mime pattern is needed for that.
+        Intent intent = new Intent(Intent.ACTION_PICK,
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI);
+        startActivityForResult(intent, PICK_IMAGE);
+    }
+
+    private void grabThumbnail() {
+        if (!MediaUtils.isVideo(file)) {
+            Ui.toast(this, getString(R.string.editor_need_video));
+            return;
+        }
+        File target = new File(getCacheDir(), "cover.jpg");
+        File result = MediaUtils.thumbnailFor(file, target);
+        if (result == null) {
+            Ui.toast(this, getString(R.string.editor_thumb_failed));
+            return;
+        }
+        thumbnail = result;
+        thumbPreview.setImageBitmap(BitmapFactory.decodeFile(result.getAbsolutePath()));
+        thumbPreview.setVisibility(View.VISIBLE);
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == PICK_CHAT && resultCode == RESULT_OK && data != null) {
+            destChatId = data.getLongExtra("chat_id", destChatId);
+            destTitle = data.getStringExtra("chat_title");
+            if (data.getBooleanExtra("remember", false) && destChatId != 0L) {
+                Prefs.saveDestination(this, destChatId, destTitle);
+            }
+            destLabel.setText(destTitle == null || destTitle.isEmpty()
+                    ? getString(R.string.home_no_destination) : destTitle);
+            return;
+        }
+        if (requestCode == PICK_IMAGE && resultCode == RESULT_OK && data != null
+                && data.getData() != null) {
+            try {
+                File copy = new File(getCacheDir(), "picked_image");
+                java.io.InputStream in = getContentResolver().openInputStream(data.getData());
+                try (java.io.OutputStream out = new java.io.FileOutputStream(copy)) {
+                    byte[] buffer = new byte[64 * 1024];
+                    int read;
+                    while (in != null && (read = in.read(buffer)) > 0) {
+                        out.write(buffer, 0, read);
+                    }
+                }
+                File target = MediaUtils.thumbnailOf(copy, new File(getCacheDir(), "cover.jpg"));
+                if (target == null) {
+                    Ui.toast(this, getString(R.string.editor_image_failed));
+                    return;
+                }
+                thumbnail = target;
+                thumbPreview.setImageBitmap(BitmapFactory.decodeFile(target.getAbsolutePath()));
+                thumbPreview.setVisibility(View.VISIBLE);
+            } catch (Exception error) {
+                Ui.toast(this, getString(R.string.editor_image_failed));
+            }
+        }
+    }
+
+    // --------------------------------------------------------------- upload //
+
+    private void pickChat() {
+        Intent intent = new Intent(this, ChatPickerActivity.class);
+        intent.putExtra("mode", "destination");
+        startActivityForResult(intent, PICK_CHAT);
+    }
 
     private void upload() {
-        uploadButton.setEnabled(false);
+        if (destChatId == 0L) {
+            Ui.toast(this, getString(R.string.home_need_destination));
+            pickChat();
+            return;
+        }
         progress.setVisibility(View.VISIBLE);
-        progress.setIndeterminate(true);
-
+        final String caption = captionField.getText().toString();
+        final long[] meta = MediaUtils.videoMeta(file);
+        final String kind = mediaKind();
         new Thread(() -> {
-            File toUpload = file;
-            String note = null;
-            try {
-                if (trimming && MediaUtils.canTrim(file)) {
-                    File trimmed = new File(getCacheDir(), "trimmed_"
-                            + System.currentTimeMillis() + ".mp4");
-                    MediaUtils.trim(file, trimmed, startMs(), endMs());
-                    toUpload = trimmed;
-                    note = "trimmed " + time(startMs()) + " → " + time(endMs());
+            File toSend = file;
+            if (muted && hasVideo) {
+                File silent = new File(getCacheDir(),
+                        Format.withoutExtension(file.getName()) + "_silent.mp4");
+                try {
+                    File stripped = MediaUtils.keepTracks(file, silent, "video/");
+                    if (stripped != null) {
+                        toSend = stripped;
+                    }
+                } catch (Exception error) {
+                    runOnUiThread(() -> Ui.toast(this,
+                            getString(R.string.editor_mute_failed)));
                 }
-            } catch (Exception exc) {
-                final File original = file;
-                runOnUiThread(() -> {
-                    progress.setVisibility(View.GONE);
-                    uploadButton.setEnabled(true);
-                    toast("Trim failed (" + exc.getMessage() + ") — uploading the original");
-                });
-                toUpload = file;
-                note = null;
             }
-            doUpload(toUpload, note, toUpload != file);
-        }).start();
-    }
-
-    private void doUpload(File toUpload, String note, boolean bytesChanged) {
-        String caption = captionField.getText().toString();
-        String kind = uploadKind(toUpload);
-        long[] meta = MediaUtils.isVideo(toUpload) || MediaUtils.isAudio(toUpload)
-                ? MediaUtils.videoMeta(toUpload) : new long[]{0, 0, 0};
-        if (TdDirect.get(this).isReady()) {
-            //: Direct mode wins whenever it can run: the bytes ride phone ↔
-            //: Telegram straight, so the host's bill is literally zero.
-            directUpload(toUpload, caption, kind, meta, bytesChanged);
-            return;
-        }
-        if (!bytesChanged && link != null && !link.isEmpty() && commitUpload(caption, kind)) {
-            return;
-        }
-        byteUpload(toUpload, note, caption, kind, meta);
-    }
-
-    /** Direct-mode upload: zero-byte forward when untouched, otherwise the
-     *  phone ships the (new) bytes itself.  The server never sees a byte. */
-    private void directUpload(final File toUpload, final String caption, final String kind,
-                              final long[] meta, boolean bytesChanged) {
-        runOnUiThread(() -> {
-            progress.setIndeterminate(true);
-            fileLabel.setText("⏳ Sending straight from this phone…");
-        });
-        TdDirect direct = TdDirect.get(this);
-        if (!bytesChanged && tdMessageId != 0 && (caption == null || caption.trim().isEmpty())) {
-            direct.forwardToBot(tdChatId, tdMessageId, new TdDirect.ResultCallback() {
-                @Override
-                public void onOk(TdApi.Object object) {
-                    directUploadDone(true);
-                }
-
-                @Override
-                public void onError(String message) {
-                    runOnUiThread(() -> toast("Zero-byte re-send refused — uploading directly…"));
-                    directSendBytes(toUpload, caption, kind, meta);
-                }
-            });
-            return;
-        }
-        directSendBytes(toUpload, caption, kind, meta);
-    }
-
-    private void directSendBytes(File toUpload, String caption, String kind, long[] meta) {
-        final long length = toUpload.length();
-        TdDirect.get(this).sendMediaToBot(toUpload.getAbsolutePath(), kind, caption,
-                (int) (meta[0] / 1000), (int) meta[1], (int) meta[2],
-                (done, total) -> runOnUiThread(() -> {
-                    long shown = total > 0 ? total : length;
-                    progress.setIndeterminate(false);
-                    progress.setMax(1000);
-                    progress.setProgress(shown > 0
-                            ? (int) Math.min(1000, done * 1000 / shown) : 0);
-                    fileLabel.setText("⬆️ Uploading " + Notifications.human(done)
-                            + (shown > 0 ? " / " + Notifications.human(shown) : ""));
-                }),
-                new TdDirect.ResultCallback() {
-                    @Override
-                    public void onOk(TdApi.Object object) {
-                        directUploadDone(false);
-                    }
-
-                    @Override
-                    public void onError(String message) {
-                        runOnUiThread(() -> {
-                            progress.setVisibility(View.GONE);
-                            uploadButton.setEnabled(true);
-                            toast("Upload failed: " + message);
-                        });
-                    }
-                });
-    }
-
-    private void directUploadDone(boolean zeroBytes) {
-        Prefs.setLastCaption(this, captionField.getText().toString());
-        runOnUiThread(() -> {
-            progress.setVisibility(View.GONE);
-            uploadButton.setEnabled(true);
-            fileLabel.setText(zeroBytes
-                    ? "✅ Sent — zero new bytes spent"
-                    : "✅ Uploaded from this phone");
-            new AlertDialog.Builder(this)
-                    .setTitle("Uploaded")
-                    .setMessage(zeroBytes
-                            ? "Telegram moved your file on its own servers — neither your "
-                              + "phone nor the host moved the bytes again."
-                            : "Your phone sent the file straight to Telegram — the server "
-                              + "spent nothing at all on it.")
-                    .setPositiveButton("OK", null)
-                    .show();
-        });
-    }
-
-    /**
-     * The zero-transfer commit: the phone ships only the caption (and maybe a
-     * thumbnail); the server re-sends the file it already has — by Telegram's
-     * own copy mechanics when possible, so neither phone nor host moves the
-     * media bytes again.
-     *
-     * @return true when the re-send was handled (success or a login demand);
-     *         false when the server needs the real bytes after all.
-     */
-    private boolean commitUpload(String caption, String kind) {
-        runOnUiThread(() -> fileLabel.setText("⏳ Asking Telegram to re-send it…"));
-        JSONObject body = null;
-        try {
-            body = Api.uploadMeta(Prefs.baseUrl(this), Prefs.token(this), link, jobId,
-                    caption, thumbnail, kind, file.getName());
-        } catch (Exception ignored) {
-        }
-        if (body != null && body.optBoolean("ok", false)) {
-            Prefs.setLastCaption(this, caption);
-            final String via = body.optString("via", "");
-            runOnUiThread(() -> {
-                progress.setVisibility(View.GONE);
-                uploadButton.setEnabled(true);
-                fileLabel.setText("✅ Uploaded — no new bytes spent");
-                new AlertDialog.Builder(this)
-                        .setTitle("Uploaded")
-                        .setMessage("copy".equals(via) || "reference".equals(via)
-                                ? "Telegram re-sent the file on its own servers — "
-                                  + "neither your phone nor the host moved the bytes again."
-                                : "The server re-sent its own copy through your Telegram "
-                                  + "account — your phone uploaded nothing.")
-                        .setPositiveButton("OK", null)
-                        .show();
-            });
-            return true;
-        }
-        if (body != null && body.optBoolean("needs_login", false)) {
-            //: The byte upload would hit the same missing session — say it now.
-            final String error = body.optString("error", "log in again");
-            runOnUiThread(() -> {
-                progress.setVisibility(View.GONE);
-                uploadButton.setEnabled(true);
-                toast(error);
-            });
-            return true;
-        }
-        runOnUiThread(() -> toast("The server couldn't re-send it — sending the file itself…"));
-        return false;
-    }
-
-    private void byteUpload(File toUpload, String note, String caption, String kind,
-                            long[] meta) {
-        try {
-            JSONObject body = Api.upload(Prefs.baseUrl(this), Prefs.token(this), toUpload,
-                    caption, thumbnail, kind, toUpload.getName(), meta[0], (int) meta[1],
-                    (int) meta[2], (sent, total) -> {
-                        runOnUiThread(() -> {
-                            progress.setIndeterminate(total <= 0);
-                            progress.setMax(1000);
-                            progress.setProgress(total > 0
-                                    ? (int) Math.min(1000, sent * 1000 / total) : 0);
-                            fileLabel.setText("⬆️ Uploading " + Notifications.human(sent)
-                                    + (total > 0 ? " / " + Notifications.human(total) : ""));
-                        });
-                        return true;
+            if (trimming && durationMs > 0) {
+                File target = new File(getCacheDir(),
+                        Format.withoutExtension(file.getName()) + "_trim"
+                                + file.getName().substring(
+                                Format.withoutExtension(file.getName()).length()));
+                try {
+                    toSend = MediaUtils.trim(toSend, target, startBar.getProgress(),
+                            endBar.getProgress());
+                } catch (Exception error) {
+                    runOnUiThread(() -> {
+                        progress.setVisibility(View.GONE);
+                        Ui.toast(this, getString(R.string.editor_trim_failed)
+                                + " " + error.getMessage());
                     });
-            Prefs.setLastCaption(this, caption);
-            runOnUiThread(() -> {
-                progress.setVisibility(View.GONE);
-                uploadButton.setEnabled(true);
-                boolean ok = body.optBoolean("ok", false);
-                fileLabel.setText(ok
-                        ? "✅ Uploaded" + (note == null ? "" : " (" + note + ")")
-                        : "⚠️ " + body.optString("error", "upload failed"));
-                new AlertDialog.Builder(this)
-                        .setTitle(ok ? "Uploaded" : "Upload failed")
-                        .setMessage(ok
-                                ? "Your file went back through your own Telegram account — "
-                                  + "open the chat with the bot to see it."
-                                : body.optString("error", "unknown error"))
-                        .setPositiveButton("OK", null)
-                        .show();
-            });
-        } catch (Exception exc) {
-            runOnUiThread(() -> {
-                progress.setVisibility(View.GONE);
-                uploadButton.setEnabled(true);
-                toast("Upload failed: " + exc.getMessage());
-            });
-        }
+                    return;
+                }
+            }
+            final File sending = toSend;
+            final String cover = thumbnail == null || !thumbnail.exists()
+                    ? null : thumbnail.getAbsolutePath();
+            runOnUiThread(() -> Tg.get(this).sendMedia(destChatId, sending.getAbsolutePath(),
+                    kind, caption, meta[0] / 1000, (int) meta[1], (int) meta[2],
+                    sendAs, cover, (done, total) -> runOnUiThread(() -> {
+                        progress.setMax(100);
+                        progress.setProgress(Format.percent(done, total));
+                    }), new Tg.Cb<Long>() {
+                @Override
+                public void ok(Long value) {
+                    finishUpload(sending, caption);
+                }
+
+                @Override
+                public void fail(String message) {
+                    progress.setVisibility(View.GONE);
+                    History.get(EditorActivity.this).record(file.getName(), kind, file.length(),
+                            destChatId, destTitle, History.STATUS_FAILED, "", message, file.getAbsolutePath());
+                    Ui.toast(EditorActivity.this, message);
+                }
+            }));
+        }, "vmore-editor-upload").start();
     }
 
-    private String uploadKind(File target) {
-        if (MediaUtils.isVideo(target)) {
+    private String mediaKind() {
+        if (muted && hasVideo) {
             return "video";
         }
-        if (MediaUtils.isImage(target)) {
+        if (MediaUtils.isVideo(file)) {
+            return "video";
+        }
+        if (MediaUtils.isImage(file)) {
             return "photo";
         }
-        if (MediaUtils.isAudio(target)) {
+        if (MediaUtils.isAudio(file)) {
             return "audio";
         }
         return "document";
     }
 
-    private void toast(String text) {
-        Toast.makeText(this, text, Toast.LENGTH_SHORT).show();
+    private void finishUpload(File sent, String caption) {
+        progress.setVisibility(View.GONE);
+        History history = History.get(this);
+        boolean delete = Prefs.autoDeleteLocal(this);
+        history.record(file.getName(), mediaKind(), sent.length(), destChatId, destTitle,
+                History.STATUS_UPLOADED, "", "", delete ? "" : sent.getAbsolutePath());
+        if (delete && sent.getAbsolutePath().equals(file.getAbsolutePath())) {
+            LocalFiles.delete(file.getAbsolutePath());
+            history.markLocalGone(file.getAbsolutePath());
+        }
+        Ui.toast(this, getString(R.string.editor_uploaded) + " " + destTitle);
+        finish();
     }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        if (Lock.guard(this)) {
+            return;
+        }
+    }
+
 }

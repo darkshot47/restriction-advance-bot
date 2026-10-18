@@ -982,7 +982,7 @@ def test_start_badge_strings_match_the_specification():
 
 
 def test_models_architecture_button_is_red_and_lives_in_the_help_footer():
-    """The red engines page moved one tap deeper: /start now ends with the app."""
+    """The red engines page lives one tap deeper, inside the help menu."""
     button = ui.models_architecture_button()
     assert button.callback_data == "models_info"
     assert button.text == sc("🧠 Models Architecture")
@@ -990,13 +990,11 @@ def test_models_architecture_button_is_red_and_lives_in_the_help_footer():
         assert button.style == ui.BUTTON_DANGER, "the footer button must be RED"
 
     rows = ui.start_keyboard().inline_keyboard
-    assert len(rows) == 7, rows
-    assert rows[-1] == [ui.app_footer_button()], "the app owns the last row of /start"
-    assert rows[-1][0].callback_data == "cmd_app"
+    assert len(rows) == 6, rows
 
     help_rows = ui.help_keyboard().inline_keyboard
     assert help_rows[-2] == [button], "the red button closes the help menu"
-    assert len(help_rows) <= 7
+    assert len(help_rows) <= 6
 
 
 def test_start_text_carries_the_engine_badge():

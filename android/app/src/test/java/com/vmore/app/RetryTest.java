@@ -1,0 +1,91 @@
+package com.vmore.app;
+
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
+
+import org.junit.Test;
+
+/**
+ * The rule that decides whether a failed step gets another try.
+ *
+ * This is the rule the owner felt on the phone: a job that gave up after one
+ * hiccup.  Both halves are pinned here — a temporary problem must be retried,
+ * and a permanent one must not.
+ */
+public class RetryTest {
+
+    @Test
+    public void temporaryTroubleIsWorthAnotherAttempt() {
+        assertFalse(Retry.fatal("Slow down: 34"));
+        assertTrue(Retry.recoverable("Too Many Requests: retry after 30"));
+        assertTrue(Retry.recoverable("FLOOD_WAIT_34"));
+        assertTrue(Retry.recoverable("File reference has expired"));
+        assertTrue(Retry.recoverable("Connection closed"));
+        assertTrue(Retry.recoverable("Connection reset by peer"));
+        assertTrue(Retry.recoverable("Request aborted"));
+        assertTrue(Retry.recoverable("Telegram did not answer in time"));
+        assertTrue(Retry.recoverable("Internal Server Error"));
+        assertTrue(Retry.recoverable("the download stopped half way"));
+        assertTrue(Retry.recoverable("the upload did not finish"));
+        assertTrue(Retry.recoverable("the file did not arrive on the phone"));
+    }
+
+    @Test
+    public void permanentRefusalsAreNeverRetried() {
+        assertTrue(Retry.fatal("not enough space on this phone: this file needs 2.0 GB"));
+        assertTrue(Retry.fatal("That message does not exist any more"));
+        assertTrue(Retry.fatal("message is protected and cannot be saved"));
+        assertTrue(Retry.fatal("not enough rights to read this chat"));
+        assertTrue(Retry.fatal("no destination chat was chosen"));
+        assertTrue(Retry.fatal("open the app and sign in with your Telegram account"));
+        assertTrue(Retry.fatal("Telegram could not find @nosuchchannel"));
+        assertTrue(Retry.fatal("that link does not name a chat"));
+        assertTrue(Retry.fatal("that invite link cannot be used to read the message"));
+    }
+
+    @Test
+    public void theRefusalThatAnUploadCanAnswerIsRecognised() {
+        //: Telegram's answer when a message points at a protected file.  The
+        //: upload answers it by sending the bytes as a new file, so it must be
+        //: recognised even though the words say "forwarded".
+        assertTrue(Retry.forwardBlocked(
+                "Message has protected content and can't be forwarded"));
+        assertTrue(Retry.forwardBlocked("CHAT_FORWARDS_RESTRICTED"));
+        //: A refusal no fresh upload can fix must not start one.
+        assertFalse(Retry.forwardBlocked("FLOOD_WAIT_34"));
+        assertFalse(Retry.forwardBlocked("CHAT_WRITE_FORBIDDEN"));
+        assertFalse(Retry.forwardBlocked("file is too big"));
+    }
+
+    @Test
+    public void aRefusedForwardIsToldApartFromEveryOtherRefusal() {
+        //: The words Telegram uses when a chat protects its content.  The queue
+        //: answers these by moving a copy instead of failing the job.
+        assertTrue(Retry.forwardBlocked(
+                "Message has protected content and can't be forwarded"));
+        assertTrue(Retry.forwardBlocked("CHAT_FORWARDS_RESTRICTED"));
+        assertTrue(Retry.forwardBlocked("You are not allowed to forward messages here"));
+        //: Everything else must keep its own meaning.
+        assertFalse(Retry.forwardBlocked("not enough space on this phone"));
+        assertFalse(Retry.forwardBlocked("the Telegram engine is not running"));
+        assertFalse(Retry.forwardBlocked(""));
+        assertFalse(Retry.forwardBlocked(null));
+    }
+
+    @Test
+    public void aStaleReferenceIsTemporaryAndNotPermanent() {
+        String reason = "file reference has expired";
+        assertFalse(Retry.fatal(reason));
+        assertTrue(Retry.recoverable(reason));
+        assertTrue(Retry.worthIt(reason));
+    }
+
+    @Test
+    public void unknownWordsAreJudgedKindlyByTheStepItself() {
+        //: A step that failed without Telegram's words (a null message) is not
+        //: declared permanent: the caller falls back to its own rules.
+        assertFalse(Retry.fatal(null));
+        assertFalse(Retry.fatal(""));
+        assertTrue(Retry.worthIt("something no list knows about"));
+    }
+}

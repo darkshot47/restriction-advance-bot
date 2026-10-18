@@ -50,7 +50,7 @@ public class VmoreFiles extends ContentProvider {
         if (name == null || name.isEmpty()) {
             throw new FileNotFoundException("no file in " + uri);
         }
-        File root = LocalStore.downloadsDir(getContext());
+        File root = LocalFiles.downloadsDir(getContext());
         File target = new File(root, name);
         try {
             //: Never serve anything outside the download folder.

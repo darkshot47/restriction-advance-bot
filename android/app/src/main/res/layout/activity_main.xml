@@ -9,308 +9,476 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="16dp">
+        android:paddingLeft="18dp"
+        android:paddingRight="18dp"
+        android:paddingTop="22dp"
+        android:paddingBottom="30dp">
 
-        <!-- Owner card — top-right corner, tap opens @XyrDeveloper -->
+        <!-- Header: the account on the right, the screens on the row below -->
         <LinearLayout
-            android:id="@+id/ownerCard"
-            android:layout_width="wrap_content"
+            android:id="@+id/header"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_gravity="end"
-            android:background="@drawable/bg_chip"
-            android:gravity="center_vertical"
-            android:orientation="horizontal"
-            android:paddingStart="8dp"
-            android:paddingTop="6dp"
-            android:paddingEnd="12dp"
-            android:paddingBottom="6dp">
-
-            <ImageView
-                android:id="@+id/ownerPhoto"
-                android:layout_width="38dp"
-                android:layout_height="38dp"
-                android:contentDescription="@string/app_name"
-                android:padding="4dp"
-                android:src="@drawable/ic_owner" />
+            android:orientation="vertical">
 
             <LinearLayout
-                android:layout_width="wrap_content"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginStart="6dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        style="@style/VmoreTitle"
+                        android:text="@string/home_title" />
+
+                    <TextView
+                        android:id="@+id/accountText"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        style="@style/VmoreSubtitle"
+                        android:layout_marginTop="2dp" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:id="@+id/profileBox"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:paddingLeft="@dimen/profile_gap"
+                    android:paddingRight="2dp">
+
+                    <LinearLayout
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:gravity="end">
+
+                        <TextView
+                            android:id="@+id/profileName"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:maxWidth="130dp"
+                            android:maxLines="1"
+                            android:ellipsize="end"
+                            android:textColor="@color/vmore_text"
+                            android:textSize="14sp"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:id="@+id/profileUser"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:maxWidth="130dp"
+                            android:maxLines="1"
+                            android:ellipsize="end"
+                            android:paddingTop="1dp"
+                            android:textColor="@color/vmore_text_faint"
+                            android:textSize="11sp" />
+                    </LinearLayout>
+
+                    <FrameLayout
+                        android:layout_width="52dp"
+                        android:layout_height="52dp"
+                        android:layout_marginLeft="6dp">
+
+                        <!-- The same story ring as the logo, turning slowly. -->
+                        <com.vmore.app.StoryRingView
+                            android:id="@+id/profileRing"
+                            android:layout_width="match_parent"
+                            android:layout_height="match_parent" />
+
+                        <ImageView
+                            android:id="@+id/profileAvatar"
+                            android:layout_width="42dp"
+                            android:layout_height="42dp"
+                            android:layout_gravity="center"
+                            android:background="@drawable/bg_avatar"
+                            android:padding="9dp"
+                            android:scaleType="fitCenter"
+                            android:src="@drawable/ic_person"
+                            android:contentDescription="@string/home_nav_profile" />
+                    </FrameLayout>
+                </LinearLayout>
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:orientation="horizontal"
+                android:gravity="end|center_vertical">
+
+                <ImageView
+                    android:id="@+id/themeButton"
+                    android:layout_width="42dp"
+                    android:layout_height="42dp"
+                    android:padding="9dp"
+                    android:src="@drawable/ic_moon"
+                    android:contentDescription="@string/home_nav_theme" />
+
+                <ImageView
+                    android:id="@+id/queueButton"
+                    android:layout_width="42dp"
+                    android:layout_height="42dp"
+                    android:padding="9dp"
+                    android:src="@drawable/ic_queue"
+                    android:contentDescription="@string/home_nav_queue" />
+
+                <ImageView
+                    android:id="@+id/historyButton"
+                    android:layout_width="42dp"
+                    android:layout_height="42dp"
+                    android:padding="9dp"
+                    android:src="@drawable/ic_history"
+                    android:contentDescription="@string/home_nav_history" />
+
+                <ImageView
+                    android:id="@+id/filesButton"
+                    android:layout_width="42dp"
+                    android:layout_height="42dp"
+                    android:padding="9dp"
+                    android:src="@drawable/ic_folder"
+                    android:contentDescription="@string/files_title" />
+
+                <ImageView
+                    android:id="@+id/settingsButton"
+                    android:layout_width="42dp"
+                    android:layout_height="42dp"
+                    android:padding="9dp"
+                    android:src="@drawable/ic_settings"
+                    android:contentDescription="@string/home_nav_settings" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- Destination -->
+        <LinearLayout
+            android:id="@+id/destCard"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:background="@drawable/bg_card"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:padding="16dp">
+
+            <ImageView
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:layout_marginRight="14dp"
+                android:src="@drawable/ic_chat"
+                android:contentDescription="@string/home_send_to" />
+
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
                 android:orientation="vertical">
 
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Owner"
-                    android:textColor="@color/vmore_text_dim"
-                    android:textSize="10sp" />
+                    style="@style/VmoreSection"
+                    android:text="@string/home_send_to" />
 
                 <TextView
-                    android:id="@+id/ownerName"
-                    android:layout_width="wrap_content"
+                    android:id="@+id/destTitle"
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="XyrDeveloper"
+                    android:layout_marginTop="4dp"
                     android:textColor="@color/vmore_text"
-                    android:textSize="14sp"
-                    android:textStyle="bold" />
+                    android:textSize="16sp"
+                    android:text="@string/home_no_destination" />
             </LinearLayout>
-        </LinearLayout>
-
-        <TextView
-            style="@style/VmoreTitle"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:text="Vmore" />
-
-        <TextView
-            android:id="@+id/accountText"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Logged in"
-            android:textColor="@color/vmore_text_dim"
-            android:textSize="12sp" />
-
-        <TextView
-            android:id="@+id/versionText"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Vmore v1.0.0"
-            android:textColor="@color/vmore_text_dim"
-            android:textSize="11sp" />
-
-        <!-- Telegram Direct: downloads & uploads ride the phone's own data -->
-        <LinearLayout
-            style="@style/VmoreCard"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical">
-
-            <TextView style="@style/VmoreLabel"
-                android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:text="Telegram Direct — zero server bandwidth" />
-
-            <TextView
-                android:id="@+id/tdStatus"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Downloads and uploads use your own data, the server spends nothing."
-                android:textColor="@color/vmore_text"
-                android:textSize="13sp" />
 
             <Button
-                android:id="@+id/tdButton"
-                style="@style/VmoreButtonAccent"
-                android:layout_width="match_parent"
+                android:id="@+id/destButton"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="Set up Telegram Direct" />
+                style="@style/VmoreButtonGhost"
+                android:minHeight="40dp"
+                android:text="@string/home_change" />
         </LinearLayout>
 
-        <!-- The link box -->
+        <!-- Links + options -->
         <LinearLayout
-            style="@style/VmoreCard"
+            android:id="@+id/inputCard"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="14dp"
-            android:orientation="vertical">
+            android:layout_marginTop="12dp"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical"
+            android:padding="16dp">
 
-            <TextView style="@style/VmoreLabel"
-                android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:text="Telegram link (public or private)" />
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                style="@style/VmoreSection"
+                android:text="@string/home_links_label" />
 
             <EditText
                 android:id="@+id/linkField"
-                style="@style/VmoreField"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:hint="https://t.me/channel/123"
-                android:importantForAutofill="no"
-                android:inputType="textUri"
-                android:singleLine="true" />
+                style="@style/VmoreField"
+                android:minLines="3"
+                android:gravity="top|start"
+                android:inputType="textMultiLine|textUri"
+                android:hint="@string/home_links_hint" />
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
                 android:orientation="horizontal">
 
                 <Button
                     android:id="@+id/pasteButton"
-                    style="@style/VmoreButton"
                     android:layout_width="0dp"
                     android:layout_weight="1"
                     android:layout_height="wrap_content"
-                    android:text="Paste" />
+                    style="@style/VmoreButtonGhost"
+                    android:text="@string/home_paste" />
 
                 <Button
-                    android:id="@+id/openButton"
-                    style="@style/VmoreButtonAccent"
+                    android:id="@+id/clearButton"
                     android:layout_width="0dp"
                     android:layout_weight="1"
                     android:layout_height="wrap_content"
-                    android:layout_marginStart="8dp"
-                    android:drawableStart="@drawable/ic_link"
-                    android:drawablePadding="8dp"
-                    android:text="Open link" />
+                    android:layout_marginLeft="8dp"
+                    style="@style/VmoreButtonGhost"
+                    android:text="@string/home_clear" />
+
+                <Button
+                    android:id="@+id/scanButton"
+                    android:layout_width="0dp"
+                    android:layout_weight="1.3"
+                    android:layout_height="wrap_content"
+                    android:layout_marginLeft="8dp"
+                    style="@style/VmoreButtonGhost"
+                    android:text="@string/home_scan_chat" />
             </LinearLayout>
-        </LinearLayout>
-
-        <!-- Download progress: pause / stop, exactly like the notification -->
-        <LinearLayout
-            style="@style/VmoreCard"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical">
-
-            <ProgressBar
-                android:id="@+id/downloadProgress"
-                style="?android:attr/progressBarStyleHorizontal"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:visibility="gone" />
 
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:orientation="horizontal"
+                android:weightSum="3">
+
+                <Button
+                    android:id="@+id/chipUpload"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    style="@style/VmoreChip"
+                    android:text="@string/home_option_upload" />
+
+                <Button
+                    android:id="@+id/chipDelete"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:layout_marginLeft="8dp"
+                    style="@style/VmoreChip"
+                    android:text="@string/home_option_delete" />
+
+                <Button
+                    android:id="@+id/chipForward"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:layout_marginLeft="8dp"
+                    style="@style/VmoreChip"
+                    android:text="@string/home_option_forward" />
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="horizontal"
+                android:weightSum="3">
+
+                <Button
+                    android:id="@+id/chipQuality"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    style="@style/VmoreChip"
+                    android:text="@string/home_option_quality" />
+
+                <Button
+                    android:id="@+id/chipFilter"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:layout_marginLeft="8dp"
+                    style="@style/VmoreChip"
+                    android:text="@string/home_option_filter" />
+
+                <Button
+                    android:id="@+id/chipSchedule"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:layout_marginLeft="8dp"
+                    style="@style/VmoreChip"
+                    android:text="@string/home_option_schedule" />
+            </LinearLayout>
+
+            <!-- The clipboard banner: a Telegram link is one tap away. -->
+            <LinearLayout
+                android:id="@+id/clipboardBanner"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:visibility="gone">
+
+                <TextView
+                    android:id="@+id/clipboardText"
+                    android:layout_width="0dp"
+                    android:layout_weight="1"
+                    android:layout_height="wrap_content"
+                    android:maxLines="1"
+                    android:ellipsize="middle"
+                    android:textColor="@color/vmore_text_dim"
+                    android:textSize="12.5sp"
+                    android:text="@string/home_clipboard_found" />
+
+                <Button
+                    android:id="@+id/clipboardAdd"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:minHeight="36dp"
+                    style="@style/VmoreChipActive"
+                    android:text="@string/home_clipboard_add" />
+            </LinearLayout>
+
+            <Button
+                android:id="@+id/startButton"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="14dp"
+                style="@style/VmoreButton"
+                android:text="@string/home_start" />
+        </LinearLayout>
+
+        <!-- Live progress -->
+        <LinearLayout
+            android:id="@+id/progressCard"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:background="@drawable/bg_card"
+            android:orientation="vertical"
+            android:padding="16dp"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/progressName"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textColor="@color/vmore_text"
+                android:textSize="15sp"
+                android:maxLines="1"
+                android:ellipsize="middle" />
+
+            <TextView
+                android:id="@+id/progressStage"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                style="@style/VmoreSubtitle"
+                android:layout_marginTop="2dp" />
+
+            <ProgressBar
+                android:id="@+id/progressBar"
+                style="?android:attr/progressBarStyleHorizontal"
+                android:layout_width="match_parent"
+                android:layout_height="8dp"
+                android:layout_marginTop="12dp"
+                android:progressDrawable="@drawable/bg_progress"
+                android:max="100" />
+
+            <TextView
+                android:id="@+id/progressPercent"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                style="@style/VmoreLabel"
+                android:layout_marginTop="6dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
                 android:orientation="horizontal">
 
                 <Button
                     android:id="@+id/pauseButton"
-                    style="@style/VmoreButton"
                     android:layout_width="0dp"
                     android:layout_weight="1"
                     android:layout_height="wrap_content"
-                    android:drawableStart="@drawable/ic_pause"
-                    android:drawablePadding="8dp"
-                    android:text="Pause"
-                    android:visibility="gone" />
+                    style="@style/VmoreButtonGhost"
+                    android:text="@string/queue_pause_all" />
 
                 <Button
-                    android:id="@+id/stopButton"
-                    style="@style/VmoreButton"
+                    android:id="@+id/stopQueueButton"
                     android:layout_width="0dp"
                     android:layout_weight="1"
                     android:layout_height="wrap_content"
-                    android:layout_marginStart="8dp"
-                    android:drawableStart="@drawable/ic_stop"
-                    android:drawablePadding="8dp"
-                    android:text="Stop"
-                    android:visibility="gone" />
+                    android:layout_marginLeft="8dp"
+                    style="@style/VmoreButtonGhost"
+                    android:text="@string/queue_remove" />
             </LinearLayout>
-
-            <TextView
-                android:id="@+id/statusText"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:text="Paste a link to begin."
-                android:textColor="@color/vmore_text"
-                android:textSize="13sp"
-                android:visibility="gone" />
         </LinearLayout>
 
-        <!-- Editing tools appear the moment a download finishes -->
+        <!-- Recent -->
         <LinearLayout
-            android:id="@+id/actions"
-            style="@style/VmoreCard"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_weight="1"
+                android:layout_height="wrap_content"
+                style="@style/VmoreSection"
+                android:text="@string/home_recent" />
+
+            <Button
+                android:id="@+id/viewAllButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                style="@style/VmoreButtonFlat"
+                android:text="@string/home_view_all" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:id="@+id/recentList"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:visibility="gone">
+            android:layout_marginTop="4dp" />
 
-            <TextView style="@style/VmoreLabel"
-                android:layout_width="wrap_content" android:layout_height="wrap_content"
-                android:text="Downloaded — what next?" />
-
-            <TextView
-                android:id="@+id/readyText"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text=""
-                android:textColor="@color/vmore_text"
-                android:textSize="13sp" />
-
-            <Button
-                android:id="@+id/openEditorButton"
-                style="@style/VmoreButtonAccent"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:drawableStart="@drawable/ic_edit"
-                android:drawablePadding="8dp"
-                android:text="Edit (caption / thumbnail / trim)" />
-
-            <Button
-                android:id="@+id/openViewerButton"
-                style="@style/VmoreButton"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:drawableStart="@drawable/ic_play"
-                android:drawablePadding="8dp"
-                android:text="Watch / open it" />
-
-            <Button
-                android:id="@+id/saveDeviceButton"
-                style="@style/VmoreButton"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:drawableStart="@drawable/ic_save"
-                android:drawablePadding="8dp"
-                android:text="Save to device" />
-        </LinearLayout>
-
-        <LinearLayout
+        <TextView
+            android:id="@+id/emptyText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:orientation="horizontal">
-
-            <Button
-                android:id="@+id/actionEditor"
-                style="@style/VmoreButton"
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="wrap_content"
-                android:text="Editor" />
-
-            <Button
-                android:id="@+id/actionHistory"
-                style="@style/VmoreButton"
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:text="Downloads" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal">
-
-            <Button
-                android:id="@+id/actionHowTo"
-                style="@style/VmoreButton"
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="wrap_content"
-                android:text="How to use?" />
-
-            <Button
-                android:id="@+id/actionSettings"
-                style="@style/VmoreButton"
-                android:layout_width="0dp"
-                android:layout_weight="1"
-                android:layout_height="wrap_content"
-                android:layout_marginStart="8dp"
-                android:text="Settings" />
-        </LinearLayout>
-
-        <Button
-            android:id="@+id/actionLogout"
-            style="@style/VmoreButton"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Sign out" />
+            style="@style/VmoreSubtitle"
+            android:layout_marginTop="10dp"
+            android:visibility="gone"
+            android:text="@string/home_empty" />
     </LinearLayout>
 </ScrollView>

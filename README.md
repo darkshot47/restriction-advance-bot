@@ -315,7 +315,7 @@ comes first, and every command name/alias is retained:
 
 | Who | Where | Commands |
 | --- | --- | --- |
-| everybody | all private chats | `/start` and the 31 user commands (e.g. `🚀 Start the bot and open the main menu`, `📖 Learn how to use the bot`, `🔐 Log in to your Telegram account` …) |
+| everybody | all private chats | `/start` and the 33 user commands (e.g. `🚀 Start the bot and open the main menu`, `📖 Learn how to use the bot`, `📲 Download the Vmore app`, `🔐 Log in to your Telegram account` …) |
 | admins | their own chat | the user commands plus the admin commands |
 | the owner | their own chat | every command |
 
@@ -420,95 +420,238 @@ Force subscription is owner-granted and never applies to the owner. Telegram err
 
 Every visible heading, screen copy and inline button label is rendered through the **Unicode small-caps font engine** (`ui.smallcaps`). Digits and punctuation are untouched, and the conversion is context aware: URLs, `@usernames`, `/commands`, ``code`` spans, HTML tags/entities and every `callback_data` payload are copied through byte for byte, so links stay clickable and buttons keep working. `SMALL_CAPS=off` in the environment disables the font while debugging. Send-side text (`ui_text`/`say*`), captions, watermarks and extracted media payloads are never converted. Admin pages use at most two buttons per row and seven rows, rather than a single oversized command list. Native button colors are used when supported, with the existing fallback retained. Legacy language buttons remain compatible; operational messages stay in English.
 
-## Vmore — the unlimited-download app
+## Vmore — the standalone Android app
 
-The heavy work no longer has to go through the bot. **Vmore** is a small Android app that downloads
-private-channel content over the user's *own* Telegram data and streams it straight to the phone, so
-the server never re-uploads a file to Telegram. The app is built by GitHub Actions from `android/`,
-published as a Release APK, and the bot's **♾️ Unlimited Download (App)** button opens that stable
-link.
+**Vmore** is the phone app that does the heavy work itself.  It signs in with the user's *own* Telegram
+account, downloads a link's media **Telegram → phone** and uploads it **phone → Telegram**, so the host
+never moves a byte.  There is no server address, no access token and no app API: everything runs on the
+phone through TDLib, and the app is built by GitHub Actions from `android/` and published as a Release
+APK.
 
 ### The user's flow
 
-1. **Get a token** — `/gentoken` in the bot. One account owns exactly **one** token, a short code like
-   `HPSEG9` (`APP_TOKEN_ALPHABET`, six characters, no `I/L/O/0/1`). It lives **30 days**
-   (`APP_TOKEN_LIFETIME_DAYS`); after that the app asks for a fresh one and `/gentoken` generates it in
-   one tap. Regenerating retires the old token immediately, `/revoketoken` switches it off for good.
-2. **Log in inside the app** — server address (a workflow input may pre-fill it, it stays editable) plus
-   the token. Nothing else: no phone number, no OTP, no session string. The first successful login
-   registers the user as an **app user** and the bot DMs **“login in app successful”**.
-3. **Paste a link** — public links are handed to the bot, which sends them into the Telegram DM (the
-   phone downloads nothing). Private links download **inside the app** with the user's stored
-   `/login` session — unlimited, no premium needed.
-4. **Edit before uploading** — caption, thumbnail and a **front/back trim** that runs on the phone
-   (`MediaExtractor` + `MediaMuxer`, no re-encode), then **Save to device**, watch the video, or
-   **upload**. The upload goes back through the user's own session, so the bot spends no bandwidth on it.
-   When the file itself was not touched, the phone ships **no bytes at all**: the app sends only the
-   caption (and at most a thumbnail) and the server re-sends what it already has — the still-warm
-   spooled download, or a native Telegram copy / cached re-send (zero transfer), or a single
-   server-side re-download pushed out through the user's session. Only a *trimmed* file — whose bytes
-   genuinely changed on the phone — rides the classic phone → server → Telegram upload, and even then
-   the API answers `needs_bytes` first whenever a reference could have worked.
-5. **Telegram Direct (optional, zero server bandwidth)** — the *Telegram Direct* card on home logs a
-   real Telegram session **into the phone** (TDLib, phone number + code + optional 2FA).  From then on,
-   private downloads stream *Telegram → phone* and every upload rides *phone → Telegram*: the host
-   moves **zero media bytes either way**.  An untouched file sent back is a TDLib `ForwardMessages`
-   copy — zero data even on the phone — and restricted channels that refuse a forward fall back to a
-   straight phone upload automatically.  The app learns the Telegram app credentials and the bot's
-   username from `GET /api/v2/app`; without direct sign-in every legacy path keeps working untouched.
-6. **While it downloads** — Pause and Stop buttons on screen *and* in the notification bar; the
-   download keeps running with the app closed (foreground service, `dataSync`), progress lives in the
-   notification, and a second notification announces the finished file.
+1. **Install** — download `Vmore.apk` from the stable Release link (or unzip `Vmore-apk.zip`) and allow
+   "Install unknown apps" once.
+2. **Sign in** — either paste the `api_id` and `api_hash` of your own Telegram application
+   (my.telegram.org), or tap **Try a ready-made key**: Vmore walks the keys that open-source Telegram
+   clients publish, gives each one up to sixty seconds, and stops the moment the login code is on its
+   way.  A key Telegram refuses is left behind at once and the next one goes; the whole attempt ends
+   with the screen back in your hands, one tap from your own pair.  Every step after the keys has a way
+   back (Change the API details), the number is remembered and filled in next time, and the code screen
+   offers **Send the code again**.  A refusal lands on the step it belongs to: a wrong code or a wrong
+   two-step password never throws you back to `api_id`, Continue keeps working under the error, and a
+   request that is never answered gives the screen back after forty-five seconds instead of waiting
+   forever.  Then the code Telegram sends you, and the two-step password if the
+   account has one.  Telegram refuses a published key with `API_ID_PUBLISHED_FLOOD` more often than not,
+   which is exactly what the own-pair option is for.
+3. **Paste a link** — one link or a whole batch, public (`t.me/channel/123`), private
+   (`t.me/c/…`) or a range (`t.me/channel/1-500`, one job per message, up to 500 per link).  A chat can
+   also be scanned: Vmore takes the channel's recent media and queues it.
+4. **Pick the destination** — the chat list opens once; the choice is remembered as the default and can
+   be changed per job.
+5. **Start** — the queue resolves, downloads and uploads each job with the user's own session.  With
+   **Delete the local copy** on (the default) the phone copy is removed right after a successful
+   upload, the record stays in History, and the next job keeps going — bulk batches included.
+6. **Runs in the background** — a real foreground service (`dataSync`) keeps a long batch alive with the
+   app closed, with Pause all / Resume all / stop in the notification.
+7. **While it works** — Home shows live progress (stage, percent, speed, ETA) and, when a job stops,
+   Telegram's own reason in plain words; Queue shows every job with pause, retry, remove and open;
+   History keeps every upload, download and failure.  A job that only hit a flood wait or a dropped
+   connection is retried up to three times before it is called failed.
 
-### The API (`appapi.py`, mounted on the bot's Flask app at `/api/v2`)
+### Watching, editing and quality
 
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /api/v2/token/<TOKEN>` | validate the token, return the account snapshot |
-| `POST /api/v2/token/<TOKEN>/login` | app login → registers the app user, sends the DM |
-| `POST /api/v2/token/<TOKEN>/resolve` | what is behind a link (public / private, size, kind) |
-| `POST /api/v2/token/<TOKEN>/send` | public link → the Telegram DM |
-| `POST /api/v2/token/<TOKEN>/job` | start a private download (`downloads/app/` spool) |
-| `GET /api/v2/token/<TOKEN>/job/<ID>` · `/file` | progress · Range-aware byte stream (`206`) |
-| `POST …/job/<ID>/pause` · `/resume` · `/cancel` | the app's pause / stop |
-| `POST /api/v2/token/<TOKEN>/upload` | the edited file, sent through the user's own session — or, with `job_id`/`link` and **no file field**, a zero-transfer re-send of media the server already has |
-| `GET /api/v2/token/<TOKEN>/history` | bot downloads **and** app activity in one list |
-| `POST /api/v2/token/<TOKEN>/revoke` | switch the token off |
-| `GET /api/v2/app` · `/app/apk` · `/howto` · `/owner` · `/owner/photo` | app info (incl. the TDLib `td_api_id`/`td_api_hash`/`bot_username` for direct mode), APK, help text, the owner card |
+* **Viewer** — video and audio playback with a 0.25x … 3x speed control (the last choice is remembered),
+  seek bar, fullscreen, image zoom, text preview, and Save to device / Share / Open with another app.
+* **Editor** — caption (with the file name template), a cover image picked from the gallery, an instant
+  MP4 trim that runs on the phone (`MediaExtractor` + `MediaMuxer`, no re-encode), the destination chat
+  and an **upload quality** choice: `File` keeps the original bytes, `Video` prepares an inline-playing
+  video, `Photo` sends a fast preview.
+* **Forward without download** — a job can be forwarded with TDLib, so zero bytes cross the phone.
 
-`/health` on the same service reports `{ok, app, api}`.
+### Getting the app from the bot
+
+Send **/apk** in a private chat.  The bot hands over the current APK with one download button and asks
+nothing first: there is no server address and no token any more, because the app does not have one.  It
+also appears in the command menu as *Download the Vmore app*.
+
+### Everything the app does
+
+The list below is the whole feature set, all of it on the phone, none of it needing a server.
+
+1. **Files** — a Library screen for everything Vmore left on the phone: search, sort by date, name or
+   size, multi-select, upload the selection again, share it, or delete it with a confirmation.
+2. **Data saving** — *only on Wi-Fi* and *only while charging* hold the queue and release it by
+   themselves the moment the phone is back on Wi-Fi or on the charger; a speed limit caps the transfer
+   rate (full, 4, 2, 1 or half a megabyte a second).
+3. **Scheduled queue** — pick a time (Settings → Schedule) and the queue starts by itself, once or every
+   day; while it waits the notification says so, and *Start now* ignores the wait.
+4. **Battery** — Settings shows whether Android is free to let the queue run in the background, with one
+   tap into the system's battery-optimization screen.
+5. **Duplicate skip** — a file that was uploaded before (`file id` + size) is left out instead of being
+   sent twice, and the job says so in the finish summary.
+6. **Batch filters** — before a batch starts, keep only the kinds you want (`video`, `photo`, `audio`,
+   `document`) and only a size range; everything else is skipped with a note, so a 500-message range does
+   not drag 500 files through the phone.
+7. **Share to Vmore and the clipboard banner** — *Share → Vmore* from any app sends the text straight to
+   the link box, and a Telegram link already on the clipboard offers itself with one tap.
+8. **Per-batch rules** — the kind, the filter and *skip duplicates* chosen on Home travel with the batch
+   and are shown per job in the queue, while Queue and Editor can override the destination per job.
+9. **Retry all and priority** — *Retry all failed* puts every failed job back at once (Wake up clears the
+   waits), and the arrows on a waiting job move it up or down the queue.
+10. **Statistics** — a dashboard with uploads, downloads, failures, bytes sent and received, the space
+    the cleanup gave back, what is still on the phone, the average file, the queue size, the last
+    activity, a seven-day chart and the busiest chats.
+11. **Automatic skin** — Settings → Appearance: *Day* (the default), *Night*, or *Automatic*, which
+    follows the clock (night between 18:00 and 06:00).  The header button flips between day and night in
+    one tap.
+12. **PIN lock** — a four to eight digit PIN (Settings → Privacy) guards the app after it has been left
+    alone for a while; a wrong PIN shakes, and a forgotten PIN signs the account out.
+13. **Player upgrade** — playback speed from 0.25x to 3x, *Play the next file by itself* so a folder of
+    downloads runs as one long queue, picture-in-picture, fullscreen, rotate, screen-on while playing.
+14. **Editor upgrade** — trim, caption, cover taken from the gallery **or from a frame of the video
+    itself**, *Remove sound*, *Sound only* (the audio track saved as `.m4a`), and the upload quality
+    (`File` / `Video` / `Photo`) for this upload only.
+15. **Three accounts** — Settings holds up to three Telegram accounts, each with its own session folder,
+    its own profile picture and its own credentials; *Switch* goes through the sign-in screen so Telegram
+    is never left in a half state, and the queue, history and files stay.  Tapping *Switch* by accident is
+    no longer a one-way door: the sign-in screen always carries a **Back to <account>** button whenever
+    another slot holds a signed-in account, on every step and under every error, and a reset gets a fresh
+    session folder of its own so a closing session can never break the next sign-in.
+16. **Home-screen widget and Quick Settings tile** — the widget shows the job, the stage and the queue
+    size with pause/resume and open; the Quick Settings tile does the same from the panel.
+17. **Delete the downloaded files only** — Settings → Downloaded data shows how much is on the phone
+    and **Delete downloaded files** removes those files in one go, after one confirmation.  Nothing else
+    is touched: the history stays (each record simply stops offering a file that is gone), and the
+    queue, every setting and the Telegram account stay signed in.  A file a waiting or running job
+    still needs is left alone, so a batch is never broken by the cleanup.
+
+### When something goes wrong
+
+* **A job retries four times**, and every retry asks Telegram for the message again — a file reference
+  from a failed attempt has usually gone stale, and retrying with the stale one is what used to turn one
+  hiccup into "download failed" on the first try.  Each attempt also re-requests a download that has
+  stopped moving (45 seconds without a byte, twice), and Telegram resumes from the part it already sent,
+  so nothing is downloaded twice.
+* **A chat that protects its content still moves.**  Telegram forbids forwarding and saving there, but it
+  still lets a signed-in client download the file to show it, which is what every official client does.
+  So the download is always attempted; and when a *forward* is refused with "protected content", the queue
+  does not fail the job — it downloads the file and sends a copy to the destination instead, exactly like
+  the bot did.  The queue says in the log which route it took.
+* **The upload of protected content is a real upload.**  Telegram refuses a message that *points at* a
+  protected file (`CHAT_FORWARDS_RESTRICTED`), which is what kept failing after the file had downloaded:
+  TDLib recognised the saved file by its path and offered the old reference again.  The upload is now
+  built from a second name for the same file — a hard link where the phone can make one, a copy where it
+  cannot — so TDLib uploads the bytes as a brand-new file.  The link costs no storage, it is removed when
+  the upload ends, and if Telegram still refuses, the send happens once more this way before anything is
+  called failed.
+* **Only real dead ends stop early**: a chat this account may not read, an empty destination, no room on
+  the phone, a message that is gone.  The queue names the reason it hit — and checks the free space before
+  the transfer, so "no room" is not discovered half way through.
+* **The log**: Settings → Check the Telegram connection lists the session, the destination, the failed
+  jobs and the *last steps the queue took*, with Telegram's own error text.  One tap copies the whole
+  report, which is what to send when a link will not move.
+
+### The developer card, the ring and the buttons
+
+* **Settings ends with the developer's own profile**, read through the signed-in account: the real name,
+  the real handle, the real bio and the real profile picture, cached on the phone so the card paints
+  instantly, refreshed once per visit, and one tap from a **direct chat** (`tg://resolve`, the web
+  fallback when Telegram is not installed).  Nothing about it is baked into the APK.
+* **That one card is alive.**  It is the single place the owner allowed colour, and it uses it: five soft
+  clouds of colour (blue, violet, cyan, rose and a little amber) drift on their own paths behind the
+  text, a band of light crosses the card, small dots rise, and the picture sits inside a multicolour
+  ring that keeps turning.  A dark wash keeps the white name, bio and button the first thing read, and
+  the animation stops with the screen instead of running in the background.
+* **The story ring**: the logo on the sign-in screen, the profile picture in the home header and the
+  developer's picture at the end of Settings all sit inside the circle Telegram draws around a profile
+  with a story.  The arc travels around the logo without ever stopping; on the header it turns slowly
+  enough that it is noticed only when looked at.  On the developer card the ring is a multicolour
+  gradient turning once every seven seconds.  Every ring stops by itself when the screen leaves the
+  window.
+* **Buttons**: one radius (16dp), one weight, one letter spacing and a real ripple under the finger for
+  the solid blue button, the outline button and every filter chip — so a screen with both reads as one
+  design.
+* **Signing in without typing a key**: Telegram will not send a login code to any client that has no
+  `api_id`/`api_hash`; it is a server rule, not an app one.  Vmore therefore keeps the built-in key pool,
+  but it is no longer random: the key that last produced a code on this phone is tried first, the others
+  follow, and the user's own pair stays one tap away on the same screen.
+
+### Updates and the signing key
+
+Android only installs an APK over an existing app when both carry the **same signature**.  Every build up
+to 2.2.1 was signed with Android's *debug* key, and a CI runner generates that keystore from scratch each
+time — so every APK had a different signature and the phone answered "App not installed".  The fix:
+
+* the distribution APK is a **release** build signed with one stable key, kept with its password under
+  [`android/signing/`](android/signing/README.md) where both the build and the owner can always reach it;
+* the certificate's SHA-256 is recorded in
+  [`android/tools/expected_signing.txt`](android/tools/expected_signing.txt) and the workflow **fails** if
+  the key, or the APK's signature, is not the recorded one — that is what stops a lost or swapped key from
+  silently breaking every update;
+* each release's notes carry the version, the version code and the signing fingerprint, and the same
+  fingerprint can be read off the *installed* app (Settings → Check the Telegram connection), so an
+  installed Vmore can be checked against the release it claims to be;
+* if no keystore can be reached at all (a pull request from a fork, say), the build falls back to the debug
+  key, says so loudly, and the release notes say the same.
+
+Because the key used before this change was random, an already installed Vmore must be **uninstalled
+once** before installing this build or newer.  From that build on, updates install over each other and the
+data stays.
+
+### On the phone, the first time
+
+1. Allow "Install unknown apps" for the browser or file manager that opens the APK (Android asks once).
+2. On Android 13 and newer, allow notifications when Vmore asks: the queue shows its progress there, and
+   *Pause all* / *Resume all* live in that notification.
+3. Settings shows whether Android may stop the queue in the background; one tap opens the system dialog
+   that lifts the restriction.  Some phones (Xiaomi, Oppo, Vivo) also have their own "Autostart" switch —
+   without it, a very long batch can be cut short when the screen has been off for a while.
+4. The link's own rules still apply: a private link needs the account to be able to read the message.  A
+   chat that protects its content cannot be forwarded, so Vmore downloads the file and sends it as a copy;
+   when Telegram asks Vmore to wait (flood wait), the job pauses itself, says so in the queue, and retries
+   up to three times.
+
+### Look and feel
+
+* **Day and night skins** — the in-app switch (Settings → Appearance, or the sun/moon button in the
+  Home header) repaints the whole app: day is white with black text, night is black with white text.
+  The choice is remembered, the day skin is the default, and it wins over the phone's own dark-mode
+  setting.  `values/colors.xml` is the day palette, `values-night/colors.xml` the night one, and both
+  carry the same names, so every drawable flips with them.
+* **The account corner** — after the sign-in the header shows the name, the `@username` and the profile
+  picture of the account.  The picture is downloaded **once**, copied into the app's private storage and
+  read from there afterwards, so reopening the app never asks Telegram for it again.
+* **Connection check** — Settings → Check the Telegram connection lists the session, the destination
+  chat and the last failed jobs with Telegram's own words, and copies the whole report in one tap.
+
+White, blue and black only (every shade in `colors.xml` is one of the three, the greys are white over
+black), no emoji anywhere, and every screen animates in (`res/anim/`, staggered lists on the home
+screen).
 
 ### Bot side
 
-* `/gentoken` (generate / show, 30-day life), `/revoketoken` (confirm, then off), `/app` (the full app
-  page behind the big button at the bottom of `/start`), `/apk` (owner: send the APK with the deployment
-  URL in the caption — or just a URL to set the server address and version) and `/appusers` (owner/admin:
-  **only** accounts that really logged in from the app — generating a token never counts).
-* A private/restricted link now shows **two options**: **♾️ Unlimited Download (App)** → the APK, and the
-  existing premium pitch for delivery in the DM.
-* Reply-keyboard buttons (`KeyboardButton`) are green; inline buttons keep their own colours.
+The bot keeps its own features.  A private/restricted link now offers the premium route for delivery in
+the DM, and the `/CreateBot` child-bot system stays retired.
 
 ### Building the APK
 
 `.github/workflows/android.yml` builds `android/` (Java, no third-party dependencies) on every push that
 touches it, verifies the APK with `aapt2 dump badging`, packs it **into a zip** (the owner's
 requirement), uploads the zip as an artifact and (re)creates the **`vmore-latest` GitHub Release** with
-`Vmore.apk`, `Vmore-apk.zip` and `SHA256SUMS.txt`.  Direct mode's TDLib engine (`TdApi.java` +
-`libtdjni.so` for `arm64-v8a` and `armeabi-v7a`) is generated deterministically from the single
-pinned commit in [`android/tdlib/TDLIB_COMMIT`](android/tdlib/TDLIB_COMMIT) — see
-[`android/tdlib/README.md`](android/tdlib/README.md) — cached across runs, and the workflow asserts
-both native libraries really landed inside the APK.
+`Vmore.apk`, `Vmore-apk.zip` and `SHA256SUMS.txt`.  Nothing is baked into the build: no server address,
+no credentials.  TDLib (`TdApi.java` + `libtdjni.so` for `arm64-v8a` and `armeabi-v7a`) is generated
+deterministically from the single pinned commit in
+[`android/tdlib/TDLIB_COMMIT`](android/tdlib/TDLIB_COMMIT) — see
+[`android/tdlib/README.md`](android/tdlib/README.md) — cached across runs, and the workflow asserts both
+native libraries really landed inside the APK.
 
-Stable links — `APP_RELEASE_URL` in `ui.py` (override with the `APP_RELEASE_URL` env var):
+Stable links:
 
 ```
 https://github.com/darkshot47/restriction-advance-bot/releases/latest/download/Vmore.apk
 https://github.com/darkshot47/restriction-advance-bot/releases/latest/download/Vmore-apk.zip
 ```
-
-`workflow_dispatch` takes an optional `base_url` input: it is baked into `strings.xml` as the *default*
-server address of a fresh install (the field stays editable in the app's Settings, and nothing else is
-baked in).
 
 ### Icons
 
@@ -539,11 +682,6 @@ Set `API_ID`, `API_HASH`, `BOT_TOKEN`, `OWNER_ID`, `BOT_USERNAME` (without `@`),
 | `TELEMETRY_PING_HOST` / `TELEMETRY_PING_PORT` | `api.telegram.org` / `443` | target of the latency probe (a TCP handshake only) |
 | `TELEMETRY_BAR_WIDTH` | `12` | cells in the `[████████░░░░]` progress bar |
 | `SMALL_CAPS` / `BUTTON_STYLES` | `auto` | `off` disables the font / the native button colours while debugging |
-| `APP_TOKEN_LIFETIME_DAYS` | `30` | how long an app access token works before `/gentoken` hands out a new one |
-| `APP_RELEASE_URL` | this repo's `vmore-latest` APK | the stable APK link behind **♾️ Unlimited Download (App)**; set it to `""` to serve the APK from the deployment instead |
-| `APP_SPOOL_DIR` | `downloads/app` | where app downloads/uploads are staged before they are streamed or sent |
-| `APP_JOB_TTL_SECONDS` · `APP_JOB_IDLE_ABORT_SECONDS` | `2700` · `600` | how long a finished job (and its file) is kept, and when an unread download is abandoned |
-| `APP_MAX_UPLOAD_BYTES` | `2147483648` | largest file the app may upload back |
 
 ```bash
 python -m venv .venv
@@ -575,25 +713,6 @@ Seven further suites cover rounds 7-12 and the native engine on the same in-memo
 
 - `tests/test_round12_owner_tools_and_giveaways.py` — **the owner tools**: copy-before-download (and the Saved Messages guard), the share-URL deep link (minting, expiry, forgery, registration from inside the channel), the dump channel (/setdump, TTL deletion, queue, FloodWait pause, /deldump), `/pin` and `/pinned` in every form, the inline-button wizard end to end (cancel/skip/over-long label/bad link, broadcast formatting through the C++ pool, channel post + pin offer), and the giveaway engine (step wizard, single active giveaway, deep-link join once, live count, daily re-post, random winner granted, deadline draw) — plus the presentation budget re-checked over every new keyboard and screen.
 - `tests/test_round15_picker_dump_and_menu.py` — **the temporary picker keyboard, `/setdump`, the dump rule and the Telegram menu**: the bot rights of both choosers proved a subset of the user rights (as objects and on the MTProto wire), `/setdump` answering even when Telegram refuses the keyboard and a failed typed reference keeping the picker armed; the keyboard removed on every exit (finished setup by picker/typed/refused, `/cancel`, inline Cancel, another command, another button, a full channel list), kept for a retry, never pulled from a live flow, and a leftover from an older build swept exactly once; the dump used only for a user with a caption, prefix or suffix (text, media and native-copy paths, and never when the batch declined the caption), nothing mirrored, owner campaigns direct by default and staged behind `DUMP_STAGE_CAMPAIGNS`; and the menu — emoji-first descriptions, `/start` first, user vs admin vs owner lists inside Telegram's limits, per-chat scopes kept in sync by `/addadmin`, `/removeadmin` and `/start`, and publication at client start.
-- `tests/test_round16_vmore_app.py` — **the Vmore app**: `/CreateBot` and `/Bot_stats` gone (no command, no handler, no keyboard, no dead `main` symbols) and the retired collections dropped exactly once; one token per account with `/gentoken` generating it, regeneration retiring the old one, revocation from the bot, the **30-day expiry** (the token screen shows the days left, the API answers `expired: true`, startup retires what ran out, and the sweep is idempotent) and *generating* a token never making anybody an app user; the HTTP API end to end through Flask's test client against an in-memory Mongo (index, `/howto`, `/app`, `/owner`, account snapshot, login registering the user and DMing once, resolve public/private, delivery into the DM, premium gate, history merge, jobs with pause/resume/cancel, `Range` requests answering `206`, upload through the user's session with and without one, and a missing session degrading to "run /login"); `/apk` storing the file *and* the caption's deployment URL, refusing non-owners and non-APKs, and the download button pointing at the stable `APP_RELEASE_URL` (with the deployment and in-chat fallbacks still checked); every reply keyboard button green while inline buttons keep their own colours; and the two guards that keep the start hook honest (every app errand faked in the suite, and a failing errand swallowed instead of crashing the bot).
-- `tests/test_cpp_engine.py` — **the real C++ engine**: the `.cpp`/`.hpp` sources and build recipe, the loaded library's version/ABI/self-test, the worker pool actually running tasks, and byte-for-byte parity between the native and Python backends for `parse_link`, `scan`, `escape_html`, `escape_batch` and the token bucket, plus the wiring assertions (`main.parse_link`, the command registry and `telemetry.SpeedThrottle`).
-
-The round-six suite (`tests/test_round6_dual_engine.py`, 253 tests) covers the dual-engine overhaul on the same in-memory fakes: the complete `resolve_engine` routing matrix as one parametrised truth table (three controller modes × `models` permission × stored preference × peak), the strict "exceeds the threshold" peak rule, `TrafficMonitor` concurrency accounting including slot restoration when an extraction raises, controller-mode persistence with a fall-back when the store is unreachable, autoscaler escalation and reversion through the real `fetch_and_send` path, and the C++ Turbo worker pool **measured** rather than assumed — a Turbo batch must reach `ENGINE_TURBO_WORKERS` overlapping links while a Python batch must never exceed one. The telemetry HUD is asserted against the specification's exact strings (`📥 Downloading: 68% [████████░░░░]`, `📊 Server Load: CPU 19.2% | RAM 41.8% | Ping 11ms`, `🚀 Speed: 44.2 MB/s • ETA: 00:03`) both as pure functions and as rendered inside a real download, with a deterministic host stand-in so no test reads `/proc` or opens a socket; probe failures, an unknown file size and a raising sampler must all degrade to `--` without breaking the transfer. Also covered: the red `ButtonStyle.DANGER` Models Architecture button and its page, the `/start` badge parity, the switcher (including refusal once the permission is revoked, and the two lock modes), `/setengine` in all three modes plus owner-only enforcement and a failed database write, the four-tier granular grant end to end (tier → flags → duration → stored document → user notice, custom days, `grant_back`, stale and forged callbacks), `/removepremium`, the tiered pricing maths straight from `config`, the Contact Owner `url=` button on every pricing surface, the `/mychannels` dashboard with all four posting-rights outcomes and a forged chat id, the engine block of `/stats`, the twelve admin command pairs, and the real `database.py` functions for every new field against a Mongo mock. Every new keyboard is checked against the standing constraints — at most 7 rows and 2 buttons per row, labels within 28 characters, ASCII-only `callback_data`, links only inside `url=` buttons — and every new screen is checked for English-only copy (no Devanagari) with no raw link in the prose.
-
-
-### PR #14 regression verification
-
-`tests/test_regression_dump_workspace.py` exercises dump-first native and
-upload/text fallback delivery to user/channel destinations, user-session
-staging, strict failure behavior, immediate/TTL cleanup, real bot-authored
-owner callbacks, private login boundaries, picker/typed setup permissions,
-live status, audiences, asynchronous acknowledgement and the complete command
-baseline. Older tests that asserted dump/channel pin audiences now assert the
-DM-only policy; low-level pin-error tests remain for explicit `/post` pin tools.
-
-Controlled latency reproduction (fake Telegram, not a live-network benchmark):
-`/deldump` previously had no acknowledgement at 30 ms with 150 ms simulated
-cleanup; it now acknowledges before cleanup. Eight simulated 100 ms sends plus
-the old serial gaps took about 1.20 s; the bounded sender takes about 0.45 s.
-The pre-command decorator was also incorrectly attached to the synchronous
-latency helper; it now decorates the asynchronous command hook.
+- The retired app API has no test left: `appapi.py`, `/api/v2` and their three test modules
+  (`test_round16_vmore_app.py`, `test_round17_zero_transfer.py`, `test_round18_td_direct.py`) are gone
+  with the server the app no longer needs.

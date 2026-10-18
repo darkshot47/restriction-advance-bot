@@ -9,23 +9,16 @@ import android.content.Intent;
 import android.os.Build;
 
 /**
- * Notification plumbing: the live download progress (with Pause / Stop) and the
- * "download finished" note the owner asked for — both stay in the shade even
- * when the app is closed.
+ * Notification plumbing: the live progress of the queue (with Pause all and Stop
+ * buttons) and the "job finished" note. Both stay in the shade when the app is
+ * closed, because a batch keeps running in the background.
  */
 final class Notifications {
 
-    static final String CHANNEL_PROGRESS = "vmore_downloads";
+    static final String CHANNEL_PROGRESS = "vmore_queue";
     static final String CHANNEL_DONE = "vmore_done";
     static final int ID_PROGRESS = 4101;
     static final int ID_DONE = 4102;
-
-    //: One source of truth for the actions: the service handles these intents
-    //: directly, so the notification buttons and the on-screen buttons are the
-    //: same code path.
-    static final String ACTION_PAUSE = DownloadService.ACTION_PAUSE;
-    static final String ACTION_RESUME = DownloadService.ACTION_RESUME;
-    static final String ACTION_STOP = DownloadService.ACTION_STOP;
 
     private Notifications() {
     }
@@ -38,30 +31,31 @@ final class Notifications {
         if (manager == null) {
             return;
         }
-        NotificationChannel progress = new NotificationChannel(
-                CHANNEL_PROGRESS, "Downloads", NotificationManager.IMPORTANCE_LOW);
-        progress.setDescription("Download progress with pause and stop");
+        NotificationChannel progress = new NotificationChannel(CHANNEL_PROGRESS,
+                context.getString(R.string.common_notification_channel),
+                NotificationManager.IMPORTANCE_LOW);
+        progress.setDescription("Progress of downloads and uploads");
         progress.setShowBadge(false);
         manager.createNotificationChannel(progress);
 
-        NotificationChannel done = new NotificationChannel(
-                CHANNEL_DONE, "Finished downloads", NotificationManager.IMPORTANCE_DEFAULT);
-        done.setDescription("Tells you when a download finished");
+        NotificationChannel done = new NotificationChannel(CHANNEL_DONE,
+                context.getString(R.string.common_notification_channel_done),
+                NotificationManager.IMPORTANCE_DEFAULT);
+        done.setDescription("Tells you when a job finished");
         manager.createNotificationChannel(done);
     }
 
-    /** The service itself, so Android knows these actions may wake it up. */
-    private static PendingIntent action(Context context, String action, int requestCode) {
-        Intent intent = new Intent(context, DownloadService.class);
+    private static PendingIntent foregroundAction(Context context, String action, int code) {
+        Intent intent = new Intent(context, QueueService.class);
         intent.setAction(action);
         int flags = PendingIntent.FLAG_UPDATE_CURRENT;
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             flags |= PendingIntent.FLAG_IMMUTABLE;
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            return PendingIntent.getForegroundService(context, requestCode, intent, flags);
+            return PendingIntent.getForegroundService(context, code, intent, flags);
         }
-        return PendingIntent.getService(context, requestCode, intent, flags);
+        return PendingIntent.getService(context, code, intent, flags);
     }
 
     private static PendingIntent openApp(Context context) {
@@ -74,58 +68,6 @@ final class Notifications {
         return PendingIntent.getActivity(context, 7, intent, flags);
     }
 
-    static Notification progress(Context context, String name, long written, long total,
-                                 boolean paused) {
-        int percent = total > 0 ? (int) Math.min(100, written * 100 / total) : 0;
-        String size = total > 0
-                ? human(written) + " / " + human(total)
-                : human(written);
-        Notification.Builder builder = base(context, CHANNEL_PROGRESS);
-        builder.setContentTitle((paused ? "⏸ Paused — " : "⬇️ Downloading — ") + name)
-                .setContentText(paused ? size + " • tap Resume to continue" : size)
-                .setSmallIcon(android.R.drawable.stat_sys_download)
-                .setContentIntent(openApp(context))
-                .setOngoing(true)
-                .setOnlyAlertOnce(true)
-                .setProgress(100, percent, total <= 0);
-        if (paused) {
-            builder.addAction(new Notification.Action.Builder(
-                    android.R.drawable.ic_media_play, "Resume",
-                    action(context, ACTION_RESUME, 21)).build());
-        } else {
-            builder.addAction(new Notification.Action.Builder(
-                    android.R.drawable.ic_media_pause, "Pause",
-                    action(context, ACTION_PAUSE, 22)).build());
-        }
-        builder.addAction(new Notification.Action.Builder(
-                android.R.drawable.ic_menu_close_clear_cancel, "Stop",
-                action(context, ACTION_STOP, 23)).build());
-        return builder.build();
-    }
-
-    static Notification finished(Context context, String name, String where) {
-        Notification.Builder builder = base(context, CHANNEL_DONE);
-        builder.setContentTitle("✅ Download complete")
-                .setContentText(name + (where == null ? "" : " • saved in " + where))
-                .setSmallIcon(android.R.drawable.stat_sys_download_done)
-                .setContentIntent(openApp(context))
-                .setAutoCancel(true)
-                .setStyle(new Notification.BigTextStyle().bigText(
-                        name + (where == null ? "" : "\nSaved in " + where)))
-                .setWhen(System.currentTimeMillis());
-        return builder.build();
-    }
-
-    static Notification failed(Context context, String name, String error) {
-        Notification.Builder builder = base(context, CHANNEL_DONE);
-        builder.setContentTitle("⚠️ Download failed")
-                .setContentText(name + " — " + error)
-                .setSmallIcon(android.R.drawable.stat_notify_error)
-                .setContentIntent(openApp(context))
-                .setAutoCancel(true);
-        return builder.build();
-    }
-
     private static Notification.Builder base(Context context, String channel) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             return new Notification.Builder(context, channel);
@@ -134,19 +76,97 @@ final class Notifications {
         return new Notification.Builder(context);
     }
 
-    static String human(long bytes) {
-        if (bytes <= 0) {
-            return "0 B";
+    /** The live queue notification: one row per running job. */
+    static Notification progress(Context context, String name, String stage, long done, long total,
+                                 boolean paused) {
+        int percent = Format.percent(done, total);
+        String label = stageLabel(context, stage);
+        String size = total > 0
+                ? Format.size(done) + " / " + Format.size(total)
+                : Format.size(done);
+        String title = name == null || name.isEmpty() ? context.getString(R.string.app_name) : name;
+        Notification.Builder builder = base(context, CHANNEL_PROGRESS);
+        builder.setContentTitle(title)
+                .setContentText(paused ? label + " • paused • " + size : label + " • " + size)
+                .setSmallIcon(R.drawable.ic_download)
+                .setContentIntent(openApp(context))
+                //: A paused queue is not holding the phone awake any more, so the
+                //: row may be swiped away once the service is gone.
+                .setOngoing(!paused)
+                .setOnlyAlertOnce(true)
+                .setProgress(100, percent, total <= 0);
+        if (paused) {
+            builder.addAction(new Notification.Action.Builder(
+                            R.drawable.ic_play,
+                            context.getString(R.string.queue_resume_all),
+                            foregroundAction(context, QueueService.ACTION_RESUME_ALL, 21))
+                    .build());
+        } else {
+            builder.addAction(new Notification.Action.Builder(
+                            R.drawable.ic_pause,
+                            context.getString(R.string.queue_pause_all),
+                            foregroundAction(context, QueueService.ACTION_PAUSE_ALL, 22))
+                    .build());
         }
-        String[] units = {"B", "KB", "MB", "GB", "TB"};
-        double value = bytes;
-        int unit = 0;
-        while (value >= 1024 && unit < units.length - 1) {
-            value /= 1024;
-            unit++;
+        builder.addAction(new Notification.Action.Builder(
+                        R.drawable.ic_stop,
+                        context.getString(R.string.queue_remove),
+                        foregroundAction(context, QueueService.ACTION_STOP_JOB, 23))
+                .build());
+
+        Notification notification = builder.build();
+        NotificationManager manager =
+                (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager != null && !QueueService.running()) {
+            //: The service is not holding this row, so it has to be posted from
+            //: here to stay in the shade after the queue stopped.
+            manager.notify(ID_PROGRESS, notification);
         }
-        return (value >= 100 || unit == 0
-                ? String.format(java.util.Locale.US, "%.0f %s", value, units[unit])
-                : String.format(java.util.Locale.US, "%.1f %s", value, units[unit]));
+        return notification;
+    }
+
+    /** Drops the live row when the whole queue was stopped by the user. */
+    static void cancelProgress(Context context) {
+        NotificationManager manager =
+                (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager != null) {
+            manager.cancel(ID_PROGRESS);
+        }
+    }
+
+    static void finished(Context context, String name, String where) {
+        NotificationManager manager =
+                (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager == null) {
+            return;
+        }
+        Notification.Builder builder = base(context, CHANNEL_DONE);
+        builder.setContentTitle(context.getString(R.string.common_done))
+                .setContentText(name + (where == null || where.isEmpty() ? "" : " • " + where))
+                .setSmallIcon(R.drawable.ic_check)
+                .setContentIntent(openApp(context))
+                .setAutoCancel(true)
+                .setWhen(System.currentTimeMillis());
+        manager.notify(ID_DONE, builder.build());
+    }
+
+    private static String stageLabel(Context context, String stage) {
+        if (stage == null) {
+            return "";
+        }
+        switch (stage) {
+            case QJob.UPLOADING:
+                return context.getString(R.string.common_uploading);
+            case QJob.RESOLVING:
+                return context.getString(R.string.common_resolving);
+            case QJob.PAUSED:
+                return context.getString(R.string.common_paused);
+            case QJob.FAILED:
+                return context.getString(R.string.common_failed);
+            case QJob.DONE:
+                return context.getString(R.string.common_done);
+            default:
+                return context.getString(R.string.common_downloading);
+        }
     }
 }

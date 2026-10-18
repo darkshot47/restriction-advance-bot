@@ -1,48 +1,144 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="VmoreTheme" parent="@android:style/Theme.Material.NoActionBar">
+
+    <!--
+      The theme comes in two parents: this one is the DAY skin (white screens,
+      dark system bars), values-night/styles.xml is the NIGHT skin.  Everything
+      below it is shared, so both skins stay identical apart from the palette.
+    -->
+    <style name="VmoreThemeBase" parent="@android:style/Theme.Material.Light.NoActionBar">
         <item name="android:windowBackground">@color/vmore_bg</item>
-        <item name="android:colorAccent">@color/vmore_accent</item>
+        <item name="android:colorAccent">@color/vmore_blue</item>
+        <item name="android:colorPrimary">@color/vmore_blue</item>
+        <item name="android:colorPrimaryDark">@color/vmore_bg</item>
+        <item name="android:colorControlNormal">@color/vmore_text_dim</item>
+        <item name="android:colorControlActivated">@color/vmore_blue</item>
         <item name="android:statusBarColor">@color/vmore_bg</item>
+        <item name="android:navigationBarColor">@color/vmore_bg</item>
         <item name="android:textColorPrimary">@color/vmore_text</item>
         <item name="android:textColorSecondary">@color/vmore_text_dim</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:windowContentTransitions">true</item>
+        <item name="android:windowActivityTransitions">true</item>
+        <item name="android:windowAnimationStyle">@style/VmoreWindowAnimation</item>
     </style>
 
-    <style name="VmoreCard">
-        <item name="android:background">@drawable/bg_card</item>
-        <item name="android:padding">14dp</item>
-        <item name="android:layout_marginBottom">10dp</item>
-    </style>
+    <style name="VmoreTheme" parent="@style/VmoreThemeBase" />
 
-    <style name="VmoreLabel">
-        <item name="android:textColor">@color/vmore_text_dim</item>
-        <item name="android:textSize">12sp</item>
+    <!-- Every screen change slides softly: the owner asked for animation
+         everywhere, and this is the transition used for all of them. -->
+    <style name="VmoreWindowAnimation" parent="@android:style/Animation.Activity">
+        <item name="android:activityOpenEnterAnimation">@anim/screen_in</item>
+        <item name="android:activityOpenExitAnimation">@anim/screen_out</item>
+        <item name="android:activityCloseEnterAnimation">@anim/screen_back_in</item>
+        <item name="android:activityCloseExitAnimation">@anim/screen_back_out</item>
     </style>
 
     <style name="VmoreTitle">
         <item name="android:textColor">@color/vmore_text</item>
-        <item name="android:textSize">22sp</item>
+        <item name="android:textSize">21sp</item>
         <item name="android:textStyle">bold</item>
+        <item name="android:letterSpacing">0.01</item>
     </style>
 
+    <style name="VmoreSubtitle">
+        <item name="android:textColor">@color/vmore_text_dim</item>
+        <item name="android:textSize">13sp</item>
+    </style>
+
+    <style name="VmoreSection">
+        <item name="android:textColor">@color/vmore_text_faint</item>
+        <item name="android:textSize">11sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:letterSpacing">0.12</item>
+        <item name="android:textAllCaps">true</item>
+    </style>
+
+    <style name="VmoreLabel">
+        <item name="android:textColor">@color/vmore_text_faint</item>
+        <item name="android:textSize">12sp</item>
+    </style>
+
+    <style name="VmoreCard">
+        <item name="android:background">@drawable/bg_card</item>
+        <item name="android:padding">16dp</item>
+        <item name="android:layout_marginBottom">12dp</item>
+    </style>
+
+    <!--
+      The two buttons.  The same 16dp radius, the same 0.02 letter spacing and
+      the same weight, so a screen with one of each reads as one design instead
+      of two widgets: the main one solid blue, the second one an outline.
+    -->
     <style name="VmoreButton" parent="@android:style/Widget.Material.Button">
         <item name="android:background">@drawable/bg_button</item>
-        <item name="android:textColor">#FFFFFF</item>
-        <item name="android:layout_marginTop">8dp</item>
+        <item name="android:textColor">@color/vmore_on_accent</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textSize">15sp</item>
+        <item name="android:letterSpacing">0.02</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:minHeight">52dp</item>
+        <item name="android:paddingLeft">18dp</item>
+        <item name="android:paddingRight">18dp</item>
+        <item name="android:stateListAnimator">@null</item>
     </style>
 
-    <style name="VmoreButtonAccent" parent="@android:style/Widget.Material.Button">
-        <item name="android:background">@drawable/bg_button_accent</item>
-        <item name="android:textColor">#062113</item>
+    <style name="VmoreButtonGhost" parent="@android:style/Widget.Material.Button">
+        <item name="android:background">@drawable/bg_button_ghost</item>
+        <item name="android:textColor">@color/vmore_blue</item>
         <item name="android:textStyle">bold</item>
-        <item name="android:layout_marginTop">8dp</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:letterSpacing">0.02</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:minHeight">48dp</item>
+        <item name="android:paddingLeft">18dp</item>
+        <item name="android:paddingRight">18dp</item>
+        <item name="android:stateListAnimator">@null</item>
+    </style>
+
+    <style name="VmoreButtonFlat" parent="@android:style/Widget.Material.Button">
+        <item name="android:background">@android:color/transparent</item>
+        <item name="android:textColor">@color/vmore_text_dim</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:minHeight">44dp</item>
+        <item name="android:stateListAnimator">@null</item>
     </style>
 
     <style name="VmoreField">
         <item name="android:background">@drawable/bg_field</item>
         <item name="android:textColor">@color/vmore_text</item>
-        <item name="android:textColorHint">@color/vmore_text_dim</item>
-        <item name="android:padding">12dp</item>
-        <item name="android:layout_marginTop">6dp</item>
+        <item name="android:textColorHint">@color/vmore_text_faint</item>
+        <item name="android:textSize">15sp</item>
+        <item name="android:padding">14dp</item>
+        <item name="android:layout_marginTop">8dp</item>
+    </style>
+
+    <style name="VmoreChip" parent="@android:style/Widget.Material.Button">
+        <item name="android:background">@drawable/bg_chip</item>
+        <item name="android:textColor">@color/vmore_text</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:letterSpacing">0.01</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:minHeight">40dp</item>
+        <item name="android:paddingLeft">14dp</item>
+        <item name="android:paddingRight">14dp</item>
+        <item name="android:stateListAnimator">@null</item>
+    </style>
+
+    <style name="VmoreChipActive" parent="@android:style/Widget.Material.Button">
+        <item name="android:background">@drawable/bg_chip_active</item>
+        <item name="android:textColor">@color/vmore_on_accent</item>
+        <item name="android:textSize">13sp</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:letterSpacing">0.01</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:minHeight">40dp</item>
+        <item name="android:paddingLeft">14dp</item>
+        <item name="android:paddingRight">14dp</item>
+        <item name="android:stateListAnimator">@null</item>
     </style>
 </resources>

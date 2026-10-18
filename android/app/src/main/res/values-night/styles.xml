@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The NIGHT skin's theme parent: black screens with light system-bar icons.
+  The shared VmoreTheme in values/styles.xml builds on top of this one.
+-->
+<resources>
+    <style name="VmoreThemeBase" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/vmore_bg</item>
+        <item name="android:colorAccent">@color/vmore_blue</item>
+        <item name="android:colorPrimary">@color/vmore_blue</item>
+        <item name="android:colorPrimaryDark">@color/vmore_bg</item>
+        <item name="android:colorControlNormal">@color/vmore_text_dim</item>
+        <item name="android:colorControlActivated">@color/vmore_blue</item>
+        <item name="android:statusBarColor">@color/vmore_bg</item>
+        <item name="android:navigationBarColor">@color/vmore_bg</item>
+        <item name="android:textColorPrimary">@color/vmore_text</item>
+        <item name="android:textColorSecondary">@color/vmore_text_dim</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:windowContentTransitions">true</item>
+        <item name="android:windowActivityTransitions">true</item>
+        <item name="android:windowAnimationStyle">@style/VmoreWindowAnimation</item>
+    </style>
+</resources>

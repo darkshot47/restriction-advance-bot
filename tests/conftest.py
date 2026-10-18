@@ -28,7 +28,6 @@ os.environ.setdefault("BOT_USERNAME", "TestRestrictBot")
 os.environ.setdefault("MONGO_URL", "mongodb://localhost:27017")
 
 import main  # noqa: E402  (import after the environment is ready)
-import appapi  # noqa: E402
 import engines  # noqa: E402
 import telemetry  # noqa: E402
 from pyrogram.types import (  # noqa: E402
@@ -1059,14 +1058,8 @@ DB_NAMES = [
     # Auto-delete and the Telegram Stars ledger
     "cleanup_old_records", "add_stars_payment", "get_stars_payment", "complete_stars_payment",
     "get_stars_payments",
-    # The Vmore app (replaces the retired /CreateBot child-bot system)
-    "create_app_token", "get_app_token", "get_active_app_token", "revoke_app_token",
-    "touch_app_token", "mark_app_token_login", "list_app_tokens", "count_app_tokens",
-    "register_app_user", "increment_app_user_usage", "get_app_user", "list_app_users",
-    "count_app_users", "add_app_activity", "update_app_activity", "get_app_activity",
-    "count_app_activity", "cleanup_app_activity", "set_app_apk", "get_app_apk",
-    "get_app_config", "set_app_base_url", "purge_created_bot_data",
-    "app_token_expired", "app_token_days_left", "expire_stale_app_tokens",
+    # The retired child-bot purge still runs on startup
+    "purge_created_bot_data",
 ]
 
 
@@ -1084,7 +1077,6 @@ def db(monkeypatch) -> FakeDB:
         replacement = getattr(fake, name, None)
         if replacement is None:
             default = {
-                "expire_stale_app_tokens": 0,
                 "check_daily_limit": (True, 0),
                 "get_history": [],
                 "get_bookmarks": [],
@@ -1168,10 +1160,6 @@ def clean_state(monkeypatch):
     #: Round 14 state: the echo guard for a native copy made with the user's
     #: own session, and the giveaway DM fan-out, must both be born fresh.
     monkeypatch.setattr(main, "ECHO_GUARD", {})
-    #: The Vmore app: the owner card and the per-test app state.
-    monkeypatch.setattr(main, "OWNER_PROFILE_CACHE", {})
-    monkeypatch.setattr(main, "APP_BRIDGE", main.VmoreAppBridge())
-    monkeypatch.setattr(appapi, "JOBS", appapi.JobRegistry())
     monkeypatch.setattr(main, "HISTORY_CLEANUP_TASK", None)
     monkeypatch.setattr(main, "GIVEAWAY_BROADCAST_TASK", None)
     #: Round 15 state: the chats that show a picker reply keyboard and the users

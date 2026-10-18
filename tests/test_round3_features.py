@@ -122,13 +122,11 @@ async def test_private_link_single_message_and_buttons(db, monkeypatch):
     await main.text_handler(None, message)
 
     fetch.assert_not_called()
-    #: The two options the owner asked for — app first, premium (DM) second.
-    assert sc("Private / Restricted Link") in message.shown_text
-    assert sc("Unlimited Download (App)") in message.shown_text
+    #: With the app API retired a private link offers the premium DM route.
+    assert sc("Private Channel Access (Premium Only)") in message.shown_text
     rows = message.shown_markup.inline_keyboard
-    assert rows[0][0].callback_data == "app:apk" and rows[0][0].url is None  # APK → this chat, never a link
-    assert [b.callback_data for b in rows[1]] == ["cmd_premium", "cmd_refer"]
-    assert [b.text for b in rows[1]] == [sc("💎 Buy Premium"), sc("🎁 Earn Points")]
+    assert [b.callback_data for b in rows[0]] == ["cmd_premium", "cmd_refer"]
+    assert [b.text for b in rows[0]] == [sc("💎 Buy Premium"), sc("🎁 Earn Points")]
 
 
 @pytest.mark.asyncio
@@ -140,11 +138,9 @@ async def test_private_links_inside_bulk_and_range_get_the_same_screen(db, monke
                  "https://t.me/c/12345/10-12"):
         message = FakeMessage(text=text)
         await main.text_handler(None, message)
-        assert sc("Private / Restricted Link") in message.shown_text, text
-        assert sc("Unlimited Download (App)") in message.shown_text, text
+        assert sc("Private Channel Access (Premium Only)") in message.shown_text, text
         rows = message.shown_markup.inline_keyboard
-        assert rows[0][0].callback_data == "app:apk" and rows[0][0].url is None, text
-        assert [b.callback_data for b in rows[1]] == ["cmd_premium", "cmd_refer"], text
+        assert [b.callback_data for b in rows[0]] == ["cmd_premium", "cmd_refer"], text
 
 
 @pytest.mark.asyncio
@@ -153,9 +149,8 @@ async def test_fetch_and_send_private_gate_shows_upsell(db):
     message = FakeMessage(user=FakeUser(1001))
     result = await main.fetch_and_send(message, status, main.bot, -1001234, 5)
     assert result is False
-    assert sc("Private / Restricted Link") in status.shown_text
-    assert status.shown_markup.inline_keyboard[0][0].callback_data == "app:apk"
-    assert status.shown_markup.inline_keyboard[1][0].callback_data == "cmd_premium"
+    assert sc("Private Channel Access (Premium Only)") in status.shown_text
+    assert status.shown_markup.inline_keyboard[0][0].callback_data == "cmd_premium"
 
 
 # --------------------------------------------------------------------------- #
@@ -719,9 +714,8 @@ async def test_channel_extraction_applies_the_private_channel_rules(db, fake_bot
     await main.extract_channel_links(post, db.users[1001])
 
     fetch.assert_not_called()
-    assert sc("Private / Restricted Link") in post.shown_text
+    assert sc("Private Channel Access (Premium Only)") in post.shown_text
     assert post.button("cmd_premium")
-    assert post.shown_markup.inline_keyboard[0][0].callback_data == "app:apk"
 
 
 @pytest.mark.asyncio
