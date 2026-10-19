@@ -237,7 +237,7 @@
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
+                android:layout_marginTop="12dp"
                 android:orientation="horizontal">
 
                 <Button
@@ -245,6 +245,9 @@
                     android:layout_width="0dp"
                     android:layout_weight="1"
                     android:layout_height="wrap_content"
+                    android:layout_marginRight="5dp"
+                    android:maxLines="1"
+                    android:ellipsize="end"
                     style="@style/VmoreButtonGhost"
                     android:text="@string/home_paste" />
 
@@ -253,86 +256,165 @@
                     android:layout_width="0dp"
                     android:layout_weight="1"
                     android:layout_height="wrap_content"
-                    android:layout_marginLeft="8dp"
+                    android:layout_marginLeft="5dp"
+                    android:layout_marginRight="5dp"
+                    android:maxLines="1"
+                    android:ellipsize="end"
                     style="@style/VmoreButtonGhost"
                     android:text="@string/home_clear" />
 
                 <Button
                     android:id="@+id/scanButton"
                     android:layout_width="0dp"
-                    android:layout_weight="1.3"
+                    android:layout_weight="1.25"
                     android:layout_height="wrap_content"
-                    android:layout_marginLeft="8dp"
+                    android:layout_marginLeft="5dp"
+                    android:maxLines="1"
+                    android:ellipsize="end"
                     style="@style/VmoreButtonGhost"
                     android:text="@string/home_scan_chat" />
             </LinearLayout>
 
-            <LinearLayout
-                android:layout_width="match_parent"
+            <!--
+              What a batch does, laid out exactly like the Settings page: one
+              switch per row with a soft divider under it, then three rows that
+              carry an icon, the name of the choice and the value in force.
+              Nothing here competes for a line with anything else.
+            -->
+            <TextView
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="12dp"
-                android:orientation="horizontal"
-                android:weightSum="3">
-
-                <Button
-                    android:id="@+id/chipUpload"
-                    android:layout_width="0dp"
-                    android:layout_weight="1"
-                    android:layout_height="wrap_content"
-                    style="@style/VmoreChip"
-                    android:text="@string/home_option_upload" />
-
-                <Button
-                    android:id="@+id/chipDelete"
-                    android:layout_width="0dp"
-                    android:layout_weight="1"
-                    android:layout_height="wrap_content"
-                    android:layout_marginLeft="8dp"
-                    style="@style/VmoreChip"
-                    android:text="@string/home_option_delete" />
-
-                <Button
-                    android:id="@+id/chipForward"
-                    android:layout_width="0dp"
-                    android:layout_weight="1"
-                    android:layout_height="wrap_content"
-                    android:layout_marginLeft="8dp"
-                    style="@style/VmoreChip"
-                    android:text="@string/home_option_forward" />
-            </LinearLayout>
+                android:layout_marginTop="16dp"
+                style="@style/VmoreSection"
+                android:text="@string/home_options_label" />
 
             <LinearLayout
+                android:id="@+id/optionBox"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="8dp"
-                android:orientation="horizontal"
-                android:weightSum="3">
+                android:layout_marginTop="2dp"
+                android:orientation="vertical">
 
-                <Button
-                    android:id="@+id/chipQuality"
-                    android:layout_width="0dp"
-                    android:layout_weight="1"
-                    android:layout_height="wrap_content"
-                    style="@style/VmoreChip"
-                    android:text="@string/home_option_quality" />
+                <LinearLayout
+                    android:id="@+id/rowUpload"
+                    style="@style/VmoreOptionRow">
 
-                <Button
-                    android:id="@+id/chipFilter"
-                    android:layout_width="0dp"
-                    android:layout_weight="1"
-                    android:layout_height="wrap_content"
-                    android:layout_marginLeft="8dp"
-                    style="@style/VmoreChip"
-                    android:text="@string/home_option_filter" />
+                    <TextView
+                        style="@style/VmoreOptionTitle"
+                        android:text="@string/home_option_upload" />
 
-                <Button
-                    android:id="@+id/chipSchedule"
-                    android:layout_width="0dp"
-                    android:layout_weight="1"
-                    android:layout_height="wrap_content"
-                    android:layout_marginLeft="8dp"
-                    style="@style/VmoreChip"
-                    android:text="@string/home_option_schedule" />
+                    <Switch
+                        android:id="@+id/switchUpload"
+                        style="@style/VmoreOptionSwitch" />
+                </LinearLayout>
+
+                <View style="@style/VmoreOptionDivider" />
+
+                <LinearLayout
+                    android:id="@+id/rowDelete"
+                    style="@style/VmoreOptionRow">
+
+                    <TextView
+                        style="@style/VmoreOptionTitle"
+                        android:text="@string/home_option_delete" />
+
+                    <Switch
+                        android:id="@+id/switchDelete"
+                        style="@style/VmoreOptionSwitch" />
+                </LinearLayout>
+
+                <View style="@style/VmoreOptionDivider" />
+
+                <LinearLayout
+                    android:id="@+id/rowForward"
+                    style="@style/VmoreOptionRow">
+
+                    <TextView
+                        style="@style/VmoreOptionTitle"
+                        android:text="@string/home_option_forward" />
+
+                    <Switch
+                        android:id="@+id/switchForward"
+                        style="@style/VmoreOptionSwitch" />
+                </LinearLayout>
+
+                <View style="@style/VmoreOptionDivider" />
+
+                <LinearLayout
+                    android:id="@+id/rowQuality"
+                    style="@style/VmoreOptionRow">
+
+                    <ImageView
+                        style="@style/VmoreOptionIcon"
+                        android:src="@drawable/ic_image"
+                        android:contentDescription="@string/home_option_quality" />
+
+                    <TextView
+                        style="@style/VmoreOptionTitle"
+                        android:text="@string/home_option_quality" />
+
+                    <TextView
+                        android:id="@+id/valueQuality"
+                        style="@style/VmoreOptionValue"
+                        android:text="@string/settings_send_as_file" />
+
+                    <ImageView
+                        style="@style/VmoreOptionChevron"
+                        android:src="@drawable/ic_arrow_right"
+                        android:contentDescription="@string/home_change" />
+                </LinearLayout>
+
+                <View style="@style/VmoreOptionDivider" />
+
+                <LinearLayout
+                    android:id="@+id/rowFilter"
+                    style="@style/VmoreOptionRow">
+
+                    <ImageView
+                        style="@style/VmoreOptionIcon"
+                        android:src="@drawable/ic_search"
+                        android:contentDescription="@string/home_option_filter" />
+
+                    <TextView
+                        style="@style/VmoreOptionTitle"
+                        android:text="@string/home_option_filter" />
+
+                    <TextView
+                        android:id="@+id/valueFilter"
+                        style="@style/VmoreOptionValue"
+                        android:text="@string/filters_all" />
+
+                    <ImageView
+                        style="@style/VmoreOptionChevron"
+                        android:src="@drawable/ic_arrow_right"
+                        android:contentDescription="@string/home_change" />
+                </LinearLayout>
+
+                <View style="@style/VmoreOptionDivider" />
+
+                <LinearLayout
+                    android:id="@+id/rowSchedule"
+                    style="@style/VmoreOptionRow">
+
+                    <ImageView
+                        style="@style/VmoreOptionIcon"
+                        android:src="@drawable/ic_history"
+                        android:contentDescription="@string/home_option_schedule" />
+
+                    <TextView
+                        style="@style/VmoreOptionTitle"
+                        android:text="@string/home_option_schedule" />
+
+                    <TextView
+                        android:id="@+id/valueSchedule"
+                        style="@style/VmoreOptionValue"
+                        android:text="@string/home_schedule_now" />
+
+                    <ImageView
+                        style="@style/VmoreOptionChevron"
+                        android:src="@drawable/ic_arrow_right"
+                        android:contentDescription="@string/home_change" />
+                </LinearLayout>
             </LinearLayout>
 
             <!-- The clipboard banner: a Telegram link is one tap away. -->

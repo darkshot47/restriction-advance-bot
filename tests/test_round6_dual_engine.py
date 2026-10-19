@@ -990,11 +990,14 @@ def test_models_architecture_button_is_red_and_lives_in_the_help_footer():
         assert button.style == ui.BUTTON_DANGER, "the footer button must be RED"
 
     rows = ui.start_keyboard().inline_keyboard
-    assert len(rows) == 6, rows
+    # Six rows of commands, then the full-width Vmore App row the owner asked for.
+    assert len(rows) == 7, rows
+    assert [b.callback_data for b in rows[-1]] == ["cmd_app"]
 
     help_rows = ui.help_keyboard().inline_keyboard
     assert help_rows[-2] == [button], "the red button closes the help menu"
     assert len(help_rows) <= 6
+    assert any(b.callback_data == "cmd_app" for row in help_rows for b in row)
 
 
 def test_start_text_carries_the_engine_badge():

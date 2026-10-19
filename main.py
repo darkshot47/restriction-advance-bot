@@ -96,6 +96,8 @@ from database import (
     ensure_giveaway_indexes, PICKER_SWEEP_FIELD,
     cleanup_old_records, add_stars_payment, get_stars_payment, complete_stars_payment,
     get_stars_payments,
+    # The Android app the owner publishes with /apk.
+    set_app_apk, get_app_apk, app_version_from_name,
     purge_created_bot_data,
 )  # noqa: F401
 
@@ -829,13 +831,13 @@ async def private_link_keyboard():
 
 
 async def reply_private_access(message):
-    """Private link without access → the premium route."""
-    await say(message, ui.private_access_text(),
+    """Private link without access → the premium route, plus the app."""
+    await say(message, ui.app_private_link_text(),
               reply_markup=await private_link_keyboard())
 
 
 async def edit_private_access(status):
-    await say_edit(status, ui.private_access_text(),
+    await say_edit(status, ui.app_private_link_text(),
                    reply_markup=await private_link_keyboard())
 
 
@@ -2196,6 +2198,32 @@ async def cb_help(client, query):
     await show_help(query)
 
 
+@callback_action("cmd_app")
+async def cb_app(client, query):
+    """📱 Vmore App — the very page /app shows, edited into this message."""
+    await query.answer()
+    await show_app_page(query)
+
+
+@callback_action("app:apk")
+async def cb_app_apk(client, query):
+    """♾️ Unlimited Download — the owner's APK, posted straight into this chat."""
+    if not await app_build() and query.from_user.id == OWNER_ID:
+        #: Nothing published yet, and this is the one person who can publish it.
+        await query.answer(ui_text("📦 No APK published yet"))
+        await render(query, ui.app_missing_text(), ui.app_details_keyboard())
+        return
+    await query.answer(ui_text("📦 Sending the APK…"))
+    await deliver_app_apk(query)
+
+
+@callback_action("app:howto")
+async def cb_app_howto(client, query):
+    """❓ How to use? — the phone-side walkthrough, nothing else."""
+    await query.answer()
+    await render(query, ui.app_howto_text(), ui.app_howto_keyboard())
+
+
 @callback_action("cmd_giveaway_panel")
 async def cb_cmd_giveaway_panel(client, query):
     await query.answer()
@@ -2548,7 +2576,7 @@ NEW_COMMAND_NAMES = [
     "setdump", "deldump", "dump", "post", "native",
     "giveaway", "participants", "endgiveaway", "giveawaystatus",
 ]
-COMMAND_NAMES = NEW_COMMAND_NAMES + ["start", "help", "apk", "login", "logout", "status", "cancel", "setcaption", "delcaption", "setthumb", "delthumb", "setprefix", "setsuffix", "mystats", "myinfo", "history", "settings", "language", "refer", "bookmark", "bookmarks", "favorite", "favorites", "share", "feedback", "invite", "premium", "stats", "users", "loggedusers", "activeusers", "newusers", "topusers", "broadcast", "botcast", "superbroadcast", "menu", "cmsg", "unpin", "ban", "unban", "banlist", "finduser", "userinfo", "addpremium", "removepremium", "premiumlist", "addadmin", "removeadmin", "adminlist", "setfsub", "fsublist", "delfsub", "fsublabel", "fsubcheck", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export", "adminhelp", "admin", "admins", "addqr", "delqr", "removeqr", "payments", "redeem", "setchat", "delchat", "models", "engine", "mychannels", "setengine"]
+COMMAND_NAMES = NEW_COMMAND_NAMES + ["start", "help", "app", "apk", "login", "logout", "status", "cancel", "setcaption", "delcaption", "setthumb", "delthumb", "setprefix", "setsuffix", "mystats", "myinfo", "history", "settings", "language", "refer", "bookmark", "bookmarks", "favorite", "favorites", "share", "feedback", "invite", "premium", "stats", "users", "loggedusers", "activeusers", "newusers", "topusers", "broadcast", "botcast", "superbroadcast", "menu", "cmsg", "unpin", "ban", "unban", "banlist", "finduser", "userinfo", "addpremium", "removepremium", "premiumlist", "addadmin", "removeadmin", "adminlist", "setfsub", "fsublist", "delfsub", "fsublabel", "fsubcheck", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export", "adminhelp", "admin", "admins", "addqr", "delqr", "removeqr", "payments", "redeem", "setchat", "delchat", "models", "engine", "mychannels", "setengine"]
 ABORT_GROUP = -1
 #: Runs before everything else: the one-time clean-up of a leftover picker keyboard.
 SWEEP_GROUP = -3
@@ -2679,17 +2707,107 @@ async def help_handler(client, message):
     await show_help(message)
 
 
-@bot.on_message(filters.command("apk") & filters.private)
-async def apk_handler(client, message):
-    """``/apk`` hands the app over without asking a single question.
+# --------------------------------------------------------------------------- #
+#  The Android app — /app (the page) and /apk (the file)
+#
+#  There is deliberately no deployment step here: no server URL to type in, no
+#  /gentoken, no access token.  ``/app`` explains the app, ``/apk`` either
+#  publishes the owner's file or hands it over.
+# --------------------------------------------------------------------------- #
 
-    There is no server to point the app at any more, so the old deployment
-    question is gone on purpose: one message, one download button.
+async def app_build() -> dict | None:
+    """The APK the owner published, or ``None`` when there is none yet.
+
+    A broken/unreachable store must never eat the download link, so a read
+    failure is treated exactly like "nothing published yet".
     """
+    try:
+        record = await get_app_apk()
+    except Exception:
+        return None
+    return record or None
+
+
+def app_document_of(message):
+    """The ``.apk`` document this message carries or replies to (``None``)."""
+    if message is None:
+        return None
+    for source in (message, getattr(message, "reply_to_message", None)):
+        document = getattr(source, "document", None) if source is not None else None
+        if document is None or not getattr(document, "file_id", None):
+            continue
+        if str(getattr(document, "file_name", "") or "").lower().endswith(".apk"):
+            return document
+    return None
+
+
+async def show_app_page(source):
+    """The app screen itself — the one page every app button leads to."""
+    await render(source, ui.app_details_text(await app_build()), ui.app_details_keyboard())
+
+
+async def send_app_apk(source, record) -> bool:
+    """Drop the owner's uploaded APK into this chat, with the release link beside it."""
+    chat_id = reply_chat_id(getattr(source, "message", None) or source)
+    if not chat_id or not record or not record.get("file_id"):
+        return False
+    try:
+        await bot.send_document(chat_id, record["file_id"],
+                                caption=ui_text(ui.app_sent_text(record)),
+                                reply_markup=ui.app_sent_keyboard())
+        return True
+    except Exception as exc:
+        print(f"[APK] could not send the published file to chat={chat_id}: "
+              f"{type(exc).__name__}: {exc}", flush=True)
+        return False
+
+
+async def deliver_app_apk(source):
+    """/apk for everybody: the file when there is one, the link when there is not.
+
+    One answer, no question — the app has no server, so there is nothing to ask
+    for before handing it over.
+    """
+    record = await app_build()
+    if record and await send_app_apk(source, record):
+        return
     keyboard = ui.keyboard([[ui.button("⬇️ Download Vmore", url=VMORE_APK_URL,
                                       style="primary")]])
-    await say(message, ui.apk_text(), reply_markup=keyboard,
-              disable_web_page_preview=True)
+    await render(source, ui.apk_text(), keyboard, disable_web_page_preview=True)
+
+
+async def publish_app_apk(message, document):
+    """Owner-only: remember this file as the build ``/apk`` sends to everyone."""
+    file_name = getattr(document, "file_name", None) or "Vmore.apk"
+    row = await set_app_apk(
+        file_id=document.file_id,
+        file_name=file_name,
+        size=getattr(document, "file_size", None),
+        version=app_version_from_name(file_name),
+        uploaded_by=message.from_user.id,
+    )
+    await say(message, ui.app_saved_text(row), reply_markup=ui.app_details_keyboard())
+
+
+@bot.on_message(filters.command("app") & filters.private)
+async def app_handler(client, message):
+    await show_app_page(message)
+
+
+@bot.on_message(filters.command("apk") & filters.private)
+async def apk_handler(client, message):
+    """``/apk`` publishes the app for the owner and delivers it to everybody else.
+
+    The owner sends an ``.apk`` document with ``/apk`` (or replies ``/apk`` to
+    one): it is stored as the file every user is handed, with no further
+    question.  Anyone else — and the owner without a document — simply receives
+    it, together with the release link.
+    """
+    document = app_document_of(message)
+    if document is not None and message.from_user.id == OWNER_ID:
+        await publish_app_apk(message, document)
+        return
+    await deliver_app_apk(message)
 
 
 @bot.on_message(filters.command("login") & filters.private)
@@ -5474,7 +5592,7 @@ async def run_private_batch(message, items, *, heading: str | None = None,
             status = await say(message, ui.batch_item_text(label))
             if is_private:
                 if not await private_access(user_id):
-                    await say_edit(status, ui.private_access_text(),
+                    await say_edit(status, ui.app_private_link_text(),
                                    reply_markup=await private_link_keyboard())
                     return False
                 fetch_client = await get_user_client(user_id)
@@ -5856,7 +5974,7 @@ async def extract_channel_links(message, user_row, *, sleeper=asyncio.sleep):
         status = await say(message,
                            f"⏳ Fetching {index}/{len(links)}… {ui.engine_icon(decision.engine)}")
         if is_private and not await private_access(user_id):
-            await say_edit(status, ui.private_access_text(),
+            await say_edit(status, ui.app_private_link_text(),
                            reply_markup=await private_link_keyboard())
             return False
         fetch_client = bot
@@ -8268,7 +8386,7 @@ ADMIN_PAGES = [
      ["addadmin", "removeadmin", "adminlist", "maintenance",
       "clearlogs", "adminhelp"]),
     ("🎁 Owner Tools",
-     ["pin", "pinned", "setdump", "deldump", "dump", "post"]),
+     ["pin", "pinned", "setdump", "deldump", "dump", "post", "app", "apk"]),
     ("⚡ Advanced & Giveaways",
      ["native", "giveaway", "participants", "endgiveaway", "giveawaystatus"]),
 ]
@@ -8337,6 +8455,7 @@ COMMAND_HANDLERS = {
     "giveawaystatus": giveaway_status_handler,
     "start": start_handler,
     "help": help_handler,
+    "app": app_handler,
     "apk": apk_handler,
     "login": login_handler,
     "logout": logout_handler,
@@ -8679,6 +8798,8 @@ ADMIN_INLINE_HANDLERS = {
     "setchat": setchat_handler, "delchat": delchat_handler,
     "setengine": setengine_handler,
     "giveawaystatus": giveaway_status_handler,
+    # The app page and its APK: the very same handlers the slash commands run.
+    "app": app_handler, "apk": apk_handler,
 }
 
 

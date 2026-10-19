@@ -1,6 +1,7 @@
 package com.vmore.app;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Intent;
 import android.os.Bundle;
 import android.os.Handler;
@@ -10,6 +11,7 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
+import android.widget.Switch;
 import android.widget.TextView;
 
 import java.io.File;
@@ -32,9 +34,15 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
     private TextView destTitle;
     private TextView accountText;
     private Button startButton;
-    private Button chipUpload;
-    private Button chipDelete;
-    private Button chipForward;
+    //: The three switches of the home screen, one per row, exactly as the
+    //: Settings page renders them: the title gets the whole line and the
+    //: switch sits on the right in its own blue.
+    private Switch switchUpload;
+    private Switch switchDelete;
+    private Switch switchForward;
+    private TextView valueQuality;
+    private TextView valueFilter;
+    private TextView valueSchedule;
     private View progressCard;
     private TextView progressName;
     private TextView progressStage;
@@ -47,9 +55,6 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
     private TextView profileUser;
     private TextView emptyText;
     private boolean forwardBatch;
-    private Button chipQuality;
-    private Button chipFilter;
-    private Button chipSchedule;
     private View clipboardBanner;
     private TextView clipboardText;
     private String clipboardLink = "";
@@ -100,9 +105,15 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         destTitle = findViewById(R.id.destTitle);
         accountText = findViewById(R.id.accountText);
         startButton = findViewById(R.id.startButton);
-        chipUpload = findViewById(R.id.chipUpload);
-        chipDelete = findViewById(R.id.chipDelete);
-        chipForward = findViewById(R.id.chipForward);
+        switchUpload = findViewById(R.id.switchUpload);
+        switchDelete = findViewById(R.id.switchDelete);
+        switchForward = findViewById(R.id.switchForward);
+        valueQuality = findViewById(R.id.valueQuality);
+        valueFilter = findViewById(R.id.valueFilter);
+        valueSchedule = findViewById(R.id.valueSchedule);
+        Ui.tintSwitch(switchUpload);
+        Ui.tintSwitch(switchDelete);
+        Ui.tintSwitch(switchForward);
         progressCard = findViewById(R.id.progressCard);
         progressName = findViewById(R.id.progressName);
         progressStage = findViewById(R.id.progressStage);
@@ -110,9 +121,6 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         progressBar = findViewById(R.id.progressBar);
         pauseButton = findViewById(R.id.pauseButton);
         recentList = findViewById(R.id.recentList);
-        chipQuality = findViewById(R.id.chipQuality);
-        chipFilter = findViewById(R.id.chipFilter);
-        chipSchedule = findViewById(R.id.chipSchedule);
         clipboardBanner = findViewById(R.id.clipboardBanner);
         clipboardText = findViewById(R.id.clipboardText);
         avatarView = findViewById(R.id.profileAvatar);
@@ -143,21 +151,23 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         findViewById(R.id.viewAllButton).setOnClickListener(v ->
                 startActivity(new Intent(this, HistoryActivity.class)));
         startButton.setOnClickListener(v -> start());
-        chipUpload.setOnClickListener(v -> {
+        //: The row is the tap target — the switch itself is not clickable, so
+        //: one press never toggles twice.
+        findViewById(R.id.rowUpload).setOnClickListener(v -> {
             Prefs.setAutoUpload(this, !Prefs.autoUpload(this));
             paintOptions();
         });
-        chipDelete.setOnClickListener(v -> {
+        findViewById(R.id.rowDelete).setOnClickListener(v -> {
             Prefs.setAutoDeleteLocal(this, !Prefs.autoDeleteLocal(this));
             paintOptions();
         });
-        chipForward.setOnClickListener(v -> {
+        findViewById(R.id.rowForward).setOnClickListener(v -> {
             forwardBatch = !forwardBatch;
             paintOptions();
         });
-        chipQuality.setOnClickListener(v -> cycleQuality());
-        chipFilter.setOnClickListener(v -> openFilters());
-        chipSchedule.setOnClickListener(v -> startActivity(
+        findViewById(R.id.rowQuality).setOnClickListener(v -> pickQuality());
+        findViewById(R.id.rowFilter).setOnClickListener(v -> openFilters());
+        findViewById(R.id.rowSchedule).setOnClickListener(v -> startActivity(
                 new Intent(this, SettingsActivity.class)));
         findViewById(R.id.clipboardAdd).setOnClickListener(v -> {
             if (!clipboardLink.isEmpty()) {
@@ -177,8 +187,10 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
             paintLive();
         });
 
-        for (View view : new View[]{startButton, chipUpload, chipDelete, chipForward,
-                chipQuality, chipFilter, chipSchedule, pauseButton}) {
+        for (View view : new View[]{startButton, pauseButton,
+                findViewById(R.id.rowUpload), findViewById(R.id.rowDelete),
+                findViewById(R.id.rowForward), findViewById(R.id.rowQuality),
+                findViewById(R.id.rowFilter), findViewById(R.id.rowSchedule)}) {
             Anim.pressible(view);
         }
         Anim.pageIn(findViewById(R.id.header));
@@ -293,51 +305,79 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         }
     }
 
+    /**
+     * The option rows, painted from the stored preferences.
+     *
+     * A switch shows its own state, so no label has to repeat it; the three
+     * chooser rows carry the value in force, and a value that is doing
+     * something is set on the blue pill so it reads at a glance.
+     */
     private void paintOptions() {
-        boolean upload = Prefs.autoUpload(this);
-        boolean delete = Prefs.autoDeleteLocal(this);
-        chipUpload.setText(getString(R.string.home_option_upload)
-                + (upload ? " • on" : " • off"));
-        chipUpload.setBackgroundResource(upload
-                ? R.drawable.bg_chip_active : R.drawable.bg_chip);
-        chipDelete.setText(getString(R.string.home_option_delete)
-                + (delete ? " • on" : " • off"));
-        chipDelete.setBackgroundResource(delete
-                ? R.drawable.bg_chip_active : R.drawable.bg_chip);
-        chipForward.setText(getString(R.string.home_option_forward)
-                + (forwardBatch ? " • on" : " • off"));
-        chipForward.setBackgroundResource(forwardBatch
-                ? R.drawable.bg_chip_active : R.drawable.bg_chip);
+        switchUpload.setChecked(Prefs.autoUpload(this));
+        switchDelete.setChecked(Prefs.autoDeleteLocal(this));
+        switchForward.setChecked(forwardBatch);
 
-        String sendAs = Prefs.sendAs(this);
-        String quality = Prefs.SEND_VIDEO.equals(sendAs) ? getString(R.string.settings_send_as_video)
-                : Prefs.SEND_PHOTO.equals(sendAs) ? getString(R.string.settings_send_as_photo)
-                : getString(R.string.settings_send_as_file);
-        chipQuality.setText(getString(R.string.home_option_quality) + " • " + quality);
+        paintValue(valueQuality, qualityLabel(), !Prefs.SEND_FILE.equals(Prefs.sendAs(this)));
 
         boolean filtered = !Prefs.filterKinds(this).isEmpty()
                 || Prefs.filterMinSize(this) > 0 || Prefs.filterMaxSize(this) > 0;
-        chipFilter.setText(getString(R.string.home_option_filter)
-                + (filtered ? " • on" : " • off"));
-        chipFilter.setBackgroundResource(filtered
-                ? R.drawable.bg_chip_active : R.drawable.bg_chip);
+        paintValue(valueFilter, getString(filtered
+                ? R.string.home_filter_on : R.string.filters_all), filtered);
 
         long at = Prefs.scheduleAt(this);
         boolean scheduled = at > System.currentTimeMillis();
-        chipSchedule.setText(scheduled
-                ? Format.when(at) : getString(R.string.home_option_schedule));
-        chipSchedule.setBackgroundResource(scheduled
-                ? R.drawable.bg_chip_active : R.drawable.bg_chip);
+        paintValue(valueSchedule, scheduled ? Format.when(at)
+                : getString(R.string.home_schedule_now), scheduled);
     }
 
-    /** File, video, photo — the quality every job of the next batch uses. */
-    private void cycleQuality() {
+    /**
+     * One value on the right of a row: plain text while it is the default, a
+     * blue pill with white text the moment the option is doing something.
+     */
+    private void paintValue(TextView view, String text, boolean active) {
+        view.setText(text);
+        view.setBackgroundResource(active ? R.drawable.bg_chip_active : 0);
+        view.setTextColor(getColor(active ? R.color.vmore_on_accent : R.color.vmore_text_dim));
+    }
+
+    /** File, video or photo — what the next batch is sent as. */
+    private String qualityLabel() {
+        String sendAs = Prefs.sendAs(this);
+        if (Prefs.SEND_VIDEO.equals(sendAs)) {
+            return getString(R.string.settings_send_as_video);
+        }
+        if (Prefs.SEND_PHOTO.equals(sendAs)) {
+            return getString(R.string.settings_send_as_photo);
+        }
+        return getString(R.string.settings_send_as_file);
+    }
+
+    /**
+     * The quality chooser: the same three words the Settings page offers, on
+     * the screen the batch is actually started from.
+     */
+    private void pickQuality() {
+        String[] labels = {getString(R.string.settings_send_as_file),
+                getString(R.string.settings_send_as_video),
+                getString(R.string.settings_send_as_photo)};
+        String[] values = {Prefs.SEND_FILE, Prefs.SEND_VIDEO, Prefs.SEND_PHOTO};
         String current = Prefs.sendAs(this);
-        String next = Prefs.SEND_FILE.equals(current) ? Prefs.SEND_VIDEO
-                : Prefs.SEND_VIDEO.equals(current) ? Prefs.SEND_PHOTO : Prefs.SEND_FILE;
-        Prefs.setSendAs(this, next);
-        paintOptions();
-        Anim.fadeIn(chipQuality, 140);
+        int checked = 0;
+        for (int index = 0; index < values.length; index++) {
+            if (values[index].equals(current)) {
+                checked = index;
+            }
+        }
+        new AlertDialog.Builder(this)
+                .setTitle(R.string.home_option_quality)
+                .setSingleChoiceItems(labels, checked, (dialog, which) -> {
+                    Prefs.setSendAs(this, values[which]);
+                    dialog.dismiss();
+                    paintOptions();
+                    Anim.fadeIn(valueQuality, 160);
+                })
+                .setNegativeButton(R.string.common_cancel, null)
+                .show();
     }
 
     /** The batch filter: which kinds are kept, and how big a file may be. */

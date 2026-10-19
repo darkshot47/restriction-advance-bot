@@ -1,4 +1,5 @@
 import os
+import re
 from motor.motor_asyncio import AsyncIOMotorClient
 from datetime import datetime, timedelta
 import calendar
@@ -1181,6 +1182,53 @@ async def get_qr():
 
 async def delete_qr():
     await config_col.delete_one({"type": "payment_qr"})
+
+
+# --------------------------------------------------------------------------- #
+#  The Android app the owner publishes
+#
+#  ``/apk`` has exactly two modes: the owner attaches a build, everybody else
+#  receives it.  Both are served by this single ``config`` document — no server
+#  address, no token, nothing to keep in sync anywhere else.
+# --------------------------------------------------------------------------- #
+
+#: The one document that remembers which APK the owner uploaded.
+APP_APK_CONFIG_TYPE = "app_apk"
+
+
+#: The version a file name carries, so the bot can say which build it is sending.
+APP_VERSION_RE = re.compile(r"(\d+\.\d+(?:\.\d+)?)")
+
+
+def app_version_from_name(name) -> str:
+    """``"Vmore-2.2.12.apk"`` → ``"2.2.12"``; empty when the name says nothing."""
+    match = APP_VERSION_RE.search(str(name or ""))
+    return match.group(1) if match else ""
+
+
+async def set_app_apk(*, file_id, file_name=None, size=None, version=None,
+                      apk_hash=None, uploaded_by=None):
+    """Store the owner's APK so ``/apk`` can hand the very same file over."""
+    row = {
+        "file_id": file_id,
+        "file_name": file_name or "Vmore.apk",
+        "size": int(size or 0),
+        "version": version or app_version_from_name(file_name) or None,
+        "apk_hash": apk_hash,
+        "uploaded_by": int(uploaded_by) if uploaded_by is not None else None,
+        "uploaded_at": datetime.utcnow(),
+    }
+    await config_col.update_one({"type": APP_APK_CONFIG_TYPE}, {"$set": row}, upsert=True)
+    return row
+
+
+async def get_app_apk():
+    """The published APK (``None`` when the owner has not uploaded one)."""
+    row = await config_col.find_one({"type": APP_APK_CONFIG_TYPE})
+    if not row:
+        return None
+    row.pop("_id", None)
+    return row
 
 
 async def add_payment(user_id, proof, note=None):

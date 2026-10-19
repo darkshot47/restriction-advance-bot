@@ -50,6 +50,11 @@
     <string name="home_option_delete">Delete local copy</string>
     <string name="home_option_forward">Forward without download</string>
     <string name="home_scan_chat">Scan a chat</string>
+    <!-- The option rows under the link box, in the words the Settings page uses. -->
+    <string name="home_options_label">Batch options</string>
+    <string name="home_schedule_now">Start now</string>
+    <string name="home_schedule_later">Waiting</string>
+    <string name="home_filter_on">Filtered</string>
     <string name="home_recent">Recent</string>
     <string name="home_view_all">View all</string>
     <string name="home_nav_new">New</string>
