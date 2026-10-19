@@ -4156,19 +4156,13 @@ def giveaway_end_invalid_text() -> str:
 #  Nothing in this section mentions a server address, an access token or a
 #  token-revoking wizard, on purpose: the app signs into Telegram on the phone
 #  itself, so there is no deployment step to explain.  The only link any of
-#  these screens uses is the release APK, and it always lives in a ``url=``
-#  button — never in body copy.
+#  these screens sends is the APK document published by the owner. No external
+#  download URL is exposed in the app flow.
 # --------------------------------------------------------------------------- #
 
 #: The line that answers the question these screens used to provoke.
 APP_NO_SERVER_LINE = ("There is no server address and no token to enter — the app signs "
                       "into Telegram on your phone, with your own account.")
-
-
-def app_download_button(label: str = "⬇️ Download App (Unlimited)") -> InlineKeyboardButton:
-    """The direct release link — the only URL on any app screen."""
-    from config import VMORE_APK_URL
-    return button(clamp_label(label), url=VMORE_APK_URL, style="success")
 
 
 def app_menu_button() -> InlineKeyboardButton:
@@ -4198,7 +4192,7 @@ def app_size_label(size) -> str:
 def app_build_line(apk=None) -> str:
     """What the user is about to install, straight from the owner's upload."""
     if not apk:
-        return "📦 **Latest build:** the button below always serves the newest release."
+        return "📦 **Build:** ask the Owner to publish the APK with /apk."
     version = str(apk.get("version") or "").strip()
     parts = [f"{APP_NAME} {version}".strip()]
     size = app_size_label(apk.get("size"))
@@ -4223,7 +4217,7 @@ def app_details_text(apk=None) -> str:
         "♾️ **Unlimited downloads** — no daily count and no quota to run out of.\n"
         "🔒 **Private and restricted links** — whatever your account can open, it saves.\n"
         "📤 **Upload to any chat** — a channel, a group, or Saved Messages.\n\n"
-        "1. Tap **Download App** below and open the file.\n"
+        "1. Tap **Send APK in chat** below and open the file.\n"
         "2. Allow **Install unknown apps** once, for the app you downloaded it with.\n"
         "3. Sign in with your number and the code Telegram sends.\n\n"
         f"💡 {APP_NO_SERVER_LINE}\n\n"
@@ -4232,13 +4226,12 @@ def app_details_text(apk=None) -> str:
 
 
 def app_details_keyboard() -> InlineKeyboardMarkup:
-    """The app page: the file, the guide, the owner, home."""
-    from config import OWNER_CONTACT_URL, PAYMENT_CONTACT
+    """The app page: send the file in chat, open the guide, contact the owner."""
+    from config import OWNER_CONTACT_URL
     return keyboard([
-        [app_download_button()],
         [app_send_button()],
         [button("❓ How to use?", callback_data="app:howto", style="primary"),
-         button(f"👤 @{PAYMENT_CONTACT}", url=OWNER_CONTACT_URL, style="primary")],
+         button("👤 Owner", url=OWNER_CONTACT_URL, style="primary")],
         [home_button()],
     ])
 
@@ -4266,7 +4259,6 @@ def app_howto_text() -> str:
 
 def app_howto_keyboard() -> InlineKeyboardMarkup:
     return keyboard([
-        [app_download_button()],
         [app_send_button()],
         [home_button()],
     ])
@@ -4286,9 +4278,8 @@ def app_sent_text(apk=None) -> str:
 
 
 def app_sent_keyboard() -> InlineKeyboardMarkup:
-    """Attached to the document itself: the release link, the guide, home."""
+    """Attached to the document itself: the guide and home."""
     return keyboard([
-        [app_download_button()],
         [button("❓ How to use?", callback_data="app:howto", style="primary"), home_button()],
     ])
 
@@ -4296,15 +4287,14 @@ def app_sent_keyboard() -> InlineKeyboardMarkup:
 def app_missing_text() -> str:
     """Owner-only: the **Send APK** button was pressed before anything was published.
 
-    Everyone else lands on :func:`apk_text` with the release link, so this screen
-    exists only to tell the owner the one step that is still missing.
+    This screen tells the owner the one step that is still missing.
     """
     return (
         "📦 **NO APK PUBLISHED YET**\n\n"
         f"No copy of {APP_NAME} is attached to this bot, so there is no file to send.\n\n"
         f"👑 **Owner:** send /apk with the ``.apk`` document — or reply /apk to one — and it "
         "becomes the file everybody is handed.\n"
-        "🔗 Until then the download button below serves the latest release.\n\n"
+        "No external download link is shared; the APK is delivered in this chat after upload.\n\n"
         f"💡 {APP_NO_SERVER_LINE}"
     )
 
@@ -4342,9 +4332,10 @@ def apk_text() -> str:
         "📲 **VMORE FOR ANDROID**\n\n"
         "Vmore runs entirely on your own phone with your own Telegram account. "
         "There is no server address and no token to enter. Nothing to configure.\n\n"
-        "1. Tap **Download Vmore** below and open the file.\n"
-        "2. Allow **Install unknown apps** once, for the app you downloaded it with.\n"
-        "3. Sign in with your own Telegram number and the code, or with your own "
+        "The APK is not available in this chat yet. Ask the owner to publish it with /apk.\n\n"
+        "Once published, use **📩 Send APK in chat** to receive the file here.\n"
+        "1. Allow **Install unknown apps** once, for the app you downloaded it with.\n"
+        "2. Sign in with your own Telegram number and the code, or with your own "
         "api_id and api_hash.\n\n"
         "Every next build installs over the old one, so signing in again is not needed."
     )

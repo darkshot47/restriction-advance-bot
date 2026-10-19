@@ -31,7 +31,7 @@ import database
 import engines
 import telemetry
 import native_engine
-from config import (BOT_USERNAME, VMORE_APK_URL, FREE_DAILY_LIMIT, FREE_PRIVATE_LINKS, WATERMARK, REFER_POINTS,
+from config import (BOT_USERNAME, FREE_DAILY_LIMIT, FREE_PRIVATE_LINKS, WATERMARK, REFER_POINTS,
                     REDEEM_POINTS, REDEEM_PREMIUM_DAYS, REDEEM_PREMIUM_MONTHS, PAYMENT_CONTACT,
                     PREMIUM_PLANS, PREMIUM_BENEFITS, REDEEM_LIMITATION, RUPEE,
                     PREMIUM_SOURCE_MANUAL, PREMIUM_SOURCE_PUBLIC, PREMIUM_SOURCE_MODELS,
@@ -2747,7 +2747,7 @@ async def show_app_page(source):
 
 
 async def send_app_apk(source, record) -> bool:
-    """Drop the owner's uploaded APK into this chat, with the release link beside it."""
+    """Drop the owner's uploaded APK into this chat."""
     chat_id = reply_chat_id(getattr(source, "message", None) or source)
     if not chat_id or not record or not record.get("file_id"):
         return False
@@ -2763,17 +2763,14 @@ async def send_app_apk(source, record) -> bool:
 
 
 async def deliver_app_apk(source):
-    """/apk for everybody: the file when there is one, the link when there is not.
-
-    One answer, no question — the app has no server, so there is nothing to ask
-    for before handing it over.
-    """
+    """Send the owner's published APK in chat; never expose an external URL."""
     record = await app_build()
     if record and await send_app_apk(source, record):
         return
-    keyboard = ui.keyboard([[ui.button("⬇️ Download Vmore", url=VMORE_APK_URL,
-                                      style="primary")]])
-    await render(source, ui.apk_text(), keyboard, disable_web_page_preview=True)
+    await render(source, ui.apk_text(), ui.keyboard([
+        [ui.app_send_button()],
+        [ui.home_button()],
+    ]))
 
 
 async def publish_app_apk(message, document):
@@ -2800,8 +2797,8 @@ async def apk_handler(client, message):
 
     The owner sends an ``.apk`` document with ``/apk`` (or replies ``/apk`` to
     one): it is stored as the file every user is handed, with no further
-    question.  Anyone else — and the owner without a document — simply receives
-    it, together with the release link.
+    question. Anyone else — and the owner without a document — receives the file
+    in chat when available, without an external download URL.
     """
     document = app_document_of(message)
     if document is not None and message.from_user.id == OWNER_ID:

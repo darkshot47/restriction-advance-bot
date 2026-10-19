@@ -19,7 +19,7 @@ import pytest
 
 import main
 import ui
-from config import OWNER_CONTACT_URL, VMORE_APK_URL
+from config import OWNER_CONTACT_URL
 from conftest import FakeMessage, FakeUser, sc
 
 OWNER = main.OWNER_ID
@@ -95,8 +95,10 @@ async def test_app_command_shows_the_app_page(db):
     assert by_data["app:howto"].text == sc("❓ How to use?")
     assert by_data["home"].text == sc("🏠 Main Menu")
     urls = [b.url for b in buttons if b.url]
-    assert VMORE_APK_URL in urls
     assert OWNER_CONTACT_URL in urls
+    assert not any("github.com" in url for url in urls)
+    assert "@XyrDeveloper" not in text
+    assert any(b.text == sc("👤 Owner") for b in buttons)
 
     #: One message, and the page fits a phone.
     assert len(message.replies) == 1
@@ -124,9 +126,9 @@ async def test_app_page_names_the_published_build(db):
 
 
 @pytest.mark.asyncio
-async def test_app_page_without_an_upload_still_offers_the_link(db):
+async def test_app_page_without_an_upload_says_owner_must_publish(db):
     text = ui.app_details_text(await main.app_build())
-    assert "Latest build" in text
+    assert "ask the Owner to publish" in text
     assert "2.2.12" not in text
 
 
@@ -257,23 +259,23 @@ async def test_apk_sends_the_published_file_into_the_chat(db, fake_bot):
     assert sc("VMORE APK") in caption
     assert "2.2.12" in caption
     buttons = flat(kwargs["reply_markup"])
-    assert VMORE_APK_URL in [b.url for b in buttons]
+    assert not any(b.url and "github.com" in b.url for b in buttons)
     assert "app:howto" in [b.callback_data for b in buttons]
 
 
 @pytest.mark.asyncio
-async def test_apk_falls_back_to_the_link_when_nothing_is_published(db, fake_bot):
+async def test_apk_explains_no_file_is_published_without_external_link(db, fake_bot):
     message = FakeMessage(text="/apk", user=FakeUser(USER))
     await main.apk_handler(None, message)
     assert not fake_bot.documents
     assert len(message.replies) == 1
     buttons = flat(message.shown_markup)
-    assert len(buttons) == 1, "one download button, nothing to fill in"
-    assert buttons[0].url == VMORE_APK_URL
+    assert any(b.callback_data == "app:apk" for b in buttons)
+    assert not any(b.url and "github.com" in b.url for b in buttons)
 
 
 @pytest.mark.asyncio
-async def test_apk_still_offers_the_link_when_the_file_cannot_be_sent(db, fake_bot, monkeypatch):
+async def test_apk_never_exposes_external_link_when_file_cannot_be_sent(db, fake_bot, monkeypatch):
     await main.set_app_apk(file_id="DEAD-ID", file_name="Vmore.apk", size=10,
                            version="1.0", uploaded_by=OWNER)
 
@@ -284,7 +286,8 @@ async def test_apk_still_offers_the_link_when_the_file_cannot_be_sent(db, fake_b
     message = FakeMessage(text="/apk", user=FakeUser(USER))
     await main.apk_handler(None, message)
     assert sc("VMORE FOR ANDROID") in message.shown_text
-    assert [b.url for b in flat(message.shown_markup) if b.url] == [VMORE_APK_URL]
+    assert not any(b.url and "github.com" in b.url for b in flat(message.shown_markup))
+    assert "app:apk" in message.callback_data()
 
 
 @pytest.mark.asyncio
@@ -298,11 +301,12 @@ async def test_app_apk_button_sends_the_file(db, fake_bot, press):
 
 
 @pytest.mark.asyncio
-async def test_app_apk_button_without_an_upload_shows_the_link(db, fake_bot, press):
+async def test_app_apk_button_without_an_upload_does_not_show_external_link(db, fake_bot, press):
     message = FakeMessage(user=FakeUser(USER))
     await press(message, "app:apk")
     assert not fake_bot.documents
-    assert [b.url for b in flat(message.shown_markup) if b.url] == [VMORE_APK_URL]
+    assert not any(b.url and "github.com" in b.url for b in flat(message.shown_markup))
+    assert "app:apk" in message.callback_data()
 
 
 @pytest.mark.asyncio
@@ -419,7 +423,7 @@ def test_the_only_published_state_is_a_file_id():
 
 
 @pytest.mark.asyncio
-async def test_a_dead_database_never_eats_the_download_link(db, fake_bot, monkeypatch):
+async def test_a_dead_database_never_exposes_external_download_link(db, fake_bot, monkeypatch):
     async def broken():
         raise RuntimeError("mongo is down")
 
@@ -427,4 +431,5 @@ async def test_a_dead_database_never_eats_the_download_link(db, fake_bot, monkey
     message = FakeMessage(text="/apk", user=FakeUser(USER))
     await main.apk_handler(None, message)
     assert not fake_bot.documents
-    assert [b.url for b in flat(message.shown_markup) if b.url] == [VMORE_APK_URL]
+    assert not any(b.url and "github.com" in b.url for b in flat(message.shown_markup))
+    assert "app:apk" in message.callback_data()
