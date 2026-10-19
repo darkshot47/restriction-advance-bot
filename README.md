@@ -476,15 +476,15 @@ The app is one tap away from every menu, and it asks nothing on the way:
 * **/start** ends with a full-width **📱 Vmore App** button, **/help** carries the same button, and the
   private-link pitch adds **♾️ Unlimited Download (App)** under the premium row — every one of them opens
   the app page or sends the file, never a form to fill in.
-* **/app** (or the button) opens the app page: **⬇️ Download App (Unlimited)** pointing at the release APK,
-  **📩 Send APK in chat**, **❓ How to use?** (install, sign in with the phone number and the code, and the
-  optional `api_id`/`api_hash` from my.telegram.org), the owner's **@XyrDeveloper** contact and Home.
-* **/apk** does exactly two things.  A normal user (or the **♾️/📩** button) is handed the APK the owner
-  published, straight into the chat as a document, with the release link and the version beside it.  The
-  owner running `/apk` **with an `.apk` document** — or replying `/apk` to one — stores that file as the
+* **/app** (or the button) opens the app page: **📩 Send APK in chat**, **❓ How to use?** (install, sign in
+  with the phone number and the code, and the optional `api_id`/`api_hash` from my.telegram.org), the
+  **Owner** contact and Home. The app flow does not expose an external download URL or a GitHub link.
+* **/apk** sends the APK the owner published straight into the chat as a document, with its version beside it.
+  The owner running `/apk` **with an `.apk` document** — or replying `/apk` to one — stores that file as the
   build everybody receives and answers **✅ APK CONNECTED**; the version is read from the file name
   (`Vmore-2.2.12.apk` → `2.2.12`), and nothing else is asked for.
-* With no APK published yet, `/apk` stays what it always was: one message, one download button.
+* With no APK published yet (or if sending fails), the bot explains that the file is unavailable and asks the
+  owner to publish it. It never falls back to a direct download link.
 
 No screen in this flow mentions a server URL, a `/gentoken`-style wizard or an access token — there is
 nothing of the kind to enter, because the app has no server.  Both commands are registered in the user
@@ -737,7 +737,7 @@ Seven further suites cover rounds 7-12 and the native engine on the same in-memo
 
 - `tests/test_round12_owner_tools_and_giveaways.py` — **the owner tools**: copy-before-download (and the Saved Messages guard), the share-URL deep link (minting, expiry, forgery, registration from inside the channel), the dump channel (/setdump, TTL deletion, queue, FloodWait pause, /deldump), `/pin` and `/pinned` in every form, the inline-button wizard end to end (cancel/skip/over-long label/bad link, broadcast formatting through the C++ pool, channel post + pin offer), and the giveaway engine (step wizard, single active giveaway, deep-link join once, live count, daily re-post, random winner granted, deadline draw) — plus the presentation budget re-checked over every new keyboard and screen.
 - `tests/test_round15_picker_dump_and_menu.py` — **the temporary picker keyboard, `/setdump`, the dump rule and the Telegram menu**: the bot rights of both choosers proved a subset of the user rights (as objects and on the MTProto wire), `/setdump` answering even when Telegram refuses the keyboard and a failed typed reference keeping the picker armed; the keyboard removed on every exit (finished setup by picker/typed/refused, `/cancel`, inline Cancel, another command, another button, a full channel list), kept for a retry, never pulled from a live flow, and a leftover from an older build swept exactly once; the dump used only for a user with a caption, prefix or suffix (text, media and native-copy paths, and never when the batch declined the caption), nothing mirrored, owner campaigns direct by default and staged behind `DUMP_STAGE_CAMPAIGNS`; and the menu — emoji-first descriptions, `/start` first, user vs admin vs owner lists inside Telegram's limits, per-chat scopes kept in sync by `/addadmin`, `/removeadmin` and `/start`, and publication at client start.
-- `tests/test_round19_app_page_and_apk.py` — **the Vmore App page and the APK hand-over**: the 📱 button closing `/start` and sitting in `/help`, `/app` and `cmd_app` rendering the same page, the ♾️ button on the private-link pitch, `/apk` publishing the owner's document (or replying to one) without asking for anything, users receiving exactly that file with the release link beside it, the link-only fallback when nothing is published or the send fails, and every app screen checked for a server URL, a token wizard or a raw link.
+- `tests/test_round19_app_page_and_apk.py` — **the Vmore App page and the APK hand-over**: the 📱 button closing `/start` and sitting in `/help`, `/app` and `cmd_app` rendering the same page, the ♾️ button on the private-link pitch, `/apk` publishing the owner's document (or replying to one) without asking for anything, users receiving exactly that file in chat, no external-link fallback when nothing is published or sending fails, and every app screen checked for a server URL, a token wizard or a raw link.
 - The retired app API has no test left: `appapi.py`, `/api/v2` and their three test modules
   (`test_round16_vmore_app.py`, `test_round17_zero_transfer.py`, `test_round18_td_direct.py`) are gone
   with the server the app no longer needs.

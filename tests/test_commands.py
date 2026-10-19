@@ -71,13 +71,13 @@ async def test_the_apk_command_hands_the_app_over_without_asking_for_a_server(db
     assert sc("api_id") in text
 
     buttons = [b for row in message.shown_markup.inline_keyboard for b in row]
-    assert len(buttons) == 1, "one download button, nothing to fill in"
-    assert buttons[0].url == main.VMORE_APK_URL
+    assert any(b.callback_data == "app:apk" for b in buttons)
+    assert not any(b.url and "github.com" in b.url for b in buttons)
 
     #: One answer and no question: the old flow asked for a deployment URL.
     assert len(message.replies) == 1
     assert sc("server") in text
-    assert sc("download vmore") in text
+    assert sc("not available") in text
 
 
 @pytest.mark.asyncio
