@@ -62,6 +62,8 @@ public class LoginActivity extends Activity implements Tg.Listener {
     private final List<ApiKeys.Key> candidates = new ArrayList<>();
     private int candidate = -1;
     private boolean trying;
+    private boolean introPlaying;
+    private boolean pendingOpenHome;
     private long keyStartedAt;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable keyWatch = new Runnable() {
@@ -150,6 +152,14 @@ public class LoginActivity extends Activity implements Tg.Listener {
         //: The logo wears the story ring, and the arc never stops travelling.
         StoryRingView ring = findViewById(R.id.logoRing);
         ring.setTurnSeconds(6f);
+
+        introPlaying = LaunchIntro.playIfNeeded(this, () -> {
+            introPlaying = false;
+            if (pendingOpenHome) {
+                pendingOpenHome = false;
+                openHome();
+            }
+        });
     }
 
     @Override
@@ -408,6 +418,10 @@ public class LoginActivity extends Activity implements Tg.Listener {
         stepHelp.setText(Prefs.accountName(this));
         progress.setVisibility(View.GONE);
         primaryButton.setEnabled(false);
+        if (introPlaying) {
+            pendingOpenHome = true;
+            return;
+        }
         openHome();
     }
 
@@ -648,6 +662,7 @@ public class LoginActivity extends Activity implements Tg.Listener {
         Intent home = new Intent(this, MainActivity.class);
         home.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
         startActivity(home);
+        overridePendingTransition(0, 0);
         finish();
     }
 

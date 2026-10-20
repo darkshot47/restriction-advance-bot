@@ -10,13 +10,16 @@ import org.drinkless.tdlib.TdApi;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * The Telegram engine, running on the phone.
@@ -142,10 +145,15 @@ public final class Tg {
     public static final class Chat {
         public long id;
         public String title = "";
+        public String username = "";
         public String type = "private";
         public int unread;
         public long lastDate;
         public boolean pinned;
+        public boolean canSend = true;
+        public int photoFileId;
+        public String photoPath = "";
+        public byte[] miniThumb;
 
         public int icon() {
             switch (type) {
@@ -414,8 +422,9 @@ public final class Tg {
     /** Deletes a session folder once nobody can still be writing to it. */
     private void discardLater(final String name) {
         final File dir = new File(app.getFilesDir(), name);
+        final File cacheDir = new File(LocalFiles.tdRootDir(app), name);
         Thread cleaner = new Thread(() -> {
-            for (int attempt = 0; attempt < 8 && dir.exists(); attempt++) {
+            for (int attempt = 0; attempt < 8 && (dir.exists() || cacheDir.exists()); attempt++) {
                 try {
                     Thread.sleep(600L);
                 } catch (InterruptedException interrupted) {
@@ -423,6 +432,7 @@ public final class Tg {
                     return;
                 }
                 wipe(dir);
+                wipe(cacheDir);
             }
             if (dir.exists()) {
                 Log.engine(app, "the old session folder stayed in place: " + name);
@@ -433,32 +443,45 @@ public final class Tg {
     }
 
     /**
-     * Removes session folders no slot is using any more.
-     *
-     * Called once at start-up: a reset that could not delete its old folder
-     * (still open, phone shutting down) leaves a few megabytes behind, and the
-     * next launch is the safe moment to take them.
+     * Removes session folders no slot is using any more and sweeps any legacy
+     * media files left inside User Data by older builds.
      */
     public void tidySessions() {
+        LocalFiles.sweepLegacyUserData(app);
         File root = app.getFilesDir();
-        File[] children = root.listFiles();
-        if (children == null) {
-            return;
-        }
-        for (File child : children) {
-            String name = child.getName();
-            if (!name.startsWith("telegram_")) {
-                continue;
-            }
-            boolean inUse = false;
-            for (int slot = 1; slot <= Prefs.slotCount(app); slot++) {
-                if (name.equals(Prefs.sessionDirForSlot(app, slot))) {
-                    inUse = true;
-                    break;
+        File[] children = root == null ? null : root.listFiles();
+        if (children != null) {
+            for (File child : children) {
+                String name = child.getName();
+                if (!name.startsWith("telegram_")) {
+                    continue;
+                }
+                boolean inUse = false;
+                for (int slot = 1; slot <= Prefs.slotCount(app); slot++) {
+                    if (name.equals(Prefs.sessionDirForSlot(app, slot))) {
+                        inUse = true;
+                        break;
+                    }
+                }
+                if (!inUse) {
+                    wipe(child);
                 }
             }
-            if (!inUse) {
-                wipe(child);
+        }
+        File[] cached = LocalFiles.tdRootDir(app).listFiles();
+        if (cached != null) {
+            for (File child : cached) {
+                String name = child.getName();
+                boolean inUse = false;
+                for (int slot = 1; slot <= Prefs.slotCount(app); slot++) {
+                    if (name.equals(Prefs.sessionDirForSlot(app, slot))) {
+                        inUse = true;
+                        break;
+                    }
+                }
+                if (!inUse) {
+                    wipe(child);
+                }
             }
         }
     }
@@ -542,6 +565,12 @@ public final class Tg {
             if (cached != null) {
                 cached.title = update.title;
             }
+        } else if (object instanceof TdApi.UpdateChatPhoto) {
+            TdApi.UpdateChatPhoto update = (TdApi.UpdateChatPhoto) object;
+            Chat cached = chatCache.get(update.chatId);
+            if (cached != null) {
+                applyChatPhoto(cached, update.photo);
+            }
         } else if (object instanceof TdApi.UpdateChatLastMessage) {
             TdApi.UpdateChatLastMessage update = (TdApi.UpdateChatLastMessage) object;
             Chat cached = chatCache.get(update.chatId);
@@ -607,13 +636,46 @@ public final class Tg {
         cached.title = chat.title == null ? "" : chat.title;
         cached.type = chatType(chat.type);
         cached.unread = chat.unreadCount;
+        applyChatPhoto(cached, chat.photo);
         if (chat.lastMessage != null) {
             cached.lastDate = chat.lastMessage.date;
         }
-        for (TdApi.ChatPosition position : chat.positions) {
-            if (position != null && position.isPinned) {
-                cached.pinned = true;
+        if (chat.positions != null) {
+            for (TdApi.ChatPosition position : chat.positions) {
+                if (position != null && position.isPinned) {
+                    cached.pinned = true;
+                }
             }
+        }
+    }
+
+    private void applyChatPhoto(Chat target, TdApi.ChatPhotoInfo photo) {
+        if (target == null) {
+            return;
+        }
+        if (photo == null) {
+            target.photoFileId = 0;
+            target.photoPath = "";
+            target.miniThumb = null;
+            return;
+        }
+        if (photo.minithumbnail != null && photo.minithumbnail.data != null) {
+            target.miniThumb = photo.minithumbnail.data;
+        }
+        TdApi.File picture = photo.small != null && photo.small.id != 0 ? photo.small : photo.big;
+        if (picture == null || picture.id == 0) {
+            target.photoFileId = 0;
+            target.photoPath = "";
+            return;
+        }
+        target.photoFileId = picture.id;
+        File cachedFile = LocalFiles.chatAvatarFile(app, target.id, picture.id);
+        if (cachedFile.isFile() && cachedFile.length() > 0) {
+            target.photoPath = cachedFile.getAbsolutePath();
+        } else if (isComplete(picture)) {
+            File copied = LocalFiles.copy(picture.local.path, cachedFile);
+            target.photoPath = copied != null
+                    ? copied.getAbsolutePath() : picture.local.path;
         }
     }
 
@@ -680,13 +742,15 @@ public final class Tg {
             tell(STATE_CREDENTIALS, null);
             return;
         }
-        //: Each account slot keeps its own TDLib databases, which is what makes
-        //: switching accounts safe and instant.
-        File dir = new File(app.getFilesDir(), Prefs.sessionDir(app));
+        String session = Prefs.sessionDir(app);
+        File dbDir = new File(app.getFilesDir(), session);
+        File mediaCacheDir = LocalFiles.tdFilesDir(app, session);
         //noinspection ResultOfMethodCallIgnored
-        dir.mkdirs();
+        dbDir.mkdirs();
+        //noinspection ResultOfMethodCallIgnored
+        mediaCacheDir.mkdirs();
         current.send(new TdApi.SetTdlibParameters(
-                        false, dir.getAbsolutePath(), dir.getAbsolutePath(), new byte[0],
+                        false, dbDir.getAbsolutePath(), mediaCacheDir.getAbsolutePath(), new byte[0],
                         true, true, true, false,
                         apiId, apiHash, "en", Build.MODEL,
                         Build.VERSION.RELEASE, "Vmore " + Vmore.VERSION),
@@ -852,8 +916,22 @@ public final class Tg {
 
     /** The chat list, newest first, pinned chats on top. */
     public void loadChats(int limit, Cb<List<Chat>> callback) {
+        loadChatsInternal(limit, false, callback);
+    }
+
+    /**
+     * Destination chats where the signed-in account actually holds permission
+     * to post or send messages, newest first, pinned chats on top, with avatar
+     * file IDs and mini-thumbnails populated.
+     */
+    public void loadWritableChats(int limit, Cb<List<Chat>> callback) {
+        loadChatsInternal(limit, true, callback);
+    }
+
+    private void loadChatsInternal(final int limit, final boolean writableOnly,
+                                   Cb<List<Chat>> callback) {
         final Cb<List<Chat>> cb = deliver(callback);
-        Client current = client;
+        final Client current = client;
         if (current == null) {
             cb.fail("the Telegram engine is not running");
             return;
@@ -870,35 +948,189 @@ public final class Tg {
                 }
                 TdApi.Chats list = (TdApi.Chats) chats;
                 long[] ids = list.chatIds == null ? new long[0] : list.chatIds;
-                List<Chat> rows = Collections.synchronizedList(new ArrayList<>());
+                final List<Chat> rows = Collections.synchronizedList(new ArrayList<>());
                 if (ids.length == 0) {
                     post(cb, rows);
                     return;
                 }
-                final int[] pending = {ids.length};
+                final AtomicInteger pending = new AtomicInteger(ids.length);
                 for (long chatId : ids) {
-                    Chat cached = chatCache.get(chatId);
-                    if (cached != null && cached.lastDate > 0) {
-                        rows.add(cached);
-                        if (--pending[0] == 0) {
-                            post(cb, sort(rows));
-                        }
-                        continue;
-                    }
                     current.send(new TdApi.GetChat(chatId), chatObject -> {
                         if (chatObject instanceof TdApi.Chat) {
-                            remember((TdApi.Chat) chatObject);
-                            Chat row = chatCache.get(chatId);
-                            if (row != null) {
-                                rows.add(row);
-                            }
-                        }
-                        if (--pending[0] == 0) {
-                            post(cb, sort(rows));
+                            TdApi.Chat raw = (TdApi.Chat) chatObject;
+                            remember(raw);
+                            final Chat row = copyChat(chatCache.get(chatId));
+                            populateChatAccess(current, raw, row, () -> {
+                                if (!writableOnly || row.canSend) {
+                                    rows.add(row);
+                                }
+                                if (pending.decrementAndGet() == 0) {
+                                    post(cb, sort(new ArrayList<>(rows)));
+                                }
+                            });
+                        } else if (pending.decrementAndGet() == 0) {
+                            post(cb, sort(new ArrayList<>(rows)));
                         }
                     });
                 }
             });
+        });
+    }
+
+    private void populateChatAccess(Client current, TdApi.Chat raw, Chat row, Runnable done) {
+        final boolean baseCanSend = raw.permissions != null && raw.permissions.canSendBasicMessages;
+        if (raw.type instanceof TdApi.ChatTypeSupergroup) {
+            final TdApi.ChatTypeSupergroup sgType = (TdApi.ChatTypeSupergroup) raw.type;
+            current.send(new TdApi.GetSupergroup(sgType.supergroupId), sgObj -> {
+                if (sgObj instanceof TdApi.Supergroup) {
+                    TdApi.Supergroup sg = (TdApi.Supergroup) sgObj;
+                    row.username = firstUsername(sg.usernames);
+                    boolean isCreator = sg.status instanceof TdApi.ChatMemberStatusCreator;
+                    boolean isAdmin = sg.status instanceof TdApi.ChatMemberStatusAdministrator;
+                    boolean adminCanPost = isAdmin
+                            && ((TdApi.ChatMemberStatusAdministrator) sg.status).rights != null
+                            && ((TdApi.ChatMemberStatusAdministrator) sg.status).rights.canPostMessages;
+                    boolean isMember = sg.status instanceof TdApi.ChatMemberStatusMember;
+                    boolean isRestricted = sg.status instanceof TdApi.ChatMemberStatusRestricted
+                            && ((TdApi.ChatMemberStatusRestricted) sg.status).isMember;
+                    boolean restrictedCanSend = isRestricted
+                            && ((TdApi.ChatMemberStatusRestricted) sg.status).permissions != null
+                            && ((TdApi.ChatMemberStatusRestricted) sg.status).permissions.canSendBasicMessages;
+                    if (sgType.isChannel || sg.isChannel) {
+                        row.canSend = SmartMatcher.canSendToChannel(
+                                isCreator, isAdmin, adminCanPost);
+                    } else {
+                        row.canSend = SmartMatcher.canSendToGroup(
+                                isCreator, isAdmin, isMember, isRestricted,
+                                baseCanSend, restrictedCanSend);
+                    }
+                } else {
+                    row.canSend = !sgType.isChannel && baseCanSend;
+                }
+                syncCachedAccess(row);
+                done.run();
+            });
+        } else if (raw.type instanceof TdApi.ChatTypeBasicGroup) {
+            final TdApi.ChatTypeBasicGroup bgType = (TdApi.ChatTypeBasicGroup) raw.type;
+            current.send(new TdApi.GetBasicGroup(bgType.basicGroupId), bgObj -> {
+                if (bgObj instanceof TdApi.BasicGroup) {
+                    TdApi.BasicGroup bg = (TdApi.BasicGroup) bgObj;
+                    if (!bg.isActive) {
+                        row.canSend = false;
+                    } else {
+                        boolean isCreator = bg.status instanceof TdApi.ChatMemberStatusCreator;
+                        boolean isAdmin = bg.status instanceof TdApi.ChatMemberStatusAdministrator;
+                        boolean isMember = bg.status instanceof TdApi.ChatMemberStatusMember;
+                        boolean isRestricted = bg.status instanceof TdApi.ChatMemberStatusRestricted
+                                && ((TdApi.ChatMemberStatusRestricted) bg.status).isMember;
+                        boolean restrictedCanSend = isRestricted
+                                && ((TdApi.ChatMemberStatusRestricted) bg.status).permissions != null
+                                && ((TdApi.ChatMemberStatusRestricted) bg.status).permissions.canSendBasicMessages;
+                        row.canSend = SmartMatcher.canSendToGroup(
+                                isCreator, isAdmin, isMember, isRestricted,
+                                baseCanSend, restrictedCanSend);
+                    }
+                } else {
+                    row.canSend = baseCanSend;
+                }
+                syncCachedAccess(row);
+                done.run();
+            });
+        } else if (raw.type instanceof TdApi.ChatTypePrivate) {
+            final long userId = ((TdApi.ChatTypePrivate) raw.type).userId;
+            if (account != null && account.id != 0 && userId == account.id) {
+                row.canSend = true;
+                syncCachedAccess(row);
+                done.run();
+                return;
+            }
+            current.send(new TdApi.GetUser(userId), userObj -> {
+                if (userObj instanceof TdApi.User) {
+                    TdApi.User user = (TdApi.User) userObj;
+                    row.username = firstUsername(user.usernames);
+                    boolean deleted = user.type instanceof TdApi.UserTypeDeleted
+                            || user.type instanceof TdApi.UserTypeUnknown;
+                    row.canSend = SmartMatcher.canSendToPrivateUser(deleted, baseCanSend);
+                } else {
+                    row.canSend = baseCanSend;
+                }
+                syncCachedAccess(row);
+                done.run();
+            });
+        } else {
+            row.canSend = false;
+            done.run();
+        }
+    }
+
+    private void syncCachedAccess(Chat row) {
+        Chat cached = chatCache.get(row.id);
+        if (cached != null) {
+            cached.canSend = row.canSend;
+            cached.username = row.username;
+        }
+    }
+
+    private static Chat copyChat(Chat source) {
+        Chat copy = new Chat();
+        if (source == null) {
+            return copy;
+        }
+        copy.id = source.id;
+        copy.title = source.title;
+        copy.username = source.username;
+        copy.type = source.type;
+        copy.unread = source.unread;
+        copy.lastDate = source.lastDate;
+        copy.pinned = source.pinned;
+        copy.canSend = source.canSend;
+        copy.photoFileId = source.photoFileId;
+        copy.photoPath = source.photoPath;
+        copy.miniThumb = source.miniThumb;
+        return copy;
+    }
+
+    /** Downloads a chat avatar into cache storage and delivers its file path. */
+    public void loadChatPhoto(final Chat chat, Cb<String> callback) {
+        final Cb<String> cb = deliver(callback);
+        if (chat == null || chat.photoFileId == 0) {
+            cb.fail("no chat photo");
+            return;
+        }
+        final File target = LocalFiles.chatAvatarFile(app, chat.id, chat.photoFileId);
+        if (target.isFile() && target.length() > 0) {
+            chat.photoPath = target.getAbsolutePath();
+            cb.ok(chat.photoPath);
+            return;
+        }
+        final int mine = generation;
+        downloadFile(chat.photoFileId, null, new Cb<Integer>() {
+            @Override
+            public void ok(Integer value) {
+                if (mine != generation) {
+                    return;
+                }
+                String sourcePath = localPath(value);
+                releaseDownload(value);
+                if (sourcePath == null || sourcePath.isEmpty()) {
+                    cb.fail("photo missing");
+                    return;
+                }
+                File copied = LocalFiles.copy(sourcePath, target);
+                forgetFile(value);
+                String finalPath = copied != null ? copied.getAbsolutePath() : sourcePath;
+                chat.photoPath = finalPath;
+                Chat cached = chatCache.get(chat.id);
+                if (cached != null) {
+                    cached.photoPath = finalPath;
+                }
+                cb.ok(finalPath);
+            }
+
+            @Override
+            public void fail(String message) {
+                cb.fail(message);
+            }
         });
     }
 
@@ -1005,7 +1237,7 @@ public final class Tg {
     /** Find a chat by its public @username (used when the user types one). */
     public void findPublicChat(String username, Cb<Chat> callback) {
         final Cb<Chat> cb = deliver(callback);
-        Client current = client;
+        final Client current = client;
         if (current == null) {
             cb.fail("the Telegram engine is not running");
             return;
@@ -1015,15 +1247,268 @@ public final class Tg {
                 cb.fail("Telegram could not find @" + username);
                 return;
             }
-            TdApi.Chat chat = (TdApi.Chat) object;
-            remember(chat);
-            Chat row = chatCache.get(chat.id);
-            if (row == null) {
-                cb.fail("that chat could not be read");
-                return;
-            }
-            cb.ok(row);
+            TdApi.Chat raw = (TdApi.Chat) object;
+            remember(raw);
+            final Chat row = copyChat(chatCache.get(raw.id));
+            populateChatAccess(current, raw, row, () -> cb.ok(row));
         });
+    }
+
+    /**
+     * Searches both local and server-side chats matching an on-screen title or
+     * @username, returning each candidate with full send-permission metadata.
+     */
+    public void findChatsMatching(final String query, Cb<List<Chat>> callback) {
+        final Cb<List<Chat>> cb = deliver(callback);
+        final Client current = client;
+        if (current == null) {
+            cb.fail("the Telegram engine is not running");
+            return;
+        }
+        final String clean = query == null ? "" : query.trim();
+        loadChats(120, new Cb<List<Chat>>() {
+            @Override
+            public void ok(List<Chat> localRows) {
+                final Map<Long, Chat> merged = Collections.synchronizedMap(new LinkedHashMap<>());
+                for (Chat row : localRows) {
+                    merged.put(row.id, row);
+                }
+                if (clean.isEmpty()) {
+                    cb.ok(new ArrayList<>(merged.values()));
+                    return;
+                }
+                current.send(new TdApi.SearchChats(clean, null, 20), foundLocal ->
+                        current.send(new TdApi.SearchChatsOnServer(clean, null, 15), foundServer -> {
+                            List<Long> extraIds = new ArrayList<>();
+                            collectChatIds(foundLocal, merged, extraIds);
+                            collectChatIds(foundServer, merged, extraIds);
+                            if (extraIds.isEmpty()) {
+                                cb.ok(rankMatchingChats(clean, merged.values()));
+                                return;
+                            }
+                            final AtomicInteger left = new AtomicInteger(extraIds.size());
+                            for (long id : extraIds) {
+                                current.send(new TdApi.GetChat(id), chatObj -> {
+                                    if (chatObj instanceof TdApi.Chat) {
+                                        TdApi.Chat raw = (TdApi.Chat) chatObj;
+                                        remember(raw);
+                                        final Chat row = copyChat(chatCache.get(raw.id));
+                                        populateChatAccess(current, raw, row, () -> {
+                                            merged.put(row.id, row);
+                                            if (left.decrementAndGet() == 0) {
+                                                cb.ok(rankMatchingChats(clean, merged.values()));
+                                            }
+                                        });
+                                    } else if (left.decrementAndGet() == 0) {
+                                        cb.ok(rankMatchingChats(clean, merged.values()));
+                                    }
+                                });
+                            }
+                        }));
+            }
+
+            @Override
+            public void fail(String message) {
+                cb.fail(message);
+            }
+        });
+    }
+
+    private static void collectChatIds(TdApi.Object result, Map<Long, Chat> known,
+                                       List<Long> target) {
+        if (!(result instanceof TdApi.Chats)) {
+            return;
+        }
+        long[] ids = ((TdApi.Chats) result).chatIds;
+        if (ids == null) {
+            return;
+        }
+        for (long id : ids) {
+            if (!known.containsKey(id) && !target.contains(id)) {
+                target.add(id);
+            }
+        }
+    }
+
+    private static List<Chat> rankMatchingChats(String query, Collection<Chat> all) {
+        List<Chat> ranked = new ArrayList<>();
+        for (Chat row : all) {
+            if (SmartMatcher.scoreChatTitle(query, row.title, row.username) > 0) {
+                ranked.add(row);
+            }
+        }
+        ranked.sort((a, b) -> Integer.compare(
+                SmartMatcher.scoreChatTitle(query, b.title, b.username),
+                SmartMatcher.scoreChatTitle(query, a.title, a.username)));
+        return ranked;
+    }
+
+    /**
+     * Resolves the exact media message under the floating Smart Feature pointer
+     * inside {@code chatId} by combining recent history, keyword search,
+     * neighboring anchor bubble offsets, and multi-signal scoring.
+     */
+    public void matchMediaInChat(final long chatId, final List<String> targetLines,
+                                 final List<String> siblingAnchorLines,
+                                 final int cellOffsetFromAnchor,
+                                 final int cellIndexFromBottom,
+                                 Cb<Media> callback) {
+        final Cb<Media> cb = deliver(callback);
+        final Client current = client;
+        if (current == null || chatId == 0L) {
+            cb.fail("the Telegram engine is not running");
+            return;
+        }
+        final Map<Long, TdApi.Message> pool = Collections.synchronizedMap(new LinkedHashMap<>());
+        final String query = SmartMatcher.extractSearchQuery(targetLines);
+        final String anchorQuery = SmartMatcher.extractSearchQuery(siblingAnchorLines);
+        current.send(new TdApi.GetChatHistory(chatId, 0L, 0, 80, false), recentObj -> {
+            collectMessages(recentObj, pool);
+            runOptionalSearch(current, chatId, query, searchObj -> {
+                collectMessages(searchObj, pool);
+                runOptionalSearch(current, chatId, anchorQuery, anchorSearchObj -> {
+                    collectMessages(anchorSearchObj, pool);
+                    long anchorId = findBestAnchorMessageId(pool.values(), siblingAnchorLines);
+                    if (anchorId != 0L) {
+                        current.send(new TdApi.GetChatHistory(chatId, anchorId, -12, 25, false),
+                                aroundObj -> {
+                                    collectMessages(aroundObj, pool);
+                                    finishSmartMatch(current, chatId, pool.values(), targetLines,
+                                            anchorId, cellOffsetFromAnchor, cellIndexFromBottom, cb);
+                                });
+                    } else {
+                        finishSmartMatch(current, chatId, pool.values(), targetLines,
+                                0L, cellOffsetFromAnchor, cellIndexFromBottom, cb);
+                    }
+                });
+            });
+        });
+    }
+
+    private void runOptionalSearch(Client current, long chatId, String query,
+                                   Client.ResultHandler next) {
+        if (query == null || query.isEmpty()) {
+            next.onResult(null);
+            return;
+        }
+        current.send(new TdApi.SearchChatMessages(
+                chatId, null, query, null, 0L, 0, 25, null), next);
+    }
+
+    private static void collectMessages(TdApi.Object obj, Map<Long, TdApi.Message> pool) {
+        if (obj instanceof TdApi.Messages) {
+            TdApi.Message[] list = ((TdApi.Messages) obj).messages;
+            if (list != null) {
+                for (TdApi.Message m : list) {
+                    if (m != null) {
+                        pool.put(m.id, m);
+                    }
+                }
+            }
+        } else if (obj instanceof TdApi.FoundChatMessages) {
+            TdApi.Message[] list = ((TdApi.FoundChatMessages) obj).messages;
+            if (list != null) {
+                for (TdApi.Message m : list) {
+                    if (m != null) {
+                        pool.put(m.id, m);
+                    }
+                }
+            }
+        }
+    }
+
+    private static long findBestAnchorMessageId(Collection<TdApi.Message> messages,
+                                                List<String> anchorLines) {
+        if (anchorLines == null || anchorLines.isEmpty()) {
+            return 0L;
+        }
+        long bestId = 0L;
+        int bestScore = 0;
+        for (TdApi.Message m : messages) {
+            if (m == null || m.content == null) {
+                continue;
+            }
+            String text = textOfAnyMessage(m.content);
+            Media media = toMedia(m);
+            int score = SmartMatcher.scoreMessage(
+                    anchorLines, -1, 0,
+                    media != null ? media.name : "",
+                    text,
+                    media != null ? media.kind : "text",
+                    media != null ? media.size : 0L,
+                    media != null ? media.durationSec : 0L,
+                    m.date);
+            if (score > bestScore && score >= 45) {
+                bestScore = score;
+                bestId = m.id;
+            }
+        }
+        return bestId;
+    }
+
+    private void finishSmartMatch(Client current, long chatId,
+                                  Collection<TdApi.Message> candidates,
+                                  List<String> targetLines, long anchorId,
+                                  int cellOffsetFromAnchor, int cellIndexFromBottom,
+                                  Cb<Media> cb) {
+        List<TdApi.Message> ordered = new ArrayList<>(candidates);
+        ordered.sort((a, b) -> {
+            int byDate = Integer.compare(b.date, a.date);
+            return byDate != 0 ? byDate : Long.compare(b.id, a.id);
+        });
+        int anchorRank = -1;
+        if (anchorId != 0L) {
+            for (int i = 0; i < ordered.size(); i++) {
+                if (ordered.get(i).id == anchorId) {
+                    anchorRank = i;
+                    break;
+                }
+            }
+        }
+        Media bestMedia = null;
+        int bestScore = -1;
+        int mediaRank = 0;
+        for (int i = 0; i < ordered.size(); i++) {
+            TdApi.Message m = ordered.get(i);
+            Media media = toMedia(m);
+            if (media == null || media.fileId == 0) {
+                continue;
+            }
+            int score = SmartMatcher.scoreMessage(
+                    targetLines, cellIndexFromBottom, mediaRank,
+                    media.name, media.caption, media.kind,
+                    media.size, media.durationSec, m.date);
+            if (anchorRank >= 0 && cellOffsetFromAnchor != 0) {
+                int expectedRank = anchorRank + cellOffsetFromAnchor;
+                int dist = Math.abs(i - expectedRank);
+                if (dist == 0) {
+                    score += 80;
+                } else if (dist == 1) {
+                    score += 45;
+                } else if (dist == 2) {
+                    score += 20;
+                }
+            }
+            if (score > bestScore) {
+                bestScore = score;
+                bestMedia = media;
+            }
+            mediaRank++;
+        }
+        if (bestMedia == null) {
+            cb.fail("no media file was found in that chat yet. Scroll the file clearly "
+                    + "into view and double-tap again");
+            return;
+        }
+        withChatTitle(current, bestMedia, cb);
+    }
+
+    private static String textOfAnyMessage(TdApi.MessageContent content) {
+        if (content instanceof TdApi.MessageText) {
+            TdApi.FormattedText t = ((TdApi.MessageText) content).text;
+            return t == null || t.text == null ? "" : t.text;
+        }
+        return captionOf(content);
     }
 
     // ── profiles ──────────────────────────────────────────────────────────
@@ -1132,7 +1617,8 @@ public final class Tg {
             current.send(new TdApi.GetMessageLinkInfo(canonical), object -> {
                 Media media = object instanceof TdApi.MessageLinkInfo
                         ? toMedia(((TdApi.MessageLinkInfo) object).message) : null;
-                if (media != null && media.fileId != 0 && media.downloadable) {
+                if (media != null && (media.fileId != 0 || "text".equals(media.kind))
+                        && media.downloadable) {
                     withChatTitle(current, media, cb);
                     return;
                 }
@@ -1145,8 +1631,11 @@ public final class Tg {
                 byChat(current, link, new Cb<Media>() {
                     @Override
                     public void ok(Media better) {
-                        Media chosen = better != null && better.fileId != 0 ? better : media;
-                        if (chosen == null || chosen.fileId == 0) {
+                        Media chosen = better != null
+                                && (better.fileId != 0 || "text".equals(better.kind))
+                                ? better : media;
+                        if (chosen == null
+                                || (chosen.fileId == 0 && !"text".equals(chosen.kind))) {
                             cb.fail("that link has no file in it");
                             return;
                         }
@@ -1155,7 +1644,8 @@ public final class Tg {
 
                     @Override
                     public void fail(String message) {
-                        if (media != null && media.fileId != 0) {
+                        if (media != null
+                                && (media.fileId != 0 || "text".equals(media.kind))) {
                             withChatTitle(current, media, cb);
                         } else {
                             cb.fail(message);
@@ -1366,6 +1856,19 @@ public final class Tg {
             file = document.document;
             media.name = document.fileName;
             media.mime = document.mimeType;
+        } else if (content instanceof TdApi.MessageText) {
+            TdApi.FormattedText body = ((TdApi.MessageText) content).text;
+            String rawText = body == null || body.text == null ? "" : body.text;
+            if (rawText.trim().isEmpty()) {
+                return null;
+            }
+            media.kind = "text";
+            media.name = Format.safeName(Format.oneLine(rawText), "message_" + media.messageId);
+            media.caption = rawText;
+            media.size = rawText.getBytes().length;
+            media.downloadable = true;
+            media.mime = "text/plain";
+            return media;
         } else {
             return null;
         }
@@ -1478,14 +1981,110 @@ public final class Tg {
     }
 
     public void cancelDownload(int fileId) {
+        if (fileId == 0) {
+            return;
+        }
         FileWatch watch = downloads.remove(fileId);
         if (watch != null) {
             watch.finishError("cancelled");
         }
         Client current = client;
         if (current != null) {
-            current.send(new TdApi.CancelDownloadFile(fileId, true), object -> {
+            //: onlyIfPending MUST be false so an actively running background
+            //: transfer stops immediately instead of finishing silently.
+            current.send(new TdApi.CancelDownloadFile(fileId, false), object -> {
             });
+        }
+    }
+
+    /**
+     * Immediately aborts any running download or upload for {@code fileId},
+     * unblocks waiting workers, and deletes every partial or completed file
+     * written so far in cache storage.
+     */
+    public void cancelAndDeleteFile(final int fileId) {
+        if (fileId == 0) {
+            return;
+        }
+        FileWatch activeDownload = downloads.remove(fileId);
+        String watchedPath = activeDownload != null ? activeDownload.path : null;
+        if (activeDownload != null) {
+            activeDownload.finishError("cancelled");
+        }
+        FileWatch activeUpload = uploads.remove(fileId);
+        if (activeUpload != null) {
+            activeUpload.finishError("cancelled");
+        }
+        if (watchedPath != null && !watchedPath.isEmpty()) {
+            //noinspection ResultOfMethodCallIgnored
+            new File(watchedPath).delete();
+        }
+        final Client current = client;
+        if (current == null) {
+            return;
+        }
+        current.send(new TdApi.CancelDownloadFile(fileId, false), ignored ->
+                current.send(new TdApi.GetFile(fileId), fileObj -> {
+                    if (fileObj instanceof TdApi.File) {
+                        TdApi.File tdFile = (TdApi.File) fileObj;
+                        if (tdFile.local != null && tdFile.local.path != null
+                                && !tdFile.local.path.isEmpty()) {
+                            //noinspection ResultOfMethodCallIgnored
+                            new File(tdFile.local.path).delete();
+                        }
+                    }
+                    current.send(new TdApi.DeleteFile(fileId), null);
+                }));
+        current.send(new TdApi.CancelPreliminaryUploadFile(fileId), null);
+        main.postDelayed(() -> {
+            Client later = client;
+            if (later != null) {
+                later.send(new TdApi.CancelDownloadFile(fileId, false), null);
+                later.send(new TdApi.GetFile(fileId), fileObj -> {
+                    if (fileObj instanceof TdApi.File) {
+                        TdApi.File tdFile = (TdApi.File) fileObj;
+                        if (tdFile.local != null && tdFile.local.path != null
+                                && !tdFile.local.path.isEmpty()) {
+                            //noinspection ResultOfMethodCallIgnored
+                            new File(tdFile.local.path).delete();
+                        }
+                    }
+                    later.send(new TdApi.DeleteFile(fileId), null);
+                });
+            }
+        }, 450L);
+    }
+
+    /**
+     * Stops every in-flight download, upload, pending bubble, and cached partial
+     * file associated with {@code job}.
+     */
+    public void abortJobTransfers(final QJob job) {
+        if (job == null) {
+            return;
+        }
+        if (job.fileId != 0) {
+            cancelAndDeleteFile(job.fileId);
+        }
+        final Client current = client;
+        for (SendWatch watch : new ArrayList<>(sends.values())) {
+            if ((job.destChatId != 0L && watch.destChatId == job.destChatId)
+                    || (job.fileId != 0 && watch.fileId == job.fileId)) {
+                sends.remove(watch.messageId);
+                watch.finish(0L, "cancelled");
+                if (current != null && watch.fileId != 0) {
+                    current.send(new TdApi.CancelPreliminaryUploadFile(watch.fileId), null);
+                    current.send(new TdApi.DeleteFile(watch.fileId), null);
+                }
+                if (current != null && watch.destChatId != 0L && watch.messageId != 0L) {
+                    current.send(new TdApi.DeleteMessages(
+                            watch.destChatId, new long[]{watch.messageId}, true), null);
+                }
+            }
+        }
+        if (job.path != null && !job.path.isEmpty()) {
+            //noinspection ResultOfMethodCallIgnored
+            new File(job.path).delete();
         }
     }
 
@@ -1660,7 +2259,7 @@ public final class Tg {
                     final Runnable freshRetry = scratch != null ? null
                             : () -> sendMedia(chatId, path, kind, caption, durationSec,
                                     width, height, sendAs, thumbPath, progress, callback, true);
-                    SendWatch watch = new SendWatch(message.id, file.id, length, progress,
+                    SendWatch watch = new SendWatch(chatId, message.id, file.id, length, progress,
                             answer, freshRetry);
                     sends.put(message.id, watch);
                     //: Uploads have no pause switch, so the cap covers the
@@ -1704,10 +2303,7 @@ public final class Tg {
         if (!source.isFile()) {
             return null;
         }
-        File dir = new File(app.getCacheDir(), "upload");
-        if (!dir.exists() && !dir.mkdirs()) {
-            return null;
-        }
+        File dir = LocalFiles.uploadScratchDir(app);
         File alias = new File(dir, "vmore_" + System.currentTimeMillis() + "_"
                 + source.getName());
         try {
@@ -1739,23 +2335,122 @@ public final class Tg {
 
     /** Let Telegram move an existing message: no bytes cross the phone. */
     public void forward(long destChatId, long fromChatId, long messageId, Cb<Long> callback) {
+        nativeCopy(destChatId, fromChatId, messageId, null, true, callback);
+    }
+
+    /**
+     * Direct server-side native copy (`native_cpy`): copies or forwards the
+     * source message straight inside Telegram's servers without downloading or
+     * uploading media bytes on the phone, awaiting full delivery confirmation
+     * so protected-chat refusals immediately fall back to mobile data transfer.
+     */
+    public void nativeCopy(final long destChatId, final long fromChatId, final long messageId,
+                           final String customCaption, final boolean keepForwardHeader,
+                           Cb<Long> callback) {
         final Cb<Long> cb = deliver(callback);
-        Client current = client;
+        final Client current = client;
         if (current == null) {
             cb.fail("the Telegram engine is not running");
             return;
         }
+        final boolean sendCopy = !keepForwardHeader;
         current.send(new TdApi.ForwardMessages(destChatId, null, fromChatId,
-                new long[]{messageId}, sendOptions(), false, false), object -> {
+                new long[]{messageId}, sendOptions(), sendCopy, false), object -> {
             if (object instanceof TdApi.Error) {
                 cb.fail(friendly(((TdApi.Error) object).message));
                 return;
             }
             TdApi.Messages messages = (TdApi.Messages) object;
-            long sent = messages.messages != null && messages.messages.length > 0
-                    ? messages.messages[0].id : 0L;
-            cb.ok(sent);
+            TdApi.Message first = messages.messages != null && messages.messages.length > 0
+                    ? messages.messages[0] : null;
+            if (first == null) {
+                cb.fail("Telegram refused the direct copy");
+                return;
+            }
+            final long localMsgId = first.id;
+            final Cb<Long> afterConfirm = new Cb<Long>() {
+                @Override
+                public void ok(Long realId) {
+                    if (customCaption != null && !customCaption.isEmpty() && realId != 0L) {
+                        current.send(new TdApi.EditMessageCaption(
+                                destChatId, realId, null,
+                                new TdApi.FormattedText(customCaption, null), false),
+                                ignored -> cb.ok(realId));
+                    } else {
+                        cb.ok(realId);
+                    }
+                }
+
+                @Override
+                public void fail(String reason) {
+                    current.send(new TdApi.DeleteMessages(
+                            destChatId, new long[]{localMsgId}, false), null);
+                    cb.fail(reason);
+                }
+            };
+            TdApi.MessageSendingState sending = first.sendingState;
+            if (sending == null) {
+                afterConfirm.ok(localMsgId);
+            } else if (sending instanceof TdApi.MessageSendingStateFailed) {
+                TdApi.Error err = ((TdApi.MessageSendingStateFailed) sending).error;
+                afterConfirm.fail(err == null ? "Telegram refused the direct copy"
+                        : friendly(err.message));
+            } else {
+                SendWatch watch = new SendWatch(destChatId, localMsgId, 0, 0L, null,
+                        afterConfirm, null);
+                sends.put(localMsgId, watch);
+            }
         });
+    }
+
+    /** Blocking fallback sender when a protected text message cannot be copied directly. */
+    public long sendTextBlocking(long destChatId, String text, AtomicBoolean cancelled)
+            throws Exception {
+        final Sync<Long> sync = new Sync<>();
+        final Client current = client;
+        if (current == null) {
+            throw new Failure("the Telegram engine is not running", "no client", false);
+        }
+        TdApi.InputMessageText content = new TdApi.InputMessageText(
+                new TdApi.FormattedText(text == null ? "" : text, null), null, false);
+        current.send(new TdApi.SendMessage(destChatId, null, null, sendOptions(), null, content),
+                object -> {
+                    if (object instanceof TdApi.Error) {
+                        sync.fail(friendly(((TdApi.Error) object).message));
+                        return;
+                    }
+                    TdApi.Message msg = (TdApi.Message) object;
+                    if (msg.sendingState == null) {
+                        sync.ok(msg.id);
+                    } else if (msg.sendingState instanceof TdApi.MessageSendingStateFailed) {
+                        TdApi.Error err = ((TdApi.MessageSendingStateFailed) msg.sendingState).error;
+                        sync.fail(err == null ? "Telegram refused the message"
+                                : friendly(err.message));
+                    } else {
+                        SendWatch watch = new SendWatch(destChatId, msg.id, 0, 0L, null,
+                                sync, null);
+                        sends.put(msg.id, watch);
+                    }
+                });
+        Long sent = sync.await(60_000, cancelled);
+        if (sent == null) {
+            throw new Failure(sync.error == null ? "the text message failed" : sync.error,
+                    "send text failed", worthRetrying(sync.error));
+        }
+        return sent;
+    }
+
+    /** Blocking worker helper for `native_cpy` first-pass server copy. */
+    public long nativeCopyBlocking(QJob job, String customCaption, boolean keepForwardHeader,
+                                   AtomicBoolean cancelled) throws Exception {
+        final Sync<Long> sync = new Sync<>();
+        nativeCopy(job.destChatId, job.chatId, job.messageId, customCaption,
+                keepForwardHeader, sync);
+        Long result = sync.await(90_000, cancelled);
+        if (result == null) {
+            throw new Exception(sync.error == null ? "the direct copy failed" : sync.error);
+        }
+        return result;
     }
 
     public void deleteMessage(long chatId, long messageId, Cb<Boolean> callback) {
@@ -2023,6 +2718,7 @@ public final class Tg {
     }
 
     private final class SendWatch {
+        final long destChatId;
         final long messageId;
         final int fileId;
         final long expected;
@@ -2032,8 +2728,9 @@ public final class Tg {
         final Runnable freshRetry;
         volatile boolean done;
 
-        SendWatch(long messageId, int fileId, long expected, Progress progress,
-                  Cb<Long> callback, Runnable freshRetry) {
+        SendWatch(long destChatId, long messageId, int fileId, long expected,
+                  Progress progress, Cb<Long> callback, Runnable freshRetry) {
+            this.destChatId = destChatId;
             this.messageId = messageId;
             this.fileId = fileId;
             this.expected = expected;

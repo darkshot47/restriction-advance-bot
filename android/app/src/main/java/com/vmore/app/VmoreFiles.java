@@ -50,12 +50,13 @@ public class VmoreFiles extends ContentProvider {
         if (name == null || name.isEmpty()) {
             throw new FileNotFoundException("no file in " + uri);
         }
-        File root = LocalFiles.downloadsDir(getContext());
-        File target = new File(root, name);
+        File cacheRoot = getContext().getCacheDir();
+        File downloadsRoot = LocalFiles.downloadsDir(getContext());
+        File target = new File(downloadsRoot, name);
         try {
-            //: Never serve anything outside the download folder.
-            if (!target.getCanonicalPath().startsWith(root.getCanonicalPath() + File.separator)) {
-                throw new FileNotFoundException("outside the download folder");
+            if (!target.getCanonicalPath().startsWith(
+                    cacheRoot.getCanonicalPath() + File.separator)) {
+                throw new FileNotFoundException("outside the cache folder");
             }
         } catch (IOException exc) {
             throw new FileNotFoundException("could not resolve " + name);

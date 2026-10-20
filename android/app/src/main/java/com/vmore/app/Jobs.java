@@ -52,6 +52,7 @@ public final class Jobs {
 
     private final Context app;
     private final List<QJob> jobs = new ArrayList<>();
+    private final List<String> removedIds = new ArrayList<>();
     private final List<Listener> listeners = new CopyOnWriteArrayList<>();
     private final ExecutorService writer = Executors.newSingleThreadExecutor();
     private volatile boolean pausedAll;
@@ -191,6 +192,7 @@ public final class Jobs {
         if (job.id == null || job.id.isEmpty()) {
             job.id = UUID.randomUUID().toString();
         }
+        removedIds.remove(job.id);
         long now = System.currentTimeMillis();
         if (job.created == 0L) {
             job.created = now;
@@ -209,7 +211,14 @@ public final class Jobs {
         }
     }
 
+    public synchronized boolean wasRemoved(String id) {
+        return id != null && removedIds.contains(id);
+    }
+
     public synchronized void update(QJob job) {
+        if (job == null || removedIds.contains(job.id)) {
+            return;
+        }
         job.updated = System.currentTimeMillis();
         persist();
         notifyListeners();
@@ -220,10 +229,27 @@ public final class Jobs {
         notifyListeners();
     }
 
-    public synchronized void remove(String id) {
-        jobs.removeIf(job -> job.id.equals(id));
+    public synchronized QJob removeAndGet(String id) {
+        QJob found = null;
+        for (int index = 0; index < jobs.size(); index++) {
+            if (jobs.get(index).id.equals(id)) {
+                found = jobs.remove(index);
+                break;
+            }
+        }
+        if (id != null && !id.isEmpty()) {
+            removedIds.add(id);
+            while (removedIds.size() > 500) {
+                removedIds.remove(0);
+            }
+        }
         persist();
         notifyListeners();
+        return found;
+    }
+
+    public synchronized void remove(String id) {
+        removeAndGet(id);
     }
 
     /** Finished and cancelled jobs leave the queue; their record is in History. */

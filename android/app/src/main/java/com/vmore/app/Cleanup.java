@@ -7,15 +7,10 @@ import java.util.HashSet;
 import java.util.Set;
 
 /**
- * Deletes what Vmore downloaded, and nothing else.
+ * Deletes cached media files Vmore downloaded or staged, and nothing else.
  *
- * This is the smaller sibling of a factory reset: the files the app kept on the
- * phone go, while the history, the queue, the settings and the Telegram account
- * stay exactly as they are.  The history keeps saying what happened, it just
- * stops offering to open a file that is no longer there.
- *
- * A file that a waiting or running job still needs is left alone: deleting it
- * from under a download or an upload would fail that job for no reason.
+ * History, queue, settings and the Telegram login database stay untouched; any
+ * file still needed by a queued, paused or running job is left in place.
  */
 final class Cleanup {
 
@@ -28,29 +23,46 @@ final class Cleanup {
     private Cleanup() {
     }
 
-    /** Deletes every downloaded file no job is using right now. */
+    /** Deletes every cached download or upload file no active job needs right now. */
     static Freed downloads(Context context) {
         Context app = context.getApplicationContext();
         Freed freed = new Freed();
 
         Set<String> inUse = inUse(app);
-        File[] children = LocalFiles.downloadsDir(app).listFiles();
-        if (children != null) {
-            for (File file : children) {
-                if (!file.isFile() || inUse.contains(file.getAbsolutePath())) {
-                    continue;
-                }
-                long size = file.length();
-                //noinspection ResultOfMethodCallIgnored
-                if (file.delete()) {
-                    freed.files++;
-                    freed.bytes += size;
-                }
-            }
-        }
+        sweepFolder(LocalFiles.downloadsDir(app), inUse, freed, false);
+        sweepFolder(LocalFiles.uploadScratchDir(app), inUse, freed, false);
+        sweepFolder(LocalFiles.tdRootDir(app), inUse, freed, false);
 
         History.get(app).forgetMissingFiles();
         return freed;
+    }
+
+    private static void sweepFolder(File dir, Set<String> inUse, Freed freed, boolean deleteSelf) {
+        if (dir == null || !dir.exists()) {
+            return;
+        }
+        File[] children = dir.listFiles();
+        if (children != null) {
+            for (File entry : children) {
+                if (entry.isDirectory()) {
+                    sweepFolder(entry, inUse, freed, true);
+                } else if (!inUse.contains(entry.getAbsolutePath())) {
+                    long size = entry.length();
+                    //noinspection ResultOfMethodCallIgnored
+                    if (entry.delete()) {
+                        freed.files++;
+                        freed.bytes += size;
+                    }
+                }
+            }
+        }
+        if (deleteSelf) {
+            String[] left = dir.list();
+            if (left != null && left.length == 0) {
+                //noinspection ResultOfMethodCallIgnored
+                dir.delete();
+            }
+        }
     }
 
     /** The files that a queued, paused, running or waiting job still needs. */
@@ -61,8 +73,6 @@ final class Cleanup {
                 continue;
             }
             if (QJob.FAILED.equals(job.stage)) {
-                //: A failed job is not going to read the file by itself; its
-                //: leftovers are exactly what this button is for.
                 continue;
             }
             if (!job.isFinished()) {

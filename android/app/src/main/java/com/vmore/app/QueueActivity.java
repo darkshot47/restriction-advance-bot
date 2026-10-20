@@ -245,7 +245,10 @@ public class QueueActivity extends Activity implements Jobs.Listener {
                 startActivity(intent);
             });
         }
-        remove.setOnClickListener(v -> Jobs.get(this).remove(job.id));
+        remove.setOnClickListener(v -> {
+            QueueService.removeJob(this, job.id);
+            render();
+        });
 
         //: Waiting jobs can be pulled up or pushed down: the engine always takes
         //: the first one in the list.

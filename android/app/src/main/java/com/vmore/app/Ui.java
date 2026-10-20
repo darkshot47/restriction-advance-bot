@@ -4,6 +4,10 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
 import android.content.res.ColorStateList;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
+import android.graphics.Paint;
 import android.graphics.Typeface;
 import android.view.Gravity;
 import android.view.View;
@@ -14,40 +18,163 @@ import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import java.io.File;
+
 /**
- * The app's design system in one place: spacing, type and the row builders the
- * dynamic lists use.
- *
- * Only three colours exist here — white, blue and black — and no emoji or
- * asterisks are ever put on screen.
+ * The app's design system in one place: spacing, type, circular profile avatars
+ * and the row builders the dynamic lists use.
  */
 final class Ui {
 
     private Ui() {
     }
 
-    /**
-     * A round crop of a bitmap: the account picture sits in a circle in the
-     * header, and no third-party image library is involved.
-     */
-    static android.graphics.Bitmap circle(Context context, android.graphics.Bitmap source,
-                                          int sizeDp) {
+    /** A round crop of a bitmap with no third-party image library. */
+    static Bitmap circle(Context context, Bitmap source, int sizeDp) {
         int size = Math.max(1, dp(context, sizeDp));
         int side = Math.min(source.getWidth(), source.getHeight());
-        android.graphics.Bitmap squared = android.graphics.Bitmap.createBitmap(source,
+        Bitmap squared = Bitmap.createBitmap(source,
                 (source.getWidth() - side) / 2, (source.getHeight() - side) / 2, side, side);
-        android.graphics.Bitmap scaled = android.graphics.Bitmap.createScaledBitmap(squared,
-                size, size, true);
-        android.graphics.Bitmap out = android.graphics.Bitmap.createBitmap(size, size,
-                android.graphics.Bitmap.Config.ARGB_8888);
-        android.graphics.Canvas canvas = new android.graphics.Canvas(out);
-        android.graphics.Paint paint = new android.graphics.Paint(
-                android.graphics.Paint.ANTI_ALIAS_FLAG);
+        Bitmap scaled = Bitmap.createScaledBitmap(squared, size, size, true);
+        Bitmap out = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(out);
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
         paint.setShader(new android.graphics.BitmapShader(scaled,
                 android.graphics.Shader.TileMode.CLAMP, android.graphics.Shader.TileMode.CLAMP));
         float radius = size / 2f;
         canvas.drawCircle(radius, radius, radius, paint);
         return out;
+    }
+
+    /** Crisp circular monogram fallback when a chat has no Telegram profile photo. */
+    static Bitmap monogram(Context context, String label, int sizeDp) {
+        int size = Math.max(1, dp(context, sizeDp));
+        Bitmap out = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(out);
+        Paint bg = new Paint(Paint.ANTI_ALIAS_FLAG);
+        bg.setColor(context.getColor(R.color.vmore_blue));
+        float r = size / 2f;
+        canvas.drawCircle(r, r, r, bg);
+
+        String glyph = initial(label);
+        Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
+        text.setColor(context.getColor(R.color.vmore_on_accent));
+        text.setTypeface(Typeface.DEFAULT_BOLD);
+        text.setTextAlign(Paint.Align.CENTER);
+        text.setTextSize(size * 0.42f);
+        Paint.FontMetrics fm = text.getFontMetrics();
+        float baseline = r - (fm.ascent + fm.descent) / 2f;
+        canvas.drawText(glyph, r, baseline, text);
+        return out;
+    }
+
+    static String initial(String label) {
+        if (label != null) {
+            String trimmed = label.trim();
+            for (int index = 0; index < trimmed.length(); index++) {
+                char ch = trimmed.charAt(index);
+                if (Character.isLetterOrDigit(ch)) {
+                    return String.valueOf(Character.toUpperCase(ch));
+                }
+            }
+        }
+        return "V";
+    }
+
+    /**
+     * Paints a chat or destination channel's real circular profile picture into
+     * an {@link ImageView}, downloading it into app cache on demand when needed.
+     */
+    static void paintChatAvatar(final Context context, final ImageView target,
+                                final Tg.Chat chat, final int sizeDp) {
+        if (target == null) {
+            return;
+        }
+        if (chat == null) {
+            target.setPadding(dp(context, 9), dp(context, 9), dp(context, 9), dp(context, 9));
+            target.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            target.setImageResource(R.drawable.ic_chat);
+            return;
+        }
+        target.setTag(chat.id);
+        target.setPadding(0, 0, 0, 0);
+        target.setScaleType(ImageView.ScaleType.FIT_CENTER);
+
+        if (chat.photoPath != null && !chat.photoPath.isEmpty() && new File(chat.photoPath).exists()) {
+            Bitmap full = BitmapFactory.decodeFile(chat.photoPath);
+            if (full != null) {
+                target.setImageBitmap(circle(context, full, sizeDp));
+                return;
+            }
+        }
+        if (chat.miniThumb != null && chat.miniThumb.length > 0) {
+            Bitmap mini = BitmapFactory.decodeByteArray(chat.miniThumb, 0, chat.miniThumb.length);
+            if (mini != null) {
+                target.setImageBitmap(circle(context, mini, sizeDp));
+            } else {
+                target.setImageBitmap(monogram(context, chat.title, sizeDp));
+            }
+        } else {
+            target.setImageBitmap(monogram(context, chat.title, sizeDp));
+        }
+
+        if (chat.photoFileId != 0) {
+            Tg.get(context).loadChatPhoto(chat, new Tg.Cb<String>() {
+                @Override
+                public void ok(String path) {
+                    if (!Long.valueOf(chat.id).equals(target.getTag()) || path == null || path.isEmpty()) {
+                        return;
+                    }
+                    Bitmap loaded = BitmapFactory.decodeFile(path);
+                    if (loaded != null) {
+                        target.setPadding(0, 0, 0, 0);
+                        target.setScaleType(ImageView.ScaleType.FIT_CENTER);
+                        target.setImageBitmap(circle(context, loaded, sizeDp));
+                    }
+                }
+
+                @Override
+                public void fail(String message) {
+                }
+            });
+        }
+    }
+
+    /** A chat row with a real 42dp circular profile photo, title and subtitle. */
+    static LinearLayout chatRow(Context context, Tg.Chat chat, String subtitle) {
+        LinearLayout row = new LinearLayout(context);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(context, 16), dp(context, 11), dp(context, 16), dp(context, 11));
+
+        ImageView avatar = new ImageView(context);
+        avatar.setBackgroundResource(R.drawable.bg_avatar);
+        int px = dp(context, 42);
+        LinearLayout.LayoutParams avatarParams = new LinearLayout.LayoutParams(px, px);
+        avatarParams.setMargins(0, 0, dp(context, 14), 0);
+        row.addView(avatar, avatarParams);
+        paintChatAvatar(context, avatar, chat, 42);
+
+        LinearLayout texts = new LinearLayout(context);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        TextView titleView = new TextView(context);
+        titleView.setText(chat == null ? "" : chat.title);
+        titleView.setTextColor(context.getColor(R.color.vmore_text));
+        titleView.setTextSize(15f);
+        titleView.setMaxLines(1);
+        titleView.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        texts.addView(titleView);
+        if (subtitle != null && !subtitle.isEmpty()) {
+            TextView subtitleView = new TextView(context);
+            subtitleView.setText(subtitle);
+            subtitleView.setTextColor(context.getColor(R.color.vmore_text_dim));
+            subtitleView.setTextSize(12.5f);
+            subtitleView.setPadding(0, dp(context, 3), 0, 0);
+            texts.addView(subtitleView);
+        }
+        row.addView(texts, new LinearLayout.LayoutParams(0,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        return row;
     }
 
     static int dp(Context context, float value) {
@@ -127,7 +254,7 @@ final class Ui {
         return view;
     }
 
-    /** A pill chip; `active` paints it blue, exactly like the design asks. */
+    /** A pill chip; {@code active} paints it blue, matching the app palette. */
     static Button chip(Activity activity, String label, boolean active,
                        View.OnClickListener click) {
         Button button = new Button(activity);
@@ -197,6 +324,8 @@ final class Ui {
                 return "Queued";
             case QJob.RESOLVING:
                 return "Reading the link";
+            case QJob.COPYING:
+                return "Copying instantly";
             case QJob.DOWNLOADING:
                 return "Downloading";
             case QJob.UPLOADING:

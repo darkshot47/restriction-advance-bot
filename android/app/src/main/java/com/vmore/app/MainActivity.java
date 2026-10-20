@@ -31,7 +31,9 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
     private static final int REQUEST_SCAN = 102;
 
     private EditText linkField;
+    private android.widget.ImageView destAvatar;
     private TextView destTitle;
+    private Button smartFeatureButton;
     private TextView accountText;
     private Button startButton;
     //: The three switches of the home screen, one per row, exactly as the
@@ -102,7 +104,9 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         askForNotifications();
 
         linkField = findViewById(R.id.linkField);
+        destAvatar = findViewById(R.id.destAvatar);
         destTitle = findViewById(R.id.destTitle);
+        smartFeatureButton = findViewById(R.id.smartFeatureButton);
         accountText = findViewById(R.id.accountText);
         startButton = findViewById(R.id.startButton);
         switchUpload = findViewById(R.id.switchUpload);
@@ -131,6 +135,9 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         //: noticed only when looked at.
         StoryRingView profileRing = findViewById(R.id.profileRing);
         profileRing.setTurnSeconds(14f);
+
+        smartFeatureButton.setOnClickListener(v -> SmartFeatureSheet.show(this));
+        Anim.pressible(smartFeatureButton);
 
         findViewById(R.id.themeButton).setOnClickListener(v -> Skin.toggle(this));
         findViewById(R.id.profileBox).setOnClickListener(v ->
@@ -197,6 +204,7 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         Anim.pageIn(findViewById(R.id.destCard));
         Anim.pageIn(findViewById(R.id.inputCard));
         Anim.stagger(recentList);
+        LaunchIntro.playIfNeeded(this, null);
     }
 
     /** Android 13 and newer only show the queue row once this is allowed. */
@@ -231,6 +239,7 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         History.get(this).addListener(this);
         paintAccount();
         paintProfile();
+        paintSmartButton();
         Skin.paintToggle(this, findViewById(R.id.themeButton));
         paintDestination();
         paintOptions();
@@ -295,13 +304,47 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         }
     }
 
+    private void paintSmartButton() {
+        if (smartFeatureButton != null) {
+            smartFeatureButton.setText(SmartOverlayService.isRunning()
+                    ? R.string.smart_button_on : R.string.smart_button);
+        }
+    }
+
     private void paintDestination() {
         long chatId = Prefs.destChatId(this);
         String title = Prefs.destTitle(this);
         if (chatId == 0L || title.isEmpty()) {
             destTitle.setText(R.string.home_no_destination);
-        } else {
-            destTitle.setText(title);
+            if (destAvatar != null) {
+                destAvatar.setTag(null);
+                destAvatar.setImageResource(R.drawable.ic_chat);
+                destAvatar.setImageTintList(
+                        android.content.res.ColorStateList.valueOf(getColor(R.color.vmore_blue)));
+                destAvatar.setPadding(Ui.dp(this, 10), Ui.dp(this, 10),
+                        Ui.dp(this, 10), Ui.dp(this, 10));
+            }
+            return;
+        }
+        destTitle.setText(title);
+        if (destAvatar != null) {
+            Tg.Chat placeholder = new Tg.Chat();
+            placeholder.id = chatId;
+            placeholder.title = title;
+            Ui.paintChatAvatar(this, destAvatar, placeholder, 42);
+            Tg.get(this).chat(chatId, new Tg.Cb<Tg.Chat>() {
+                @Override
+                public void ok(Tg.Chat value) {
+                    if (!isFinishing() && !isDestroyed()
+                            && Prefs.destChatId(MainActivity.this) == chatId) {
+                        Ui.paintChatAvatar(MainActivity.this, destAvatar, value, 42);
+                    }
+                }
+
+                @Override
+                public void fail(String message) {
+                }
+            });
         }
     }
 

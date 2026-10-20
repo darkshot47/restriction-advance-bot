@@ -7,21 +7,33 @@ import android.os.Bundle;
 /**
  * The application object.
  *
- * It pushes the saved skin into the process before any screen exists, and it
- * watches how many screens are open: when the last one stops, the app really is
- * in the background, which is the moment the optional PIN lock arms itself.
+ * Applies the active theme skin, sweeps unused session directories and legacy
+ * user-data media into cache storage at startup, arms the optional PIN lock
+ * when the app leaves the screen, and tracks whether the opening splash intro
+ * should play when the user opens Vmore.
  */
 public class VmoreApp extends Application implements Application.ActivityLifecycleCallbacks {
 
+    private static volatile boolean launchIntroPending = true;
+    private static volatile long backgroundedAt = 0L;
+    private static final long REARM_INTRO_AFTER_MS = 12_000L;
+
     private int started;
+
+    public static boolean consumeLaunchIntro() {
+        if (launchIntroPending) {
+            launchIntroPending = false;
+            return true;
+        }
+        return false;
+    }
 
     @Override
     public void onCreate() {
         super.onCreate();
+        launchIntroPending = true;
         Skin.apply(this);
         registerActivityLifecycleCallbacks(this);
-        //: A session folder that a reset could not delete (it was still open,
-        //: the phone was shutting down) is taken here, once the process is new.
         Thread tidy = new Thread(() -> Tg.get(this).tidySessions(), "vmore-session-tidy");
         tidy.setDaemon(true);
         tidy.start();
@@ -29,6 +41,10 @@ public class VmoreApp extends Application implements Application.ActivityLifecyc
 
     @Override
     public void onActivityStarted(Activity activity) {
+        if (started == 0 && backgroundedAt > 0L
+                && System.currentTimeMillis() - backgroundedAt >= REARM_INTRO_AFTER_MS) {
+            launchIntroPending = true;
+        }
         started++;
     }
 
@@ -36,6 +52,7 @@ public class VmoreApp extends Application implements Application.ActivityLifecyc
     public void onActivityStopped(Activity activity) {
         started = Math.max(0, started - 1);
         if (started == 0) {
+            backgroundedAt = System.currentTimeMillis();
             Lock.appLeft();
         }
     }

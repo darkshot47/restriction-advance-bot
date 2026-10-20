@@ -14,6 +14,7 @@ public final class QJob {
 
     public static final String QUEUED = "queued";
     public static final String RESOLVING = "resolving";
+    public static final String COPYING = "copying";
     public static final String DOWNLOADING = "downloading";
     public static final String UPLOADING = "uploading";
     public static final String DONE = "done";
@@ -109,7 +110,8 @@ public final class QJob {
     }
 
     public boolean isActive() {
-        return RESOLVING.equals(stage) || DOWNLOADING.equals(stage) || UPLOADING.equals(stage);
+        return RESOLVING.equals(stage) || COPYING.equals(stage)
+                || DOWNLOADING.equals(stage) || UPLOADING.equals(stage);
     }
 
     public int percent() {

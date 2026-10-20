@@ -670,13 +670,6 @@ deterministically from the single pinned commit in
 [`android/tdlib/README.md`](android/tdlib/README.md) — cached across runs, and the workflow asserts both
 native libraries really landed inside the APK.
 
-Stable links:
-
-```
-https://github.com/darkshot47/restriction-advance-bot/releases/latest/download/Vmore.apk
-https://github.com/darkshot47/restriction-advance-bot/releases/latest/download/Vmore-apk.zip
-```
-
 ### Icons
 
 `android/icons/*.svg` are the design sources; each has an exact VectorDrawable twin in
