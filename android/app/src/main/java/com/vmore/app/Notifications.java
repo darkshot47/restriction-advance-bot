@@ -121,7 +121,8 @@ final class Notifications {
     /** The live queue notification: one row per running job. */
     static Notification progress(Context context, String name, String stage, long done, long total,
                                  boolean paused) {
-        int percent = Format.percent(done, total);
+        int rawPct = Format.percent(done, total);
+        int percent = QJob.UPLOADING.equals(stage) ? Math.min(99, rawPct) : rawPct;
         String label = stageLabel(context, stage);
         String size = total > 0
                 ? Format.size(done) + " / " + Format.size(total)

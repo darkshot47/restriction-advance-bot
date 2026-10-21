@@ -60,6 +60,7 @@ public final class QJob {
     public long done;
     public long uploaded;
     public int fileId;
+    public String remoteFileId = "";
     public String path = "";
     public String caption = "";
     public long durationSec;
@@ -117,7 +118,7 @@ public final class QJob {
     public int percent() {
         if (UPLOADING.equals(stage)) {
             long total = size > 0 ? size : uploaded;
-            return Format.percent(uploaded, total);
+            return Math.min(99, Format.percent(uploaded, total));
         }
         return Format.percent(done, size);
     }
@@ -159,6 +160,7 @@ public final class QJob {
             json.put("done", done);
             json.put("uploaded", uploaded);
             json.put("file_id", fileId);
+            json.put("remote_file_id", remoteFileId);
             json.put("path", path);
             json.put("caption", caption);
             json.put("duration", durationSec);
@@ -204,6 +206,7 @@ public final class QJob {
         job.done = json.optLong("done", 0L);
         job.uploaded = json.optLong("uploaded", 0L);
         job.fileId = json.optInt("file_id", 0);
+        job.remoteFileId = json.optString("remote_file_id", "");
         job.path = json.optString("path", "");
         job.caption = json.optString("caption", "");
         job.durationSec = json.optLong("duration", 0L);

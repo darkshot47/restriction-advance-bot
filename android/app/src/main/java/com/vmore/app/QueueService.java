@@ -600,14 +600,27 @@ public class QueueService extends Service {
 
             if (job.uploadAfter && job.destChatId != 0L) {
                 job.stage = QJob.UPLOADING;
+                job.uploaded = 0L;
+                final long uploadStarted = System.currentTimeMillis();
                 Live.STAGE = QJob.UPLOADING;
-                Live.DONE.set(0);
+                Live.STARTED_AT = uploadStarted;
+                Live.DONE.set(0L);
+                Live.TOTAL.set(job.size);
+                Live.SPEED = 0.0;
+                Live.ETA_MS = 0L;
                 jobs.update(job);
-                showNotification(false);
+                postProgress(false);
                 long sentId = Tg.get(this).sendBlocking(job, (done, total) -> {
+                    long effectiveTotal = total > 0 ? total : job.size;
+                    job.uploaded = done;
                     Live.DONE.set(done);
-                    Live.TOTAL.set(total);
+                    Live.TOTAL.set(effectiveTotal);
+                    long elapsed = Math.max(1L, System.currentTimeMillis() - uploadStarted);
+                    Live.SPEED = done * 1000.0 / elapsed;
+                    Live.ETA_MS = Live.SPEED > 0 && effectiveTotal > done
+                            ? (long) ((effectiveTotal - done) / Live.SPEED * 1000.0) : 0L;
                     jobs.ping();
+                    showNotification(false);
                 }, cancelled);
                 if (abortIfInterrupted(jobs, job)) {
                     return;
@@ -838,6 +851,7 @@ public class QueueService extends Service {
         job.chatId = media.chatId;
         job.messageId = media.messageId;
         job.fileId = media.fileId;
+        job.remoteFileId = media.remoteFileId;
         job.size = media.size;
         job.name = media.name;
         job.kind = media.kind;

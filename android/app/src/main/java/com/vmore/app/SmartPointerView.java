@@ -4,7 +4,6 @@ import android.animation.ValueAnimator;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
-import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.RectF;
 import android.graphics.SweepGradient;
@@ -15,11 +14,12 @@ import android.view.HapticFeedbackConstants;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewConfiguration;
-import android.view.animation.LinearInterpolator;
+import android.view.animation.DecelerateInterpolator;
 
-// Custom floating views for Smart Feature:
-// 1) Small precision white circle pointer supporting drag + double-tap capture/paste.
-// 2) Colorful floating orb button that toggles the full Smart Feature control menu.
+// Lightweight floating pointer & menu button views for Smart Feature:
+// - Zero continuous idle animation (0% background GPU/CPU overhead, zero flicker)
+// - Sub-pixel touch carry accumulator for silky-smooth dragging
+// - Badge strictly displays only captured file count (0 = pure white circle)
 public final class SmartPointerView extends View {
 
     public static final int MODE_WHITE_CIRCLE = 0;
@@ -52,9 +52,8 @@ public final class SmartPointerView extends View {
     private final Paint badgeTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint glyphPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF ringRect = new RectF();
-    private final Matrix sweepMatrix = new Matrix();
     private final GestureDetector detector;
-    private final ValueAnimator spinner;
+    private final ValueAnimator rippleAnimator;
     private final int touchSlop;
 
     private InteractionListener listener;
@@ -62,7 +61,6 @@ public final class SmartPointerView extends View {
     private int visualState = STATE_IDLE;
     private int badgeCount = 0;
     private int transferPercent = 0;
-    private float angle = 0f;
     private float tapRipple = 1f;
 
     private float downRawX;
@@ -89,14 +87,14 @@ public final class SmartPointerView extends View {
 
         badgePaint.setColor(0xFF10B981);
         badgeTextPaint.setColor(Color.WHITE);
-        badgeTextPaint.setTextSize(Ui.dp(context, 10));
+        badgeTextPaint.setTextSize(Ui.dp(context, 9));
         badgeTextPaint.setTypeface(Typeface.DEFAULT_BOLD);
         badgeTextPaint.setTextAlign(Paint.Align.CENTER);
 
         glyphPaint.setStyle(Paint.Style.STROKE);
         glyphPaint.setStrokeCap(Paint.Cap.ROUND);
         glyphPaint.setStrokeJoin(Paint.Join.ROUND);
-        glyphPaint.setStrokeWidth(Ui.dp(context, 3));
+        glyphPaint.setStrokeWidth(Ui.dp(context, 2));
         glyphPaint.setColor(Color.WHITE);
 
         detector = new GestureDetector(context, new GestureDetector.SimpleOnGestureListener() {
@@ -126,15 +124,11 @@ public final class SmartPointerView extends View {
             }
         });
 
-        spinner = ValueAnimator.ofFloat(0f, 360f);
-        spinner.setDuration(2600L);
-        spinner.setRepeatCount(ValueAnimator.INFINITE);
-        spinner.setInterpolator(new LinearInterpolator());
-        spinner.addUpdateListener(anim -> {
-            angle = (Float) anim.getAnimatedValue();
-            if (tapRipple < 1f) {
-                tapRipple = Math.min(1f, tapRipple + 0.07f);
-            }
+        rippleAnimator = ValueAnimator.ofFloat(0f, 1f);
+        rippleAnimator.setDuration(240L);
+        rippleAnimator.setInterpolator(new DecelerateInterpolator());
+        rippleAnimator.addUpdateListener(anim -> {
+            tapRipple = (Float) anim.getAnimatedValue();
             invalidate();
         });
     }
@@ -144,28 +138,28 @@ public final class SmartPointerView extends View {
     }
 
     public void setVisualState(int state, int count, int percent) {
+        int cleanCount = Math.max(0, count);
+        int cleanPct = Math.max(0, Math.min(100, percent));
+        if (this.visualState == state
+                && this.badgeCount == cleanCount
+                && this.transferPercent == cleanPct) {
+            return;
+        }
         this.visualState = state;
-        this.badgeCount = Math.max(0, count);
-        this.transferPercent = Math.max(0, Math.min(100, percent));
+        this.badgeCount = cleanCount;
+        this.transferPercent = cleanPct;
         invalidate();
     }
 
     public void triggerRipple() {
+        rippleAnimator.cancel();
         tapRipple = 0f;
-        invalidate();
-    }
-
-    @Override
-    protected void onAttachedToWindow() {
-        super.onAttachedToWindow();
-        if (!spinner.isRunning()) {
-            spinner.start();
-        }
+        rippleAnimator.start();
     }
 
     @Override
     protected void onDetachedFromWindow() {
-        spinner.cancel();
+        rippleAnimator.cancel();
         super.onDetachedFromWindow();
     }
 
@@ -192,55 +186,46 @@ public final class SmartPointerView extends View {
     }
 
     private void drawWhiteCirclePointer(Canvas canvas, float cx, float cy) {
-        float coreRadius = Ui.dp(getContext(), 11);
-        float haloRadius = Ui.dp(getContext(), 16);
+        float coreRadius = Ui.dp(getContext(), 10);
+        float haloRadius = Ui.dp(getContext(), 14);
 
-        // Double-tap shockwave ripple
         if (tapRipple < 1f) {
-            float rr = coreRadius + Ui.dp(getContext(), 10) * tapRipple;
-            int alpha = (int) ((1f - tapRipple) * 210f);
+            float rr = coreRadius + Ui.dp(getContext(), 9) * tapRipple;
+            int alpha = (int) ((1f - tapRipple) * 200f);
             ripplePaint.setColor((alpha << 24) | 0x00FFFFFF);
             canvas.drawCircle(cx, cy, rr, ripplePaint);
         }
 
-        // Subtle dark contrast shadow halo so white circle pops on pure white backgrounds too
-        outerGlowPaint.setColor(0x40000000);
+        outerGlowPaint.setColor(0x3D000000);
         canvas.drawCircle(cx, cy + Ui.dp(getContext(), 1), coreRadius + Ui.dp(getContext(), 2),
                 outerGlowPaint);
 
-        // State ring around the crisp white circle
         ringRect.set(cx - haloRadius, cy - haloRadius, cx + haloRadius, cy + haloRadius);
         ringPaint.setShader(null);
         if (visualState == STATE_SCANNING && rainbowSweep != null) {
-            sweepMatrix.reset();
-            sweepMatrix.setRotate(angle * 2.2f, cx, cy);
-            rainbowSweep.setLocalMatrix(sweepMatrix);
             ringPaint.setShader(rainbowSweep);
-            canvas.drawArc(ringRect, angle * 2f, 270f, false, ringPaint);
+            canvas.drawCircle(cx, cy, haloRadius, ringPaint);
         } else if (visualState == STATE_CAPTURED) {
             ringPaint.setColor(0xFF10B981);
             canvas.drawCircle(cx, cy, haloRadius, ringPaint);
         } else if (visualState == STATE_TRANSFERRING) {
-            ringPaint.setColor(0x4438BDF8);
+            ringPaint.setColor(0x3838BDF8);
             canvas.drawCircle(cx, cy, haloRadius, ringPaint);
             ringPaint.setColor(0xFF38BDF8);
-            float sweepDeg = transferPercent > 0 ? (transferPercent * 3.6f) : 120f;
-            float startDeg = transferPercent > 0 ? -90f : angle * 1.8f;
-            canvas.drawArc(ringRect, startDeg, sweepDeg, false, ringPaint);
+            float sweepDeg = transferPercent > 0 ? Math.max(18f, transferPercent * 3.6f) : 72f;
+            canvas.drawArc(ringRect, -90f, sweepDeg, false, ringPaint);
         } else if (visualState == STATE_ALERT) {
             ringPaint.setColor(0xFFF59E0B);
             canvas.drawCircle(cx, cy, haloRadius, ringPaint);
         } else {
-            ringPaint.setColor(0x8838BDF8);
-            canvas.drawArc(ringRect, angle, 200f, false, ringPaint);
+            ringPaint.setColor(0x6638BDF8);
+            canvas.drawCircle(cx, cy, haloRadius, ringPaint);
         }
 
-        // Pure crisp white circle body
         corePaint.setColor(0xFFFFFFFF);
         canvas.drawCircle(cx, cy, coreRadius, corePaint);
         canvas.drawCircle(cx, cy, coreRadius, strokePaint);
 
-        // Precision center target dot
         dotPaint.setColor(visualState == STATE_CAPTURED ? 0xFF10B981 : 0xFF2563EB);
         canvas.drawCircle(cx, cy, Ui.dp(getContext(), 2), dotPaint);
 
@@ -250,19 +235,16 @@ public final class SmartPointerView extends View {
     }
 
     private void drawMenuOrb(Canvas canvas, float cx, float cy) {
-        float orbRadius = Ui.dp(getContext(), 21);
+        float orbRadius = Ui.dp(getContext(), 17);
 
-        outerGlowPaint.setColor(0x48000000);
-        canvas.drawCircle(cx, cy + Ui.dp(getContext(), 2), orbRadius + Ui.dp(getContext(), 1),
+        outerGlowPaint.setColor(0x44000000);
+        canvas.drawCircle(cx, cy + Ui.dp(getContext(), 1), orbRadius + Ui.dp(getContext(), 1),
                 outerGlowPaint);
 
         corePaint.setColor(0xF2121829);
         canvas.drawCircle(cx, cy, orbRadius, corePaint);
 
         if (rainbowSweep != null) {
-            sweepMatrix.reset();
-            sweepMatrix.setRotate(angle, cx, cy);
-            rainbowSweep.setLocalMatrix(sweepMatrix);
             ringPaint.setShader(rainbowSweep);
         } else {
             ringPaint.setColor(0xFF38BDF8);
@@ -270,9 +252,8 @@ public final class SmartPointerView extends View {
         ringRect.set(cx - orbRadius, cy - orbRadius, cx + orbRadius, cy + orbRadius);
         canvas.drawOval(ringRect, ringPaint);
 
-        // Crisp V emblem inside colorful orb
-        float gx = Ui.dp(getContext(), 6);
-        float gy = Ui.dp(getContext(), 6);
+        float gx = Ui.dp(getContext(), 5);
+        float gy = Ui.dp(getContext(), 5);
         canvas.drawLine(cx - gx, cy - gy, cx, cy + gy, glyphPaint);
         canvas.drawLine(cx, cy + gy, cx + gx, cy - gy, glyphPaint);
 
@@ -282,7 +263,7 @@ public final class SmartPointerView extends View {
     }
 
     private void drawBadge(Canvas canvas, float bx, float by, int count) {
-        float r = Ui.dp(getContext(), 8);
+        float r = Ui.dp(getContext(), 7);
         canvas.drawCircle(bx, by, r, badgePaint);
         String text = count > 9 ? "9+" : String.valueOf(count);
         Paint.FontMetrics fm = badgeTextPaint.getFontMetrics();
@@ -302,17 +283,17 @@ public final class SmartPointerView extends View {
                 dragging = false;
                 return true;
             case MotionEvent.ACTION_MOVE:
-                float totalDx = event.getRawX() - downRawX;
-                float totalDy = event.getRawY() - downRawY;
-                if (!dragging && Math.hypot(totalDx, totalDy) > touchSlop) {
+                float rawX = event.getRawX();
+                float rawY = event.getRawY();
+                if (!dragging && Math.hypot(rawX - downRawX, rawY - downRawY) > touchSlop) {
                     dragging = true;
                 }
                 if (dragging && listener != null) {
-                    int stepX = Math.round(event.getRawX() - lastRawX);
-                    int stepY = Math.round(event.getRawY() - lastRawY);
+                    int stepX = Math.round(rawX - lastRawX);
+                    int stepY = Math.round(rawY - lastRawY);
                     if (stepX != 0 || stepY != 0) {
-                        lastRawX = event.getRawX();
-                        lastRawY = event.getRawY();
+                        lastRawX += stepX;
+                        lastRawY += stepY;
                         listener.onMoveBy(stepX, stepY);
                     }
                 }

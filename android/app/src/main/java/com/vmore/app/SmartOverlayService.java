@@ -16,26 +16,27 @@ import android.provider.Settings;
 import android.text.TextUtils;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.Button;
 import android.widget.FrameLayout;
+import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
-import android.widget.ScrollView;
 import android.widget.TextView;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
-// Floating overlay service for Vmore's Smart Feature:
-// - Floating colorful Vmore menu orb (single-tap opens/closes colorful menu)
-// - Small precision white circle pointer (drag onto any file + double-tap to
-//   capture; move to any writable destination channel/chat + double-tap to paste)
-// - Live step-by-step floating status banner right on top of Telegram
+// Compact glitch-free Smart Feature overlay service:
+// - Floating colorful Vmore button opens a compact ~1/4-screen floating mini popup
+//   right beside the button (never a full-screen blocking dialog)
+// - Crisp white pointer circle displays ONLY captured file count (0 = clean white dot)
+// - Live progress & cancel controls update strictly in-place with zero view rebuilds
 public class SmartOverlayService extends Service implements Jobs.Listener {
 
     public static final String ACTION_START = "com.vmore.app.SMART_START";
@@ -53,28 +54,36 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
     private WindowManager.LayoutParams whiteParams;
     private SmartPointerView menuOrb;
     private WindowManager.LayoutParams orbParams;
+
     private FrameLayout bannerRoot;
     private TextView bannerBadge;
     private TextView bannerText;
-    private FrameLayout menuScrim;
-    private AuroraDrawable menuAurora;
 
-    // Live views inside the colorful floating menu
+    // Compact ~1/4-screen floating mini popup card + static child references
+    private FrameLayout menuPopup;
+    private WindowManager.LayoutParams menuParams;
     private TextView menuStepText;
-    private LinearLayout menuGuideBox;
-    private LinearLayout menuCapturedList;
-    private LinearLayout menuLiveTransferBox;
-    private LinearLayout menuDestList;
+    private TextView menuGuideText;
+    private LinearLayout menuPermBox;
+    private LinearLayout menuLiveCard;
+    private TextView menuLiveLabel;
+    private ProgressBar menuLiveBar;
+    private Button menuCancelBtn;
+    private Button menuClearBtn;
+    private TextView menuDestActiveLabel;
+    private LinearLayout menuAvatarStrip;
     private Button togglePointerBtn;
 
     private boolean pointerVisible = true;
     private boolean guideExpanded = false;
     private boolean resolvingTap = false;
     private String lastAnnouncedStage = "";
+    private String lastStepRendered = "";
+    private String lastLiveLabelRendered = "";
 
     private final Runnable hideBannerTask = () -> {
         if (bannerRoot != null) {
-            bannerRoot.animate().alpha(0f).setDuration(220L)
+            bannerRoot.animate().alpha(0f).setDuration(160L)
                     .withEndAction(() -> {
                         if (bannerRoot != null) {
                             bannerRoot.setVisibility(View.GONE);
@@ -87,7 +96,7 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
         @Override
         public void run() {
             syncLiveTransferUi();
-            handler.postDelayed(this, 600L);
+            handler.postDelayed(this, 650L);
         }
     };
 
@@ -142,7 +151,7 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
         mountOverlays();
         refreshWritableDestinations();
         handler.post(liveTicker);
-        announceStep("STEP 1 OF 2", getString(R.string.smart_step_ready), 0xFF38BDF8, 5200L);
+        announceStep("SMART READY", "Double-tap any file with white dot", 0xFF38BDF8, 3200L);
     }
 
     @Override
@@ -219,31 +228,32 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
         }
         DisplayMetrics dm = getResources().getDisplayMetrics();
 
-        // 1. Floating top step-by-step banner toast
+        // 1. Compact non-touchable top pill toast (never blocks screen touches)
         if (bannerRoot == null) {
             bannerRoot = buildBannerView();
             WindowManager.LayoutParams bp = new WindowManager.LayoutParams(
-                    WindowManager.LayoutParams.MATCH_PARENT,
+                    WindowManager.LayoutParams.WRAP_CONTENT,
                     WindowManager.LayoutParams.WRAP_CONTENT,
                     overlayWindowType(),
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                            | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                            | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
                     PixelFormat.TRANSLUCENT);
             bp.gravity = Gravity.TOP | Gravity.CENTER_HORIZONTAL;
-            bp.y = Ui.dp(this, 44);
+            bp.y = Ui.dp(this, 42);
             bannerRoot.setVisibility(View.GONE);
             safeAddView(bannerRoot, bp);
         }
 
-        // 2. Small precision white circle pointer
+        // 2. Small crisp white circle pointer
         if (whiteCircle == null) {
-            int size = Ui.dp(this, 38);
+            final int size = Ui.dp(this, 34);
             whiteCircle = new SmartPointerView(this, SmartPointerView.MODE_WHITE_CIRCLE);
             whiteParams = new WindowManager.LayoutParams(
                     size, size,
                     overlayWindowType(),
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                            | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
                     PixelFormat.TRANSLUCENT);
             whiteParams.gravity = Gravity.TOP | Gravity.START;
             whiteParams.x = (dm.widthPixels - size) / 2;
@@ -251,10 +261,14 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
             whiteCircle.setInteractionListener(new SmartPointerView.InteractionListener() {
                 @Override
                 public void onMoveBy(int dx, int dy) {
-                    whiteParams.x = clamp(whiteParams.x + dx, 0, dm.widthPixels - size);
-                    whiteParams.y = clamp(whiteParams.y + dy, Ui.dp(SmartOverlayService.this, 24),
+                    int nx = clamp(whiteParams.x + dx, 0, dm.widthPixels - size);
+                    int ny = clamp(whiteParams.y + dy, Ui.dp(SmartOverlayService.this, 24),
                             dm.heightPixels - size);
-                    safeUpdateView(whiteCircle, whiteParams);
+                    if (nx != whiteParams.x || ny != whiteParams.y) {
+                        whiteParams.x = nx;
+                        whiteParams.y = ny;
+                        safeUpdateView(whiteCircle, whiteParams);
+                    }
                 }
 
                 @Override
@@ -264,13 +278,13 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
                 @Override
                 public void onSingleTap() {
                     if (captured.isEmpty()) {
-                        announceStep("HOW TO CAPTURE",
-                                "Place this white circle directly on a file in Telegram and double-tap it.",
-                                0xFF38BDF8, 3400L);
+                        announceStep("STEP 1",
+                                "Place white dot on any file and double-tap",
+                                0xFF38BDF8, 2400L);
                     } else {
-                        announceStep(captured.size() + " READY TO PASTE",
-                                "Open any writable channel or chat and double-tap to paste there, or tap the colorful Vmore orb.",
-                                0xFF10B981, 3600L);
+                        announceStep(captured.size() + " IN DOT",
+                                "Open target channel and double-tap to send",
+                                0xFF10B981, 2600L);
                     }
                 }
 
@@ -282,35 +296,40 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
             safeAddView(whiteCircle, whiteParams);
         }
 
-        // 3. Floating colorful Vmore menu orb on screen edge
+        // 3. Compact floating colorful Vmore menu orb
         if (menuOrb == null) {
-            int orbSize = Ui.dp(this, 50);
+            final int orbSize = Ui.dp(this, 42);
             menuOrb = new SmartPointerView(this, SmartPointerView.MODE_MENU_ORB);
             orbParams = new WindowManager.LayoutParams(
                     orbSize, orbSize,
                     overlayWindowType(),
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                            | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                            | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
                     PixelFormat.TRANSLUCENT);
             orbParams.gravity = Gravity.TOP | Gravity.START;
-            orbParams.x = Ui.dp(this, 10);
+            orbParams.x = Ui.dp(this, 8);
             orbParams.y = (int) (dm.heightPixels * 0.28f);
             menuOrb.setInteractionListener(new SmartPointerView.InteractionListener() {
                 @Override
                 public void onMoveBy(int dx, int dy) {
-                    orbParams.x = clamp(orbParams.x + dx, 0, dm.widthPixels - orbSize);
-                    orbParams.y = clamp(orbParams.y + dy, Ui.dp(SmartOverlayService.this, 32),
+                    int nx = clamp(orbParams.x + dx, 0, dm.widthPixels - orbSize);
+                    int ny = clamp(orbParams.y + dy, Ui.dp(SmartOverlayService.this, 28),
                             dm.heightPixels - orbSize);
-                    safeUpdateView(menuOrb, orbParams);
+                    if (nx != orbParams.x || ny != orbParams.y) {
+                        orbParams.x = nx;
+                        orbParams.y = ny;
+                        safeUpdateView(menuOrb, orbParams);
+                        repositionMenuNearOrb();
+                    }
                 }
 
                 @Override
                 public void onDragFinished() {
-                    // Gently snap colorful orb to left or right edge so it stays tidy
                     orbParams.x = orbParams.x + orbSize / 2 < dm.widthPixels / 2
                             ? Ui.dp(SmartOverlayService.this, 8)
                             : dm.widthPixels - orbSize - Ui.dp(SmartOverlayService.this, 8);
                     safeUpdateView(menuOrb, orbParams);
+                    repositionMenuNearOrb();
                 }
 
                 @Override
@@ -336,53 +355,49 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
         if (!SmartAccessibilityService.isEnabled(this)
                 || !SmartAccessibilityService.isRunning()) {
             setPointerState(SmartPointerView.STATE_ALERT);
-            announceStep("ENABLE SCREEN READER",
-                    "Tap Allow on Screen file and chat reader once so Vmore can see the file or chat under the circle.",
-                    0xFFF59E0B, 5200L);
+            announceStep("ALLOW READER",
+                    "Tap Allow in the mini menu once",
+                    0xFFF59E0B, 3600L);
             showMenuPanel();
             return;
         }
         if (!Tg.get(this).isReady()) {
             Tg.get(this).start(null);
             setPointerState(SmartPointerView.STATE_SCANNING);
-            announceStep("CONNECTING SESSION",
-                    "Waking your signed-in Telegram session… double-tap once more in a second.",
-                    0xFF38BDF8, 3800L);
+            announceStep("CONNECTING",
+                    "Waking session — double-tap again in 1s",
+                    0xFF38BDF8, 2800L);
             return;
         }
 
         resolvingTap = true;
         setPointerState(SmartPointerView.STATE_SCANNING);
-        announceStep("SCANNING TARGET", getString(R.string.smart_step_reading),
-                0xFF818CF8, 3500L);
 
         final SmartAccessibilityService.ScreenTarget screen =
                 SmartAccessibilityService.inspectAt(rawX, rawY);
         if (screen == null) {
             resolvingTap = false;
             restoreIdleOrCapturedState();
-            announceStep("NOTHING DETECTED",
-                    "Open Telegram with a chat or file visible under the white circle, then double-tap.",
-                    0xFFF59E0B, 4200L);
+            announceStep("TRY AGAIN",
+                    "Place white dot right on a Telegram post or channel",
+                    0xFFF59E0B, 2800L);
             return;
         }
 
-        // Case A: User double-tapped a chat row directly in Telegram's main chat list!
         if (screen.looksLikeChatList && !screen.targetLines.isEmpty()) {
             resolveChatRowTap(screen);
             return;
         }
 
-        // Case B: User is inside an opened chat/channel (headerTitle identifies it)
         String chatQuery = !screen.headerTitle.isEmpty()
                 ? screen.headerTitle
                 : firstTitleCandidate(screen.targetLines);
         if (chatQuery.isEmpty()) {
             resolvingTap = false;
             restoreIdleOrCapturedState();
-            announceStep("MOVE CIRCLE CLOSER",
-                    "Keep the chat header visible at the top of Telegram and place the circle right on the file or chat.",
-                    0xFFF59E0B, 4500L);
+            announceStep("MOVE DOT",
+                    "Keep channel title visible and tap on the file",
+                    0xFFF59E0B, 3000L);
             return;
         }
 
@@ -392,17 +407,12 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
                 if (matches == null || matches.isEmpty()) {
                     resolvingTap = false;
                     restoreIdleOrCapturedState();
-                    announceStep("CHAT NOT MATCHED",
-                            "Could not find \"" + shortStr(chatQuery, 28)
-                                    + "\" in your signed-in Vmore account.",
-                            0xFFF59E0B, 4500L);
+                    announceStep("NOT FOUND",
+                            "Open \"" + shortStr(chatQuery, 20) + "\" in your signed-in account",
+                            0xFFF59E0B, 3200L);
                     return;
                 }
                 final Tg.Chat matchedChat = matches.get(0);
-                // Decide whether this double-tap captures another file or pastes into destination:
-                // - If basket is empty -> capture file under pointer!
-                // - If basket already holds files AND user moved into a DIFFERENT chat (or tapped empty chat space / composer area) -> PASTE into matchedChat!
-                // - If basket holds files AND user is STILL inside the same source chat tapping another media item -> add to batch!
                 boolean sameAsLastSource = !captured.isEmpty()
                         && captured.get(captured.size() - 1).chatId == matchedChat.id;
                 boolean looksLikeMediaBubble = hasMediaHints(screen.targetLines);
@@ -413,7 +423,6 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
                     return;
                 }
 
-                // Capture media message under the white circle inside matchedChat!
                 Tg.get(SmartOverlayService.this).matchMediaInChat(
                         matchedChat.id,
                         screen.targetLines,
@@ -435,8 +444,7 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
                                     return;
                                 }
                                 restoreIdleOrCapturedState();
-                                announceStep("NO FILE UNDER CIRCLE",
-                                        message, 0xFFF59E0B, 4600L);
+                                announceStep("NO FILE", shortStr(message, 34), 0xFFF59E0B, 3000L);
                             }
                         });
             }
@@ -445,7 +453,7 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
             public void fail(String message) {
                 resolvingTap = false;
                 restoreIdleOrCapturedState();
-                announceStep("SESSION BUSY", message, 0xFFF59E0B, 4200L);
+                announceStep("BUSY", shortStr(message, 32), 0xFFF59E0B, 2800L);
             }
         });
     }
@@ -455,9 +463,6 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
         if (rowTitle.isEmpty()) {
             resolvingTap = false;
             restoreIdleOrCapturedState();
-            announceStep("PLACE ON CHAT OR FILE",
-                    "Open a chat to grab a file first, or place the circle right on a destination chat name.",
-                    0xFFF59E0B, 4200L);
             return;
         }
         Tg.get(this).findChatsMatching(rowTitle, new Tg.Cb<List<Tg.Chat>>() {
@@ -466,9 +471,9 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
                 resolvingTap = false;
                 if (matches == null || matches.isEmpty()) {
                     restoreIdleOrCapturedState();
-                    announceStep("CHAT NOT FOUND",
-                            "Open the chat first so Telegram loads it, then double-tap.",
-                            0xFFF59E0B, 4200L);
+                    announceStep("OPEN CHAT",
+                            "Open the channel first, then double-tap",
+                            0xFFF59E0B, 2800L);
                     return;
                 }
                 Tg.Chat chat = matches.get(0);
@@ -476,10 +481,9 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
                     pasteCapturedIntoChat(chat);
                 } else {
                     restoreIdleOrCapturedState();
-                    announceStep("OPEN CHAT TO PICK FILE",
-                            "Open \"" + shortStr(chat.title, 26)
-                                    + "\", place the white circle on the file you want, and double-tap.",
-                            0xFF38BDF8, 4500L);
+                    announceStep("OPEN CHAT",
+                            "Open \"" + shortStr(chat.title, 20) + "\" to pick a file",
+                            0xFF38BDF8, 2800L);
                 }
             }
 
@@ -487,7 +491,6 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
             public void fail(String message) {
                 resolvingTap = false;
                 restoreIdleOrCapturedState();
-                announceStep("ERROR", message, 0xFFF59E0B, 4000L);
             }
         });
     }
@@ -496,10 +499,9 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
         for (Tg.Media existing : captured) {
             if (existing.chatId == media.chatId && existing.messageId == media.messageId) {
                 restoreIdleOrCapturedState();
-                announceStep("ALREADY IN BASKET (" + captured.size() + ")",
-                        shortStr(media.name, 30)
-                                + " is already selected. Open your destination channel/chat and double-tap to paste!",
-                        0xFF10B981, 4600L);
+                announceStep("READY (" + captured.size() + ")",
+                        "Open target channel and double-tap to paste",
+                        0xFF10B981, 2800L);
                 return;
             }
         }
@@ -508,16 +510,10 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
         }
         captured.add(media);
         restoreIdleOrCapturedState();
-        String sizeLabel = media.size > 0 ? " (" + Format.size(media.size) + ")" : "";
-        String stepBadge = captured.size() == 1
-                ? "STEP 1 DONE • FILE ADDED"
-                : captured.size() + " FILES ADDED";
-        String msg = "Found " + shortStr(media.name, 28) + sizeLabel
-                + " in " + shortStr(media.chatTitle, 22)
-                + ". Now open any writable channel/chat and double-tap to paste!";
+        String msg = shortStr(media.name, 22) + " -> open channel & double-tap";
         startForegroundSafely(msg);
-        announceStep(stepBadge, msg, 0xFF10B981, 5600L);
-        refreshMenuContents();
+        announceStep("ADDED (" + captured.size() + ")", msg, 0xFF10B981, 3200L);
+        syncLiveTransferUi();
     }
 
     private void pasteCapturedIntoChat(Tg.Chat destination) {
@@ -526,16 +522,15 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
         }
         if (!destination.canSend) {
             setPointerState(SmartPointerView.STATE_ALERT);
-            handler.postDelayed(this::restoreIdleOrCapturedState, 1200L);
-            announceStep("NO SEND PERMISSION",
-                    "You cannot post in \"" + shortStr(destination.title, 28)
-                            + "\". Open a channel or chat where you have send permission.",
-                    0xFFEF4444, 5200L);
+            handler.postDelayed(this::restoreIdleOrCapturedState, 1100L);
+            announceStep("NO POST ACCESS",
+                    "Cannot send to \"" + shortStr(destination.title, 22) + "\"",
+                    0xFFEF4444, 3400L);
             return;
         }
         if (captured.isEmpty()) {
-            announceStep("SELECT A FILE FIRST",
-                    getString(R.string.smart_step_ready), 0xFF38BDF8, 4200L);
+            announceStep("PICK FILE FIRST",
+                    "Double-tap any file first", 0xFF38BDF8, 2600L);
             return;
         }
 
@@ -549,6 +544,7 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
             job.chatId = item.chatId;
             job.messageId = item.messageId;
             job.fileId = item.fileId;
+            job.remoteFileId = item.remoteFileId;
             job.name = item.name;
             job.kind = item.kind;
             job.size = item.size;
@@ -566,57 +562,56 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
             job.stage = QJob.QUEUED;
             batch.add(job);
         }
-        int count = batch.size();
         captured.clear();
         Prefs.saveDestination(this, destination.id, destination.title);
         Jobs.get(this).addBatch(batch);
         QueueService.run(this);
 
-        setPointerState(SmartPointerView.STATE_TRANSFERRING);
-        String msg = "Pasting " + (count == 1 ? "file" : count + " files")
-                + " into " + shortStr(destination.title, 26)
-                + " — trying instant zero-data copy first…";
+        // White dot badge immediately resets to 0 (clean white circle, no stale queue count)
+        setPointerVisual(SmartPointerView.STATE_TRANSFERRING, 0, 2);
+        String msg = "Sending to " + shortStr(destination.title, 20);
         startForegroundSafely(msg);
-        announceStep("STEP 2 • TRANSFER STARTED", msg, 0xFF38BDF8, 5200L);
-        refreshMenuContents();
+        announceStep("SENDING", msg, 0xFF38BDF8, 3000L);
+        renderDestinationAvatars();
+        syncLiveTransferUi();
     }
 
-    // ----------------------------------------- floating step banner UI ----- //
+    // ----------------------------------------- compact floating pill toast - //
 
     private FrameLayout buildBannerView() {
         FrameLayout outer = new FrameLayout(this);
-        outer.setPadding(Ui.dp(this, 14), 0, Ui.dp(this, 14), 0);
 
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout pill = new LinearLayout(this);
+        pill.setOrientation(LinearLayout.HORIZONTAL);
+        pill.setGravity(Gravity.CENTER_VERTICAL);
         GradientDrawable bg = new GradientDrawable(
-                GradientDrawable.Orientation.TL_BR,
-                new int[]{0xF210172A, 0xF21E1B4B, 0xF20F172A});
-        bg.setCornerRadius(Ui.dp(this, 18));
+                GradientDrawable.Orientation.LEFT_RIGHT,
+                new int[]{0xEE0F172A, 0xEE1E1B4B});
+        bg.setCornerRadius(Ui.dp(this, 999));
         bg.setStroke(Ui.dp(this, 1), 0x6638BDF8);
-        card.setBackground(bg);
-        card.setPadding(Ui.dp(this, 14), Ui.dp(this, 10), Ui.dp(this, 14), Ui.dp(this, 11));
+        pill.setBackground(bg);
+        pill.setPadding(Ui.dp(this, 11), Ui.dp(this, 6), Ui.dp(this, 12), Ui.dp(this, 6));
 
         bannerBadge = new TextView(this);
-        bannerBadge.setTextSize(10.5f);
+        bannerBadge.setTextSize(10f);
         bannerBadge.setTypeface(Typeface.DEFAULT_BOLD);
-        bannerBadge.setLetterSpacing(0.08f);
         bannerBadge.setTextColor(0xFF38BDF8);
-        card.addView(bannerBadge);
+        pill.addView(bannerBadge);
 
         bannerText = new TextView(this);
-        bannerText.setTextSize(13f);
+        bannerText.setTextSize(11.5f);
         bannerText.setTextColor(Color.WHITE);
-        bannerText.setLineSpacing(0f, 1.15f);
+        bannerText.setSingleLine(true);
+        bannerText.setEllipsize(TextUtils.TruncateAt.END);
+        bannerText.setMaxWidth(Ui.dp(this, 230));
         LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        tp.topMargin = Ui.dp(this, 3);
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        tp.leftMargin = Ui.dp(this, 7);
         bannerText.setLayoutParams(tp);
-        card.addView(bannerText);
+        pill.addView(bannerText);
 
-        card.setOnClickListener(v -> hideBannerTask.run());
-        outer.addView(card, new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        outer.addView(pill, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         return outer;
     }
 
@@ -632,16 +627,18 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
             if (bannerRoot.getVisibility() != View.VISIBLE) {
                 bannerRoot.setAlpha(0f);
                 bannerRoot.setVisibility(View.VISIBLE);
+                bannerRoot.animate().alpha(1f).setDuration(140L).start();
+            } else {
+                bannerRoot.setAlpha(1f);
             }
-            bannerRoot.animate().alpha(1f).setDuration(180L).start();
             handler.postDelayed(hideBannerTask, durationMs);
         });
     }
 
-    // -------------------------------------- colorful interactive menu ------ //
+    // ---------------------- compact ~1/4-screen floating mini popup -------- //
 
     public void toggleMenuPanel() {
-        if (menuScrim != null) {
+        if (menuPopup != null) {
             closeMenuPanel();
         } else {
             showMenuPanel();
@@ -649,217 +646,284 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
     }
 
     public void showMenuPanel() {
-        if (wm == null || menuScrim != null) {
-            refreshMenuContents();
+        if (wm == null) {
+            return;
+        }
+        if (menuPopup != null) {
+            renderDestinationAvatars();
+            syncLiveTransferUi();
             return;
         }
         refreshWritableDestinations();
-        menuScrim = new FrameLayout(this);
-        menuScrim.setBackgroundColor(0x99050811);
-        menuScrim.setPadding(Ui.dp(this, 16), Ui.dp(this, 44),
-                Ui.dp(this, 16), Ui.dp(this, 32));
-        menuScrim.setOnClickListener(v -> closeMenuPanel());
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+        int popupWidth = Math.min((int) (dm.widthPixels * 0.50f), Ui.dp(this, 198));
+        popupWidth = Math.max(popupWidth, Ui.dp(this, 176));
 
-        ScrollView scroll = new ScrollView(this);
-        scroll.setVerticalScrollBarEnabled(false);
-        FrameLayout.LayoutParams scrollLp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                Gravity.CENTER);
+        menuPopup = new FrameLayout(this) {
+            @Override
+            public boolean onTouchEvent(MotionEvent event) {
+                if (event != null && event.getActionMasked() == MotionEvent.ACTION_OUTSIDE) {
+                    closeMenuPanel();
+                    return true;
+                }
+                return super.onTouchEvent(event);
+            }
+        };
 
-        LinearLayout panel = new LinearLayout(this);
-        panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setClickable(true);
-        GradientDrawable panelBg = new GradientDrawable(
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        GradientDrawable cardBg = new GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
-                new int[]{0xFA111827, 0xFA0F172A});
-        panelBg.setCornerRadius(Ui.dp(this, 24));
-        panelBg.setStroke(Ui.dp(this, 1), 0x55818CF8);
-        panel.setBackground(panelBg);
-        panel.setPadding(Ui.dp(this, 16), Ui.dp(this, 16), Ui.dp(this, 16), Ui.dp(this, 16));
+                new int[]{0xF7111827, 0xF70F172A});
+        cardBg.setCornerRadius(Ui.dp(this, 16));
+        cardBg.setStroke(Ui.dp(this, 1), 0x66818CF8);
+        card.setBackground(cardBg);
+        card.setPadding(Ui.dp(this, 9), Ui.dp(this, 8), Ui.dp(this, 9), Ui.dp(this, 9));
 
-        // Colorful Aurora Hero Header inside Menu
-        menuAurora = new AuroraDrawable(getResources().getDisplayMetrics().density);
-        LinearLayout hero = new LinearLayout(this);
-        hero.setOrientation(LinearLayout.VERTICAL);
-        hero.setBackground(menuAurora);
-        hero.setPadding(Ui.dp(this, 16), Ui.dp(this, 14), Ui.dp(this, 14), Ui.dp(this, 14));
-
-        LinearLayout topRow = new LinearLayout(this);
-        topRow.setOrientation(LinearLayout.HORIZONTAL);
-        topRow.setGravity(Gravity.CENTER_VERTICAL);
+        // 1. Compact colorful gradient header with [?] and [×] close button
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        GradientDrawable headerBg = new GradientDrawable(
+                GradientDrawable.Orientation.LEFT_RIGHT,
+                new int[]{0xFF4F46E5, 0xFF0284C7, 0xFF0D9488});
+        headerBg.setCornerRadius(Ui.dp(this, 11));
+        header.setBackground(headerBg);
+        header.setPadding(Ui.dp(this, 9), Ui.dp(this, 6), Ui.dp(this, 6), Ui.dp(this, 6));
 
         TextView title = new TextView(this);
-        title.setText(R.string.smart_setup_title);
+        title.setText("Vmore Smart");
         title.setTextColor(Color.WHITE);
-        title.setTextSize(19f);
+        title.setTextSize(12f);
         title.setTypeface(Typeface.DEFAULT_BOLD);
-        topRow.addView(title, new LinearLayout.LayoutParams(
+        title.setSingleLine(true);
+        header.addView(title, new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        Button closeBtn = pillButton(getString(R.string.common_close), 0x33FFFFFF, Color.WHITE);
+        Button helpBtn = miniChip("?", 0x36FFFFFF, Color.WHITE);
+        helpBtn.setOnClickListener(v -> {
+            guideExpanded = !guideExpanded;
+            if (menuGuideText != null) {
+                menuGuideText.setVisibility(guideExpanded ? View.VISIBLE : View.GONE);
+            }
+        });
+        header.addView(helpBtn);
+
+        View hGap = new View(this);
+        header.addView(hGap, new LinearLayout.LayoutParams(Ui.dp(this, 4), 1));
+
+        Button closeBtn = miniChip("×", 0x44000000, Color.WHITE);
+        closeBtn.setContentDescription(getString(R.string.common_close));
         closeBtn.setOnClickListener(v -> closeMenuPanel());
-        topRow.addView(closeBtn);
-        hero.addView(topRow);
+        header.addView(closeBtn);
+        card.addView(header);
+
+        // Collapsible short guide (hidden by default so popup stays compact 1/4 size)
+        menuGuideText = new TextView(this);
+        menuGuideText.setText("1. Drag white dot on file & double-tap\n2. Open channel & double-tap to send");
+        menuGuideText.setTextColor(0xFFBAE6FD);
+        menuGuideText.setTextSize(10.5f);
+        menuGuideText.setLineSpacing(0f, 1.12f);
+        menuGuideText.setPadding(Ui.dp(this, 4), Ui.dp(this, 6), Ui.dp(this, 4), Ui.dp(this, 2));
+        menuGuideText.setVisibility(guideExpanded ? View.VISIBLE : View.GONE);
+        card.addView(menuGuideText);
+
+        // Accessibility permission row (only visible when reader permission is missing)
+        menuPermBox = new LinearLayout(this);
+        menuPermBox.setOrientation(LinearLayout.VERTICAL);
+        menuPermBox.setPadding(0, Ui.dp(this, 6), 0, 0);
+        Button enableBtn = miniActionButton("Allow Screen Reader", 0xFFF59E0B, 0xFF0F172A);
+        enableBtn.setOnClickListener(v -> {
+            closeMenuPanel();
+            Intent s = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
+            s.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(s);
+        });
+        menuPermBox.addView(enableBtn, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(this, 28)));
+        menuPermBox.setVisibility(SmartAccessibilityService.isEnabled(this)
+                ? View.GONE : View.VISIBLE);
+        card.addView(menuPermBox);
+
+        // 2. Status row + Clear chip when files are in dot
+        LinearLayout statusRow = new LinearLayout(this);
+        statusRow.setOrientation(LinearLayout.HORIZONTAL);
+        statusRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams srlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        srlp.topMargin = Ui.dp(this, 6);
+        statusRow.setLayoutParams(srlp);
 
         menuStepText = new TextView(this);
-        menuStepText.setTextColor(0xFFE0E7FF);
-        menuStepText.setTextSize(13f);
-        menuStepText.setLineSpacing(0f, 1.15f);
-        LinearLayout.LayoutParams stLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        stLp.topMargin = Ui.dp(this, 8);
-        menuStepText.setLayoutParams(stLp);
-        hero.addView(menuStepText);
+        menuStepText.setTextColor(0xFFE2E8F0);
+        menuStepText.setTextSize(10.5f);
+        menuStepText.setSingleLine(true);
+        menuStepText.setEllipsize(TextUtils.TruncateAt.END);
+        statusRow.addView(menuStepText, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        LinearLayout heroActions = new LinearLayout(this);
-        heroActions.setOrientation(LinearLayout.HORIZONTAL);
-        LinearLayout.LayoutParams haLp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        haLp.topMargin = Ui.dp(this, 12);
-        heroActions.setLayoutParams(haLp);
-
-        Button howBtn = pillButton("Step-by-step guide", 0x3838BDF8, 0xFFBAE6FD);
-        howBtn.setOnClickListener(v -> {
-            guideExpanded = !guideExpanded;
-            menuGuideBox.setVisibility(guideExpanded ? View.VISIBLE : View.GONE);
+        menuClearBtn = miniChip("Clear", 0xFF334155, Color.WHITE);
+        menuClearBtn.setVisibility(View.GONE);
+        menuClearBtn.setOnClickListener(v -> {
+            captured.clear();
+            restoreIdleOrCapturedState();
+            syncLiveTransferUi();
         });
-        heroActions.addView(howBtn);
+        statusRow.addView(menuClearBtn);
+        card.addView(statusRow);
 
-        View spacer = new View(this);
-        heroActions.addView(spacer, new LinearLayout.LayoutParams(Ui.dp(this, 8), 1));
-
-        togglePointerBtn = pillButton(pointerVisible ? "Hide circle" : "Show circle",
-                0x38818CF8, 0xFFE0E7FF);
-        togglePointerBtn.setOnClickListener(v -> togglePointerVisibility());
-        heroActions.addView(togglePointerBtn);
-
-        hero.addView(heroActions);
-        panel.addView(hero);
-        menuAurora.start();
-
-        // Expandable step-by-step walkthrough
-        menuGuideBox = new LinearLayout(this);
-        menuGuideBox.setOrientation(LinearLayout.VERTICAL);
-        menuGuideBox.setVisibility(guideExpanded ? View.VISIBLE : View.GONE);
-        GradientDrawable guideBg = roundedCard(0xFF172033, 0x4438BDF8, 16);
-        menuGuideBox.setBackground(guideBg);
-        menuGuideBox.setPadding(Ui.dp(this, 14), Ui.dp(this, 12),
-                Ui.dp(this, 14), Ui.dp(this, 12));
-        LinearLayout.LayoutParams gbLp = new LinearLayout.LayoutParams(
+        // 3. Pre-allocated in-place live progress + Cancel card (NEVER recreated on tick)
+        menuLiveCard = new LinearLayout(this);
+        menuLiveCard.setOrientation(LinearLayout.VERTICAL);
+        menuLiveCard.setBackground(roundedCard(0xFF172554, 0x7738BDF8, 10));
+        menuLiveCard.setPadding(Ui.dp(this, 8), Ui.dp(this, 6), Ui.dp(this, 8), Ui.dp(this, 6));
+        LinearLayout.LayoutParams lclp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        gbLp.topMargin = Ui.dp(this, 12);
-        menuGuideBox.setLayoutParams(gbLp);
-        TextView guideText = new TextView(this);
-        guideText.setText(R.string.smart_guide_steps);
-        guideText.setTextColor(0xFFCBD5E1);
-        guideText.setTextSize(12.5f);
-        guideText.setLineSpacing(0f, 1.18f);
-        menuGuideBox.addView(guideText);
-        panel.addView(menuGuideBox);
+        lclp.topMargin = Ui.dp(this, 6);
+        menuLiveCard.setLayoutParams(lclp);
 
-        // Accessibility permission prompt right inside menu if not yet granted
-        if (!SmartAccessibilityService.isEnabled(this)) {
-            LinearLayout permCard = new LinearLayout(this);
-            permCard.setOrientation(LinearLayout.VERTICAL);
-            permCard.setBackground(roundedCard(0xFF2B1F12, 0x88F59E0B, 16));
-            permCard.setPadding(Ui.dp(this, 14), Ui.dp(this, 12),
-                    Ui.dp(this, 14), Ui.dp(this, 12));
-            LinearLayout.LayoutParams pLp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            pLp.topMargin = Ui.dp(this, 12);
-            permCard.setLayoutParams(pLp);
+        menuLiveLabel = new TextView(this);
+        menuLiveLabel.setTextColor(Color.WHITE);
+        menuLiveLabel.setTextSize(10.5f);
+        menuLiveLabel.setTypeface(Typeface.DEFAULT_BOLD);
+        menuLiveLabel.setSingleLine(true);
+        menuLiveLabel.setEllipsize(TextUtils.TruncateAt.END);
+        menuLiveCard.addView(menuLiveLabel);
 
-            TextView permLabel = new TextView(this);
-            permLabel.setText(R.string.smart_perm_access_hint);
-            permLabel.setTextColor(0xFFFDE68A);
-            permLabel.setTextSize(12.5f);
-            permCard.addView(permLabel);
+        menuLiveBar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        menuLiveBar.setMax(100);
+        LinearLayout.LayoutParams barLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(this, 5));
+        barLp.topMargin = Ui.dp(this, 5);
+        barLp.bottomMargin = Ui.dp(this, 6);
+        menuLiveBar.setLayoutParams(barLp);
+        menuLiveCard.addView(menuLiveBar);
 
-            Button enableBtn = pillButton(getString(R.string.smart_perm_grant),
-                    0xFFF59E0B, 0xFF0F172A);
-            LinearLayout.LayoutParams ebLp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            ebLp.topMargin = Ui.dp(this, 8);
-            enableBtn.setLayoutParams(ebLp);
-            enableBtn.setOnClickListener(v -> {
-                closeMenuPanel();
-                Intent s = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
-                s.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                startActivity(s);
-            });
-            permCard.addView(enableBtn);
-            panel.addView(permCard);
-        }
+        menuCancelBtn = miniActionButton("Cancel & Delete", 0xFFDC2626, Color.WHITE);
+        menuCancelBtn.setOnClickListener(v -> cancelCurrentTransfer());
+        menuLiveCard.addView(menuCancelBtn, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(this, 26)));
+        menuLiveCard.setVisibility(View.GONE);
+        card.addView(menuLiveCard);
 
-        // Dynamic sections
-        menuLiveTransferBox = new LinearLayout(this);
-        menuLiveTransferBox.setOrientation(LinearLayout.VERTICAL);
-        panel.addView(menuLiveTransferBox);
+        // 4. Compact horizontal channel avatar selector
+        menuDestActiveLabel = new TextView(this);
+        menuDestActiveLabel.setTextColor(0xFF93C5FD);
+        menuDestActiveLabel.setTextSize(10f);
+        menuDestActiveLabel.setTypeface(Typeface.DEFAULT_BOLD);
+        menuDestActiveLabel.setSingleLine(true);
+        menuDestActiveLabel.setEllipsize(TextUtils.TruncateAt.END);
+        menuDestActiveLabel.setPadding(0, Ui.dp(this, 7), 0, Ui.dp(this, 4));
+        card.addView(menuDestActiveLabel);
 
-        menuCapturedList = new LinearLayout(this);
-        menuCapturedList.setOrientation(LinearLayout.VERTICAL);
-        panel.addView(menuCapturedList);
+        HorizontalScrollView hScroll = new HorizontalScrollView(this);
+        hScroll.setHorizontalScrollBarEnabled(false);
+        menuAvatarStrip = new LinearLayout(this);
+        menuAvatarStrip.setOrientation(LinearLayout.HORIZONTAL);
+        menuAvatarStrip.setGravity(Gravity.CENTER_VERTICAL);
+        hScroll.addView(menuAvatarStrip);
+        card.addView(hScroll, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        menuDestList = new LinearLayout(this);
-        menuDestList.setOrientation(LinearLayout.VERTICAL);
-        panel.addView(menuDestList);
-
-        // Bottom control bar: Open Vmore + Turn Off Smart Feature
+        // 5. Compact 2-button footer: Hide/Show Dot + Off
         LinearLayout bottomRow = new LinearLayout(this);
         bottomRow.setOrientation(LinearLayout.HORIZONTAL);
         LinearLayout.LayoutParams brLp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        brLp.topMargin = Ui.dp(this, 14);
+        brLp.topMargin = Ui.dp(this, 8);
         bottomRow.setLayoutParams(brLp);
 
-        Button openAppBtn = pillButton("Open Vmore", 0xFF1E293B, 0xFFE2E8F0);
-        openAppBtn.setOnClickListener(v -> {
-            closeMenuPanel();
-            Intent open = new Intent(this, MainActivity.class);
-            open.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-            startActivity(open);
-        });
-        bottomRow.addView(openAppBtn, new LinearLayout.LayoutParams(
-                0, Ui.dp(this, 42), 1f));
+        togglePointerBtn = miniActionButton(pointerVisible ? "Hide Dot" : "Show Dot",
+                0xFF1E293B, 0xFFE2E8F0);
+        togglePointerBtn.setOnClickListener(v -> togglePointerVisibility());
+        bottomRow.addView(togglePointerBtn, new LinearLayout.LayoutParams(
+                0, Ui.dp(this, 28), 1f));
 
-        View gap = new View(this);
-        bottomRow.addView(gap, new LinearLayout.LayoutParams(Ui.dp(this, 10), 1));
+        View bGap = new View(this);
+        bottomRow.addView(bGap, new LinearLayout.LayoutParams(Ui.dp(this, 6), 1));
 
-        Button turnOffBtn = pillButton(getString(R.string.smart_stop), 0xFFDC2626, Color.WHITE);
-        turnOffBtn.setOnClickListener(v -> shutdownCleanly());
-        bottomRow.addView(turnOffBtn, new LinearLayout.LayoutParams(
-                0, Ui.dp(this, 42), 1f));
+        Button offBtn = miniActionButton("Off", 0xFFDC2626, Color.WHITE);
+        offBtn.setOnClickListener(v -> shutdownCleanly());
+        bottomRow.addView(offBtn, new LinearLayout.LayoutParams(
+                Ui.dp(this, 56), Ui.dp(this, 28)));
 
-        panel.addView(bottomRow);
-        scroll.addView(panel);
-        menuScrim.addView(scroll, scrollLp);
+        card.addView(bottomRow);
+        menuPopup.addView(card, new FrameLayout.LayoutParams(
+                popupWidth, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        WindowManager.LayoutParams mp = new WindowManager.LayoutParams(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.MATCH_PARENT,
+        menuParams = new WindowManager.LayoutParams(
+                popupWidth,
+                WindowManager.LayoutParams.WRAP_CONTENT,
                 overlayWindowType(),
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH
+                        | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
                 PixelFormat.TRANSLUCENT);
-        mp.gravity = Gravity.CENTER;
-        safeAddView(menuScrim, mp);
-        refreshMenuContents();
+        menuParams.gravity = Gravity.TOP | Gravity.START;
+        computeMenuPosition(menuParams, popupWidth);
+
+        lastStepRendered = "";
+        lastLiveLabelRendered = "";
+        safeAddView(menuPopup, menuParams);
+        renderDestinationAvatars();
+        syncLiveTransferUi();
+    }
+
+    private void computeMenuPosition(WindowManager.LayoutParams lp, int popupWidth) {
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+        int orbSize = Ui.dp(this, 42);
+        int margin = Ui.dp(this, 8);
+        int ox = orbParams != null ? orbParams.x : margin;
+        int oy = orbParams != null ? orbParams.y : (int) (dm.heightPixels * 0.28f);
+        boolean onLeftHalf = ox + orbSize / 2 < dm.widthPixels / 2;
+        int targetX = onLeftHalf
+                ? ox + orbSize + Ui.dp(this, 6)
+                : ox - popupWidth - Ui.dp(this, 6);
+        lp.x = clamp(targetX, margin, dm.widthPixels - popupWidth - margin);
+        lp.y = clamp(oy - Ui.dp(this, 8), Ui.dp(this, 36),
+                Math.max(Ui.dp(this, 36), dm.heightPixels - Ui.dp(this, 250)));
+    }
+
+    private void repositionMenuNearOrb() {
+        if (menuPopup != null && menuParams != null) {
+            computeMenuPosition(menuParams, menuParams.width);
+            safeUpdateView(menuPopup, menuParams);
+        }
     }
 
     public void closeMenuPanel() {
-        if (menuAurora != null) {
-            menuAurora.stop();
-            menuAurora = null;
+        if (menuPopup != null) {
+            safeRemoveView(menuPopup);
+            menuPopup = null;
         }
-        if (menuScrim != null) {
-            safeRemoveView(menuScrim);
-            menuScrim = null;
-        }
+        menuParams = null;
         menuStepText = null;
-        menuGuideBox = null;
-        menuCapturedList = null;
-        menuLiveTransferBox = null;
-        menuDestList = null;
+        menuGuideText = null;
+        menuPermBox = null;
+        menuLiveCard = null;
+        menuLiveLabel = null;
+        menuLiveBar = null;
+        menuCancelBtn = null;
+        menuClearBtn = null;
+        menuDestActiveLabel = null;
+        menuAvatarStrip = null;
         togglePointerBtn = null;
+    }
+
+    private void cancelCurrentTransfer() {
+        String activeId = QueueService.Live.JOB_ID;
+        if (activeId != null && !activeId.isEmpty()) {
+            QueueService.removeJob(this, activeId);
+        } else {
+            QJob active = Jobs.get(this).active();
+            if (active != null) {
+                QueueService.removeJob(this, active.id);
+            } else {
+                QueueService.stopJob(this, null);
+            }
+        }
+        announceStep("CANCELLED", "Stopped and cleared cache file", 0xFFEF4444, 2600L);
+        syncLiveTransferUi();
     }
 
     private void togglePointerVisibility() {
@@ -868,7 +932,7 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
             whiteCircle.setVisibility(pointerVisible ? View.VISIBLE : View.GONE);
         }
         if (togglePointerBtn != null) {
-            togglePointerBtn.setText(pointerVisible ? "Hide circle" : "Show circle");
+            togglePointerBtn.setText(pointerVisible ? "Hide Dot" : "Show Dot");
         }
     }
 
@@ -876,14 +940,14 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
         if (!Tg.get(this).isReady()) {
             return;
         }
-        Tg.get(this).loadWritableChats(40, new Tg.Cb<List<Tg.Chat>>() {
+        Tg.get(this).loadWritableChats(30, new Tg.Cb<List<Tg.Chat>>() {
             @Override
             public void ok(List<Tg.Chat> value) {
                 writableChats.clear();
                 if (value != null) {
                     writableChats.addAll(value);
                 }
-                refreshMenuContents();
+                renderDestinationAvatars();
             }
 
             @Override
@@ -892,142 +956,75 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
         });
     }
 
-    private void refreshMenuContents() {
-        if (menuScrim == null) {
+    private void renderDestinationAvatars() {
+        if (menuAvatarStrip == null || menuDestActiveLabel == null) {
             return;
         }
-        if (menuStepText != null) {
-            menuStepText.setText(currentStepSummary());
-        }
+        long currentDestId = Prefs.destChatId(this);
+        String destTitle = Prefs.destTitle(this);
+        menuDestActiveLabel.setText(destTitle == null || destTitle.isEmpty()
+                ? "Channel: tap avatar below"
+                : "To: " + shortStr(destTitle, 22));
 
-        // Captured files basket
-        menuCapturedList.removeAllViews();
-        menuCapturedList.addView(sectionHeading(
-                captured.isEmpty() ? "CAPTURED FILES (NONE YET)"
-                        : "CAPTURED FILES (" + captured.size() + " READY)"));
-        if (captured.isEmpty()) {
-            TextView empty = smallNote(
-                    "Drag the white circle onto any Telegram video, photo, audio or file and double-tap it.");
-            menuCapturedList.addView(empty);
-        } else {
-            for (Tg.Media item : captured) {
-                TextView row = new TextView(this);
-                String sz = item.size > 0 ? " • " + Format.size(item.size) : "";
-                row.setText(item.name + sz + " (" + item.chatTitle + ")");
-                row.setTextColor(0xFFECFDF5);
-                row.setTextSize(13f);
-                row.setBackground(roundedCard(0xFF064E3B, 0x6610B981, 12));
-                row.setPadding(Ui.dp(this, 12), Ui.dp(this, 9), Ui.dp(this, 12), Ui.dp(this, 9));
-                LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                lp.bottomMargin = Ui.dp(this, 6);
-                row.setLayoutParams(lp);
-                menuCapturedList.addView(row);
-            }
-            Button clearBasket = pillButton("Clear captured files", 0xFF334155, Color.WHITE);
-            clearBasket.setOnClickListener(v -> {
-                captured.clear();
-                restoreIdleOrCapturedState();
-                refreshMenuContents();
+        menuAvatarStrip.removeAllViews();
+        int max = Math.min(10, writableChats.size());
+        for (int i = 0; i < max; i++) {
+            final Tg.Chat chat = writableChats.get(i);
+            boolean selected = chat.id == currentDestId;
+            FrameLayout holder = new FrameLayout(this);
+            int ringPx = Ui.dp(this, 34);
+            int imgPx = Ui.dp(this, 28);
+            GradientDrawable ring = new GradientDrawable();
+            ring.setShape(GradientDrawable.OVAL);
+            ring.setColor(selected ? 0x3310B981 : 0x1AFFFFFF);
+            ring.setStroke(Ui.dp(this, selected ? 2 : 1),
+                    selected ? 0xFF10B981 : 0x3394A3B8);
+            holder.setBackground(ring);
+
+            ImageView avatar = new ImageView(this);
+            FrameLayout.LayoutParams alp = new FrameLayout.LayoutParams(
+                    imgPx, imgPx, Gravity.CENTER);
+            holder.addView(avatar, alp);
+            Ui.paintChatAvatar(this, avatar, chat, 28);
+
+            holder.setContentDescription(chat.title);
+            holder.setOnClickListener(v -> {
+                if (!captured.isEmpty()) {
+                    closeMenuPanel();
+                    pasteCapturedIntoChat(chat);
+                } else {
+                    Prefs.saveDestination(SmartOverlayService.this, chat.id, chat.title);
+                    announceStep("CHANNEL SET", shortStr(chat.title, 22), 0xFF10B981, 2200L);
+                    renderDestinationAvatars();
+                }
             });
-            menuCapturedList.addView(clearBasket);
+
+            LinearLayout.LayoutParams hlp = new LinearLayout.LayoutParams(ringPx, ringPx);
+            hlp.rightMargin = Ui.dp(this, 6);
+            menuAvatarStrip.addView(holder, hlp);
         }
-
-        // Writable destinations with real circular profile photos
-        menuDestList.removeAllViews();
-        menuDestList.addView(sectionHeading(
-                captured.isEmpty()
-                        ? "WRITABLE DESTINATION CHATS (PROFILE PHOTOS)"
-                        : "TAP A CHANNEL OR CHAT BELOW TO PASTE NOW"));
-        if (writableChats.isEmpty()) {
-            menuDestList.addView(smallNote(
-                    "Sign in and open chats where you have permission to post messages."));
-        } else {
-            int max = Math.min(8, writableChats.size());
-            for (int i = 0; i < max; i++) {
-                final Tg.Chat chat = writableChats.get(i);
-                LinearLayout row = buildOverlayChatRow(chat);
-                row.setOnClickListener(v -> {
-                    if (!captured.isEmpty()) {
-                        closeMenuPanel();
-                        pasteCapturedIntoChat(chat);
-                    } else {
-                        Prefs.saveDestination(SmartOverlayService.this, chat.id, chat.title);
-                        announceStep("DEFAULT DESTINATION SET",
-                                "Default destination set to " + chat.title, 0xFF10B981, 3000L);
-                        refreshMenuContents();
-                    }
-                });
-                menuDestList.addView(row);
-            }
-        }
-        syncLiveTransferUi();
-    }
-
-    private LinearLayout buildOverlayChatRow(Tg.Chat chat) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        boolean isDefault = chat.id == Prefs.destChatId(this);
-        row.setBackground(roundedCard(isDefault ? 0xFF1E293B : 0xFF151E2E,
-                isDefault ? 0x8838BDF8 : 0x3394A3B8, 14));
-        row.setPadding(Ui.dp(this, 10), Ui.dp(this, 8), Ui.dp(this, 12), Ui.dp(this, 8));
-        LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        rlp.bottomMargin = Ui.dp(this, 6);
-        row.setLayoutParams(rlp);
-
-        ImageView avatar = new ImageView(this);
-        int px = Ui.dp(this, 36);
-        row.addView(avatar, new LinearLayout.LayoutParams(px, px));
-        Ui.paintChatAvatar(this, avatar, chat, 36);
-
-        LinearLayout textCol = new LinearLayout(this);
-        textCol.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        tlp.leftMargin = Ui.dp(this, 10);
-        textCol.setLayoutParams(tlp);
-
-        TextView name = new TextView(this);
-        name.setText(chat.title);
-        name.setTextColor(Color.WHITE);
-        name.setTextSize(13.5f);
-        name.setTypeface(Typeface.DEFAULT_BOLD);
-        name.setSingleLine(true);
-        name.setEllipsize(TextUtils.TruncateAt.END);
-        textCol.addView(name);
-
-        TextView sub = new TextView(this);
-        sub.setText(chat.type + (isDefault ? " • active destination" : " • can send"));
-        sub.setTextColor(0xFF94A3B8);
-        sub.setTextSize(11.5f);
-        textCol.addView(sub);
-
-        row.addView(textCol);
-        return row;
     }
 
     private void syncLiveTransferUi() {
-        QJob active = Jobs.get(this).active();
-        boolean running = QueueService.Live.RUNNING.get() || active != null;
-        if (running) {
-            long done = QueueService.Live.DONE.get();
-            long total = QueueService.Live.TOTAL.get();
-            int pct = Format.percent(done, total);
-            setPointerVisual(SmartPointerView.STATE_TRANSFERRING,
-                    Math.max(captured.size(), Jobs.get(this).size()), pct);
-            String stage = QueueService.Live.STAGE;
-            if (!stage.isEmpty() && !stage.equals(lastAnnouncedStage)) {
+        boolean running = QueueService.Live.RUNNING.get();
+        String stage = QueueService.Live.STAGE == null ? "" : QueueService.Live.STAGE;
+        long done = QueueService.Live.DONE.get();
+        long total = QueueService.Live.TOTAL.get();
+        int rawPct = Format.percent(done, total);
+        int pct = QJob.UPLOADING.equals(stage) ? Math.min(99, rawPct) : rawPct;
+
+        if (running && !stage.isEmpty()) {
+            // Badge shows strictly captured file count only (0 when empty).
+            setPointerVisual(SmartPointerView.STATE_TRANSFERRING, captured.size(), pct);
+            if (!stage.equals(lastAnnouncedStage)) {
                 lastAnnouncedStage = stage;
-                announceStep("LIVE TRANSFER • " + Ui.stageLabel(stage).toUpperCase(),
-                        shortStr(QueueService.Live.NAME, 36), 0xFF38BDF8, 2800L);
+                announceStep(Ui.stageLabel(stage).toUpperCase(),
+                        shortStr(QueueService.Live.NAME, 24), 0xFF38BDF8, 2200L);
             }
         } else {
             if (!lastAnnouncedStage.isEmpty()) {
                 lastAnnouncedStage = "";
-                announceStep("TRANSFER COMPLETE",
-                        getString(R.string.smart_step_done), 0xFF10B981, 4000L);
+                announceStep("DONE", "Sent successfully", 0xFF10B981, 2600L);
                 startForegroundSafely(currentStepSummary());
             }
             if (!resolvingTap) {
@@ -1035,83 +1032,58 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
             }
         }
 
-        if (menuLiveTransferBox == null) {
+        if (menuPopup == null) {
             return;
         }
-        menuLiveTransferBox.removeAllViews();
-        List<QJob> allJobs = Jobs.get(this).all();
-        if (allJobs.isEmpty() && !running) {
-            return;
+        if (menuPermBox != null) {
+            int want = SmartAccessibilityService.isEnabled(this) ? View.GONE : View.VISIBLE;
+            if (menuPermBox.getVisibility() != want) {
+                menuPermBox.setVisibility(want);
+            }
         }
-        menuLiveTransferBox.addView(sectionHeading("ACTIVE TRANSFERS & CANCEL CONTROLS"));
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setBackground(roundedCard(0xFF172554, 0x8838BDF8, 16));
-        card.setPadding(Ui.dp(this, 12), Ui.dp(this, 10), Ui.dp(this, 12), Ui.dp(this, 10));
-
-        final QJob primary = active != null ? active
-                : (!allJobs.isEmpty() ? allJobs.get(0) : null);
-        String jobTitle = !QueueService.Live.NAME.isEmpty() ? QueueService.Live.NAME
-                : (primary != null ? primary.title() : "Transfer queue");
-        String stageText = Ui.stageLabel(QueueService.Live.STAGE.isEmpty() && primary != null
-                ? primary.stage : QueueService.Live.STAGE);
-        long done = QueueService.Live.DONE.get();
-        long total = QueueService.Live.TOTAL.get();
-        int pct = Format.percent(done, total);
-
-        TextView label = new TextView(this);
-        label.setText(jobTitle + " • " + stageText
-                + (total > 0 ? " (" + pct + "%)" : ""));
-        label.setTextColor(Color.WHITE);
-        label.setTextSize(13f);
-        label.setTypeface(Typeface.DEFAULT_BOLD);
-        card.addView(label);
-
-        ProgressBar bar = new ProgressBar(this, null,
-                android.R.attr.progressBarStyleHorizontal);
-        bar.setMax(100);
-        bar.setIndeterminate(total <= 0);
-        bar.setProgress(pct);
-        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(this, 8));
-        blp.topMargin = Ui.dp(this, 8);
-        blp.bottomMargin = Ui.dp(this, 10);
-        bar.setLayoutParams(blp);
-        card.addView(bar);
-
-        LinearLayout controls = new LinearLayout(this);
-        controls.setOrientation(LinearLayout.HORIZONTAL);
-        boolean paused = Jobs.get(this).pausedAll();
-        Button pauseBtn = pillButton(paused ? "Resume" : "Pause", 0xFF2563EB, Color.WHITE);
-        pauseBtn.setOnClickListener(v -> {
-            if (Jobs.get(this).pausedAll()) {
-                QueueService.resumeAll(this);
-            } else {
-                QueueService.pauseAll(this);
+        if (menuClearBtn != null) {
+            int wantClear = captured.isEmpty() ? View.GONE : View.VISIBLE;
+            if (menuClearBtn.getVisibility() != wantClear) {
+                menuClearBtn.setVisibility(wantClear);
             }
-            syncLiveTransferUi();
-        });
-        controls.addView(pauseBtn);
-
-        View cgap = new View(this);
-        controls.addView(cgap, new LinearLayout.LayoutParams(Ui.dp(this, 8), 1));
-
-        Button cancelCurrent = pillButton("Cancel & delete file", 0xFFDC2626, Color.WHITE);
-        cancelCurrent.setOnClickListener(v -> {
-            if (primary != null) {
-                QueueService.removeJob(this, primary.id);
-            } else {
-                QueueService.stopJob(this, null);
+        }
+        if (menuStepText != null) {
+            String step = compactStepLine();
+            if (!step.equals(lastStepRendered)) {
+                lastStepRendered = step;
+                menuStepText.setText(step);
             }
-            announceStep("TRANSFER CANCELLED",
-                    "Download stopped immediately and partial cache file deleted.",
-                    0xFFEF4444, 3600L);
-            refreshMenuContents();
-        });
-        controls.addView(cancelCurrent);
-
-        card.addView(controls);
-        menuLiveTransferBox.addView(card);
+        }
+        if (menuLiveCard != null && menuLiveLabel != null && menuLiveBar != null) {
+            if (!running || stage.isEmpty()) {
+                if (menuLiveCard.getVisibility() != View.GONE) {
+                    menuLiveCard.setVisibility(View.GONE);
+                    lastLiveLabelRendered = "";
+                }
+            } else {
+                if (menuLiveCard.getVisibility() != View.VISIBLE) {
+                    menuLiveCard.setVisibility(View.VISIBLE);
+                }
+                double speed = QueueService.Live.SPEED;
+                String speedPart = speed > 1024 ? " • " + Format.speed(speed) : "";
+                String stageText = Ui.stageLabel(stage);
+                String line = stageText
+                        + (total > 0 ? " " + pct + "%" : "")
+                        + speedPart;
+                if (!line.equals(lastLiveLabelRendered)) {
+                    lastLiveLabelRendered = line;
+                    menuLiveLabel.setText(line);
+                }
+                boolean indeterminate = total <= 0 || QJob.COPYING.equals(stage)
+                        || QJob.RESOLVING.equals(stage);
+                if (menuLiveBar.isIndeterminate() != indeterminate) {
+                    menuLiveBar.setIndeterminate(indeterminate);
+                }
+                if (!indeterminate && menuLiveBar.getProgress() != pct) {
+                    menuLiveBar.setProgress(pct);
+                }
+            }
+        }
     }
 
     @Override
@@ -1121,9 +1093,16 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
 
     // --------------------------------------------------------- small utils //
 
+    private String compactStepLine() {
+        if (!captured.isEmpty()) {
+            return captured.size() + " file in dot -> open channel";
+        }
+        return "Ready • double-tap file";
+    }
+
     private String currentStepSummary() {
         if (!captured.isEmpty()) {
-            return captured.size() + " file(s) ready — open any writable chat and double-tap to paste.";
+            return captured.size() + " file(s) ready — open channel and double-tap to send.";
         }
         return getString(R.string.smart_step_ready);
     }
@@ -1139,46 +1118,52 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
     }
 
     private void setPointerVisual(int state, int count, int pct) {
+        int dotCount = Math.max(0, count);
         if (whiteCircle != null) {
-            whiteCircle.setVisualState(state, count, pct);
+            whiteCircle.setVisualState(state, dotCount, pct);
         }
         if (menuOrb != null) {
-            menuOrb.setVisualState(state, count, pct);
+            menuOrb.setVisualState(state, dotCount, pct);
         }
     }
 
-    private TextView sectionHeading(String text) {
-        TextView view = new TextView(this);
-        view.setText(text);
-        view.setTextColor(0xFF93C5FD);
-        view.setTextSize(11f);
-        view.setTypeface(Typeface.DEFAULT_BOLD);
-        view.setLetterSpacing(0.06f);
-        view.setPadding(0, Ui.dp(this, 14), 0, Ui.dp(this, 6));
-        return view;
-    }
-
-    private TextView smallNote(String text) {
-        TextView view = new TextView(this);
-        view.setText(text);
-        view.setTextColor(0xFF94A3B8);
-        view.setTextSize(12.5f);
-        return view;
-    }
-
-    private Button pillButton(String label, int bgColor, int fgColor) {
+    private Button miniChip(String label, int bgColor, int fgColor) {
         Button btn = new Button(this);
         btn.setText(label);
         btn.setAllCaps(false);
-        btn.setTextSize(12.5f);
+        btn.setTextSize(11f);
         btn.setTypeface(Typeface.DEFAULT_BOLD);
         btn.setTextColor(fgColor);
+        btn.setMinWidth(0);
+        btn.setMinimumWidth(0);
+        btn.setMinHeight(0);
+        btn.setMinimumHeight(0);
         btn.setStateListAnimator(null);
         GradientDrawable bg = new GradientDrawable();
         bg.setColor(bgColor);
         bg.setCornerRadius(Ui.dp(this, 999));
         btn.setBackground(bg);
-        btn.setPadding(Ui.dp(this, 14), Ui.dp(this, 6), Ui.dp(this, 14), Ui.dp(this, 6));
+        btn.setPadding(Ui.dp(this, 8), Ui.dp(this, 3), Ui.dp(this, 8), Ui.dp(this, 3));
+        return btn;
+    }
+
+    private Button miniActionButton(String label, int bgColor, int fgColor) {
+        Button btn = new Button(this);
+        btn.setText(label);
+        btn.setAllCaps(false);
+        btn.setTextSize(10.5f);
+        btn.setTypeface(Typeface.DEFAULT_BOLD);
+        btn.setTextColor(fgColor);
+        btn.setMinWidth(0);
+        btn.setMinimumWidth(0);
+        btn.setMinHeight(0);
+        btn.setMinimumHeight(0);
+        btn.setStateListAnimator(null);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(bgColor);
+        bg.setCornerRadius(Ui.dp(this, 9));
+        btn.setBackground(bg);
+        btn.setPadding(Ui.dp(this, 6), 0, Ui.dp(this, 6), 0);
         return btn;
     }
 

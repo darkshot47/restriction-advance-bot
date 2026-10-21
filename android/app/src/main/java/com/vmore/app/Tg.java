@@ -209,6 +209,8 @@ public final class Tg {
          * pointing at the protected one.
          */
         public boolean protectedContent;
+        /** Remote file handle when Telegram exposes one, enabling instant remote send. */
+        public String remoteFileId = "";
     }
 
     private static volatile Tg instance;
@@ -230,9 +232,9 @@ public final class Tg {
     private final Context app;
     private final Handler main = new Handler(Looper.getMainLooper());
     private final Map<Integer, FileWatch> downloads = new ConcurrentHashMap<>();
-    //: Upload progress watches live apart from downloads: the two share TDLib's
-    //: file ids, and a long upload must never knock a running download out.
-    private final Map<Integer, FileWatch> uploads = new ConcurrentHashMap<>();
+    //: Upload progress watches live apart from downloads: uploads track
+    //: file.remote.uploadedSize, never file.local.downloadedSize.
+    private final Map<Integer, UploadWatch> uploads = new ConcurrentHashMap<>();
     private final Map<Long, SendWatch> sends = new ConcurrentHashMap<>();
     private final Map<Long, Chat> chatCache = new ConcurrentHashMap<>();
 
@@ -595,7 +597,7 @@ public final class Tg {
                 watch.onFile(file);
                 throttle(watch, file);
             }
-            FileWatch sending = uploads.get(file.id);
+            UploadWatch sending = uploads.get(file.id);
             if (sending != null) {
                 sending.onFile(file);
             }
@@ -609,6 +611,11 @@ public final class Tg {
             TdApi.UpdateMessageSendFailed update = (TdApi.UpdateMessageSendFailed) object;
             SendWatch watch = sends.remove(update.oldMessageId);
             if (watch != null) {
+                Client current = client;
+                if (current != null && update.message != null) {
+                    current.send(new TdApi.DeleteMessages(
+                            watch.destChatId, new long[]{update.message.id}, false), null);
+                }
                 String raw = update.error == null ? "" : update.error.message;
                 //: A chat that protects its content refuses the message only
                 //: because it points at the protected file.  Uploading the same
@@ -1873,6 +1880,8 @@ public final class Tg {
             return null;
         }
         media.fileId = file.id;
+        media.remoteFileId = file.remote != null && file.remote.id != null
+                ? file.remote.id : "";
         media.size = file.size > 0 ? file.size : file.expectedSize;
         //: A file already on the phone is usable whatever the flag says; only a
         //: file that is still on Telegram's side has to be allowed down.
@@ -2011,9 +2020,9 @@ public final class Tg {
         if (activeDownload != null) {
             activeDownload.finishError("cancelled");
         }
-        FileWatch activeUpload = uploads.remove(fileId);
+        UploadWatch activeUpload = uploads.remove(fileId);
         if (activeUpload != null) {
-            activeUpload.finishError("cancelled");
+            activeUpload.done = true;
         }
         if (watchedPath != null && !watchedPath.isEmpty()) {
             //noinspection ResultOfMethodCallIgnored
@@ -2197,16 +2206,46 @@ public final class Tg {
      * where it cannot.  TDLib then uploads the bytes as a new file, which is
      * exactly what the bot did when it downloaded and re-uploaded.
      */
-    private void sendMedia(long chatId, String path, String kind, String caption,
-                           long durationSec, int width, int height, String sendAs,
-                           String thumbPath, Progress progress, Cb<Long> callback,
-                           boolean protectedContent) {
-        Client current = client;
+    /**
+     * Ensures TDLib keeps active foreground network priority and has opened the
+     * target channel/chat in memory before sending or forwarding messages.
+     */
+    private void ensureChatReady(final Client current, final long chatId, final Runnable next) {
+        if (current == null || chatId == 0L) {
+            next.run();
+            return;
+        }
+        current.send(new TdApi.SetNetworkType(new TdApi.NetworkTypeOther()), ignored -> {});
+        current.send(new TdApi.GetChat(chatId), chatObj -> {
+            if (chatObj instanceof TdApi.Chat) {
+                remember((TdApi.Chat) chatObj);
+                current.send(new TdApi.OpenChat(chatId), opened -> next.run());
+                return;
+            }
+            current.send(new TdApi.LoadChats(new TdApi.ChatListMain(), 100), loaded ->
+                    current.send(new TdApi.GetChat(chatId), retryObj -> {
+                        if (retryObj instanceof TdApi.Chat) {
+                            remember((TdApi.Chat) retryObj);
+                        }
+                        current.send(new TdApi.OpenChat(chatId), opened -> next.run());
+                    }));
+        });
+    }
+
+    private void sendMedia(final long chatId, final String path, final String kind,
+                           final String caption, final long durationSec, final int width,
+                           final int height, final String sendAs, final String thumbPath,
+                           final Progress progress, final Cb<Long> callback,
+                           final boolean protectedContent) {
+        final Client current = client;
         if (current == null) {
             callback.fail("the Telegram engine is not running");
             return;
         }
-        final String scratch = protectedContent ? freshNameFor(path) : null;
+        //: Always stage an independent fresh file copy inside cache/upload so
+        //: TDLib uploads clean bytes instead of reusing any stale or protected
+        //: file reference from the source channel.
+        final String scratch = freshNameFor(path);
         final String uploadPath = scratch != null ? scratch : path;
         final Cb<Long> answer = new Cb<Long>() {
             @Override
@@ -2221,79 +2260,59 @@ public final class Tg {
                 callback.fail(message);
             }
         };
-        TdApi.InputMessageContent content = buildContent(uploadPath, kind, caption, durationSec,
-                width, height, sendAs, thumbPath);
+        final TdApi.InputMessageContent content = buildContent(uploadPath, kind, caption,
+                durationSec, width, height, sendAs, thumbPath);
         if (content == null) {
             drop(scratch);
             callback.fail("the file is not on the phone any more");
             return;
         }
-        current.send(new TdApi.SendMessage(chatId, null, null, sendOptions(), null, content),
-                object -> {
-                    if (object instanceof TdApi.Error) {
-                        String raw = ((TdApi.Error) object).message;
-                        //: A reference Telegram refused gets one immediate second
-                        //: go from a name the file has never had, which makes
-                        //: TDLib upload the bytes instead of reusing the refusal.
-                        if (scratch == null && Retry.forwardBlocked(raw)) {
-                            Log.engine(app, "upload refused (" + raw
-                                    + "); uploading the bytes as a new file");
-                            sendMedia(chatId, path, kind, caption, durationSec, width, height,
-                                    sendAs, thumbPath, progress, callback, true);
-                            return;
-                        }
-                        drop(scratch);
-                        callback.fail(friendly(raw));
-                        return;
-                    }
-                    TdApi.Message message = (TdApi.Message) object;
-                    TdApi.File file = mediaFileOf(message);
-                    long length = new File(uploadPath).length();
-                    if (file == null) {
-                        answer.ok(message.id);
-                        return;
-                    }
-                    //: The one thing a refused upload may still do: go up again
-                    //: as a new file.  Only a send that has not tried that yet
-                    //: carries the way to do it, so this can never loop.
-                    final Runnable freshRetry = scratch != null ? null
-                            : () -> sendMedia(chatId, path, kind, caption, durationSec,
-                                    width, height, sendAs, thumbPath, progress, callback, true);
-                    SendWatch watch = new SendWatch(chatId, message.id, file.id, length, progress,
-                            answer, freshRetry);
-                    sends.put(message.id, watch);
-                    //: Uploads have no pause switch, so the cap covers the
-                    //: download side only; the watch here is progress only.
-                    uploads.put(file.id, watch.progressWatch());
-                    //: Telegram may have finished this message already, in which
-                    //: case the update that would end the watch is long gone.
-                    TdApi.MessageSendingState sending = message.sendingState;
-                    if (sending instanceof TdApi.MessageSendingStateFailed) {
-                        TdApi.MessageSendingStateFailed failed =
-                                (TdApi.MessageSendingStateFailed) sending;
-                        sends.remove(message.id);
-                        String raw = failed.error == null ? "" : failed.error.message;
-                        if (watch.retryWithFreshName(raw)) {
-                            freshRetry.run();
-                            return;
-                        }
-                        watch.finish(0L, failed.error == null
-                                ? "Telegram refused the upload"
-                                : friendly(raw));
-                    } else if (sending == null) {
-                        sends.remove(message.id);
-                        watch.finish(message.id, null);
-                    }
-                });
+        final long length = new File(uploadPath).length();
+        if (progress != null) {
+            progress.onBytes(0L, length);
+        }
+        ensureChatReady(current, chatId, () ->
+                current.send(new TdApi.SendMessage(chatId, null, null, sendOptions(), null, content),
+                        object -> {
+                            if (object instanceof TdApi.Error) {
+                                String raw = ((TdApi.Error) object).message;
+                                drop(scratch);
+                                callback.fail(friendly(raw));
+                                return;
+                            }
+                            TdApi.Message message = (TdApi.Message) object;
+                            TdApi.File file = mediaFileOf(message);
+                            if (file == null) {
+                                answer.ok(message.id);
+                                return;
+                            }
+                            SendWatch watch = new SendWatch(chatId, message.id, file.id, length,
+                                    progress, answer, null);
+                            sends.put(message.id, watch);
+                            uploads.put(file.id, watch.uploadWatch);
+                            watch.uploadWatch.onFile(file);
+                            TdApi.MessageSendingState sending = message.sendingState;
+                            if (sending instanceof TdApi.MessageSendingStateFailed) {
+                                TdApi.MessageSendingStateFailed failed =
+                                        (TdApi.MessageSendingStateFailed) sending;
+                                sends.remove(message.id);
+                                current.send(new TdApi.DeleteMessages(
+                                        chatId, new long[]{message.id}, false), null);
+                                String raw = failed.error == null ? "" : failed.error.message;
+                                watch.finish(0L, failed.error == null
+                                        ? "Telegram refused the upload"
+                                        : friendly(raw));
+                            } else if (sending == null) {
+                                sends.remove(message.id);
+                                watch.finish(message.id, null);
+                            }
+                        }));
     }
 
     /**
-     * A second name for one file, so TDLib uploads it instead of reusing the
-     * reference it already has.
-     *
-     * A hard link costs no storage at all: the same bytes with another path,
-     * which is all that is needed, because TDLib remembers local files by path.
-     * A phone or a folder that cannot link falls back to a real copy.
+     * Stages an independent copy under cache/upload with a fresh name so TDLib
+     * always treats the bytes as a brand-new upload instead of aliasing a
+     * protected source file's inode.
      */
     private String freshNameFor(String path) {
         if (path == null || path.isEmpty()) {
@@ -2306,16 +2325,6 @@ public final class Tg {
         File dir = LocalFiles.uploadScratchDir(app);
         File alias = new File(dir, "vmore_" + System.currentTimeMillis() + "_"
                 + source.getName());
-        try {
-            //noinspection Since15
-            java.nio.file.Files.createLink(alias.toPath(), source.toPath());
-            if (alias.isFile()) {
-                return alias.getAbsolutePath();
-            }
-        } catch (Throwable cannotLink) {
-            //: Another volume, a file system without links, or a policy against
-            //: them: a copy is slower but always right.
-        }
         File copied = LocalFiles.copy(path, alias);
         return copied == null ? null : copied.getAbsolutePath();
     }
@@ -2335,18 +2344,19 @@ public final class Tg {
 
     /** Let Telegram move an existing message: no bytes cross the phone. */
     public void forward(long destChatId, long fromChatId, long messageId, Cb<Long> callback) {
-        nativeCopy(destChatId, fromChatId, messageId, null, true, callback);
+        nativeCopy(destChatId, fromChatId, messageId, null, true, null, callback);
     }
 
     /**
-     * Direct server-side native copy (`native_cpy`): copies or forwards the
-     * source message straight inside Telegram's servers without downloading or
-     * uploading media bytes on the phone, awaiting full delivery confirmation
-     * so protected-chat refusals immediately fall back to mobile data transfer.
+     * Direct server-side native copy (`native_cpy`): loads both source and
+     * destination chats in TDLib first, forwards/copies the message directly on
+     * Telegram's servers with zero mobile data used, and if ForwardMessages is
+     * refused on an unprotected message with a known remote file ID, tries an
+     * instant zero-byte remote file send before falling back to cache download.
      */
     public void nativeCopy(final long destChatId, final long fromChatId, final long messageId,
                            final String customCaption, final boolean keepForwardHeader,
-                           Cb<Long> callback) {
+                           final QJob jobHint, Cb<Long> callback) {
         final Cb<Long> cb = deliver(callback);
         final Client current = client;
         if (current == null) {
@@ -2354,84 +2364,165 @@ public final class Tg {
             return;
         }
         final boolean sendCopy = !keepForwardHeader;
-        current.send(new TdApi.ForwardMessages(destChatId, null, fromChatId,
-                new long[]{messageId}, sendOptions(), sendCopy, false), object -> {
-            if (object instanceof TdApi.Error) {
-                cb.fail(friendly(((TdApi.Error) object).message));
-                return;
-            }
-            TdApi.Messages messages = (TdApi.Messages) object;
-            TdApi.Message first = messages.messages != null && messages.messages.length > 0
-                    ? messages.messages[0] : null;
-            if (first == null) {
-                cb.fail("Telegram refused the direct copy");
-                return;
-            }
-            final long localMsgId = first.id;
-            final Cb<Long> afterConfirm = new Cb<Long>() {
-                @Override
-                public void ok(Long realId) {
-                    if (customCaption != null && !customCaption.isEmpty() && realId != 0L) {
-                        current.send(new TdApi.EditMessageCaption(
-                                destChatId, realId, null,
-                                new TdApi.FormattedText(customCaption, null), false),
-                                ignored -> cb.ok(realId));
-                    } else {
-                        cb.ok(realId);
+        ensureChatReady(current, destChatId, () ->
+                current.send(new TdApi.GetChat(fromChatId), srcChatObj -> {
+                    if (srcChatObj instanceof TdApi.Chat) {
+                        remember((TdApi.Chat) srcChatObj);
                     }
-                }
+                    current.send(new TdApi.GetMessage(fromChatId, messageId), msgObj -> {
+                        final long resolvedMsgId = msgObj instanceof TdApi.Message
+                                ? ((TdApi.Message) msgObj).id : messageId;
+                        String remoteCandidate = jobHint != null ? jobHint.remoteFileId : "";
+                        boolean isProtected = jobHint != null && jobHint.protectedContent;
+                        if (msgObj instanceof TdApi.Message) {
+                            Media refreshed = toMedia((TdApi.Message) msgObj);
+                            if (refreshed != null) {
+                                isProtected = refreshed.protectedContent;
+                                if (!refreshed.remoteFileId.isEmpty()) {
+                                    remoteCandidate = refreshed.remoteFileId;
+                                }
+                            }
+                        }
+                        final String remoteId = remoteCandidate == null ? "" : remoteCandidate;
+                        final boolean allowRemoteFallback = !isProtected && !remoteId.isEmpty()
+                                && jobHint != null && !"text".equals(jobHint.kind);
+                        final Cb<Long> onForwardFailed = new Cb<Long>() {
+                            @Override
+                            public void ok(Long value) {
+                                cb.ok(value);
+                            }
 
-                @Override
-                public void fail(String reason) {
-                    current.send(new TdApi.DeleteMessages(
-                            destChatId, new long[]{localMsgId}, false), null);
-                    cb.fail(reason);
-                }
-            };
-            TdApi.MessageSendingState sending = first.sendingState;
-            if (sending == null) {
-                afterConfirm.ok(localMsgId);
-            } else if (sending instanceof TdApi.MessageSendingStateFailed) {
-                TdApi.Error err = ((TdApi.MessageSendingStateFailed) sending).error;
-                afterConfirm.fail(err == null ? "Telegram refused the direct copy"
-                        : friendly(err.message));
-            } else {
-                SendWatch watch = new SendWatch(destChatId, localMsgId, 0, 0L, null,
-                        afterConfirm, null);
-                sends.put(localMsgId, watch);
-            }
-        });
+                            @Override
+                            public void fail(String reason) {
+                                if (allowRemoteFallback) {
+                                    sendRemoteCopy(current, destChatId, remoteId, jobHint,
+                                            customCaption, cb);
+                                } else {
+                                    cb.fail(reason);
+                                }
+                            }
+                        };
+                        current.send(new TdApi.ForwardMessages(destChatId, null, fromChatId,
+                                new long[]{resolvedMsgId}, sendOptions(), sendCopy, false), object -> {
+                            if (object instanceof TdApi.Error) {
+                                onForwardFailed.fail(friendly(((TdApi.Error) object).message));
+                                return;
+                            }
+                            TdApi.Messages messages = (TdApi.Messages) object;
+                            TdApi.Message first = messages.messages != null
+                                    && messages.messages.length > 0 ? messages.messages[0] : null;
+                            if (first == null) {
+                                onForwardFailed.fail("Telegram refused the direct copy");
+                                return;
+                            }
+                            final long localMsgId = first.id;
+                            final Cb<Long> afterConfirm = new Cb<Long>() {
+                                @Override
+                                public void ok(Long realId) {
+                                    if (customCaption != null && !customCaption.isEmpty()
+                                            && realId != 0L) {
+                                        current.send(new TdApi.EditMessageCaption(
+                                                destChatId, realId, null,
+                                                new TdApi.FormattedText(customCaption, null), false),
+                                                ignored -> cb.ok(realId));
+                                    } else {
+                                        cb.ok(realId);
+                                    }
+                                }
+
+                                @Override
+                                public void fail(String reason) {
+                                    current.send(new TdApi.DeleteMessages(
+                                            destChatId, new long[]{localMsgId}, false), null);
+                                    onForwardFailed.fail(reason);
+                                }
+                            };
+                            TdApi.MessageSendingState sending = first.sendingState;
+                            if (sending == null) {
+                                afterConfirm.ok(localMsgId);
+                            } else if (sending instanceof TdApi.MessageSendingStateFailed) {
+                                TdApi.Error err = ((TdApi.MessageSendingStateFailed) sending).error;
+                                afterConfirm.fail(err == null ? "Telegram refused the direct copy"
+                                        : friendly(err.message));
+                            } else {
+                                SendWatch watch = new SendWatch(destChatId, localMsgId, 0, 0L, null,
+                                        afterConfirm, null);
+                                sends.put(localMsgId, watch);
+                            }
+                        });
+                    });
+                }));
+    }
+
+    private void sendRemoteCopy(final Client current, final long destChatId,
+                                final String remoteId, final QJob job,
+                                final String customCaption, final Cb<Long> cb) {
+        TdApi.InputFileRemote remote = new TdApi.InputFileRemote(remoteId);
+        String cap = customCaption != null && !customCaption.isEmpty()
+                ? customCaption : job.caption;
+        TdApi.InputMessageContent content = buildContentFromInput(remote, job.kind, cap,
+                job.durationSec, job.width, job.height, job.sendAs, null);
+        if (content == null) {
+            cb.fail("direct copy unavailable");
+            return;
+        }
+        current.send(new TdApi.SendMessage(destChatId, null, null, sendOptions(), null, content),
+                object -> {
+                    if (object instanceof TdApi.Error) {
+                        cb.fail(friendly(((TdApi.Error) object).message));
+                        return;
+                    }
+                    TdApi.Message msg = (TdApi.Message) object;
+                    final long localId = msg.id;
+                    if (msg.sendingState == null) {
+                        cb.ok(localId);
+                    } else if (msg.sendingState instanceof TdApi.MessageSendingStateFailed) {
+                        current.send(new TdApi.DeleteMessages(
+                                destChatId, new long[]{localId}, false), null);
+                        TdApi.Error err = ((TdApi.MessageSendingStateFailed) msg.sendingState).error;
+                        cb.fail(err == null ? "Telegram refused the direct copy"
+                                : friendly(err.message));
+                    } else {
+                        SendWatch watch = new SendWatch(destChatId, localId, 0, 0L, null,
+                                cb, null);
+                        sends.put(localId, watch);
+                    }
+                });
     }
 
     /** Blocking fallback sender when a protected text message cannot be copied directly. */
-    public long sendTextBlocking(long destChatId, String text, AtomicBoolean cancelled)
+    public long sendTextBlocking(final long destChatId, final String text, AtomicBoolean cancelled)
             throws Exception {
         final Sync<Long> sync = new Sync<>();
         final Client current = client;
         if (current == null) {
             throw new Failure("the Telegram engine is not running", "no client", false);
         }
-        TdApi.InputMessageText content = new TdApi.InputMessageText(
+        final TdApi.InputMessageText content = new TdApi.InputMessageText(
                 new TdApi.FormattedText(text == null ? "" : text, null), null, false);
-        current.send(new TdApi.SendMessage(destChatId, null, null, sendOptions(), null, content),
-                object -> {
-                    if (object instanceof TdApi.Error) {
-                        sync.fail(friendly(((TdApi.Error) object).message));
-                        return;
-                    }
-                    TdApi.Message msg = (TdApi.Message) object;
-                    if (msg.sendingState == null) {
-                        sync.ok(msg.id);
-                    } else if (msg.sendingState instanceof TdApi.MessageSendingStateFailed) {
-                        TdApi.Error err = ((TdApi.MessageSendingStateFailed) msg.sendingState).error;
-                        sync.fail(err == null ? "Telegram refused the message"
-                                : friendly(err.message));
-                    } else {
-                        SendWatch watch = new SendWatch(destChatId, msg.id, 0, 0L, null,
-                                sync, null);
-                        sends.put(msg.id, watch);
-                    }
-                });
+        ensureChatReady(current, destChatId, () ->
+                current.send(new TdApi.SendMessage(destChatId, null, null, sendOptions(), null, content),
+                        object -> {
+                            if (object instanceof TdApi.Error) {
+                                sync.fail(friendly(((TdApi.Error) object).message));
+                                return;
+                            }
+                            TdApi.Message msg = (TdApi.Message) object;
+                            if (msg.sendingState == null) {
+                                sync.ok(msg.id);
+                            } else if (msg.sendingState instanceof TdApi.MessageSendingStateFailed) {
+                                current.send(new TdApi.DeleteMessages(
+                                        destChatId, new long[]{msg.id}, false), null);
+                                TdApi.Error err =
+                                        ((TdApi.MessageSendingStateFailed) msg.sendingState).error;
+                                sync.fail(err == null ? "Telegram refused the message"
+                                        : friendly(err.message));
+                            } else {
+                                SendWatch watch = new SendWatch(destChatId, msg.id, 0, 0L, null,
+                                        sync, null);
+                                sends.put(msg.id, watch);
+                            }
+                        }));
         Long sent = sync.await(60_000, cancelled);
         if (sent == null) {
             throw new Failure(sync.error == null ? "the text message failed" : sync.error,
@@ -2445,8 +2536,8 @@ public final class Tg {
                                    AtomicBoolean cancelled) throws Exception {
         final Sync<Long> sync = new Sync<>();
         nativeCopy(job.destChatId, job.chatId, job.messageId, customCaption,
-                keepForwardHeader, sync);
-        Long result = sync.await(90_000, cancelled);
+                keepForwardHeader, job, sync);
+        Long result = sync.await(60_000, cancelled);
         if (result == null) {
             throw new Exception(sync.error == null ? "the direct copy failed" : sync.error);
         }
@@ -2469,7 +2560,7 @@ public final class Tg {
     }
 
     private static TdApi.MessageSendOptions sendOptions() {
-        return new TdApi.MessageSendOptions(null, false, true, false, false,
+        return new TdApi.MessageSendOptions(null, false, false, false, false,
                 0, false, null, 0, 0, false);
     }
 
@@ -2481,7 +2572,15 @@ public final class Tg {
         if (!local.exists()) {
             return null;
         }
-        TdApi.InputFileLocal input = new TdApi.InputFileLocal(local.getAbsolutePath());
+        return buildContentFromInput(new TdApi.InputFileLocal(local.getAbsolutePath()),
+                kind, caption, durationSec, width, height, sendAs, thumbPath);
+    }
+
+    private static TdApi.InputMessageContent buildContentFromInput(TdApi.InputFile input,
+                                                                   String kind, String caption,
+                                                                   long durationSec, int width,
+                                                                   int height, String sendAs,
+                                                                   String thumbPath) {
         TdApi.FormattedText text = new TdApi.FormattedText(
                 caption == null ? "" : caption, null);
         String mode = sendAs == null ? Prefs.SEND_FILE : sendAs;
@@ -2627,7 +2726,36 @@ public final class Tg {
         sendMedia(job.destChatId, job.path, job.kind, job.caption, job.durationSec,
                 job.width, job.height, job.sendAs, null, progress, sync,
                 job.protectedContent);
-        Long result = sync.await(0, cancelled);
+        long lastBytes = -1L;
+        long lastMove = System.currentTimeMillis();
+        while (!sync.finished()) {
+            if (cancelled != null && cancelled.get()) {
+                abortJobTransfers(job);
+                throw new Failure("cancelled", "cancelled", false);
+            }
+            long seen = highestActiveUploadBytes(job.destChatId);
+            if (seen > lastBytes) {
+                lastBytes = seen;
+                lastMove = System.currentTimeMillis();
+            } else if ((job.size <= 0L || seen < Math.max(0L, job.size - 65_536L))
+                    && System.currentTimeMillis() - lastMove > 180_000L) {
+                Client current = client;
+                if (current != null) {
+                    current.send(new TdApi.SetNetworkType(new TdApi.NetworkTypeOther()),
+                            ignored -> {});
+                }
+                abortJobTransfers(job);
+                throw new Failure("the upload stalled on mobile network; retrying",
+                        "upload stalled", true);
+            }
+            try {
+                Thread.sleep(400L);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new Failure("interrupted", "interrupted", false);
+            }
+        }
+        Long result = sync.value;
         if (result == null) {
             String reason = sync.error == null || sync.error.isEmpty()
                     ? "the upload did not finish" : sync.error;
@@ -2635,6 +2763,16 @@ public final class Tg {
             throw new Failure(reason, reason, worthRetrying(reason));
         }
         return result;
+    }
+
+    private long highestActiveUploadBytes(long destChatId) {
+        long highest = 0L;
+        for (SendWatch watch : sends.values()) {
+            if (watch.destChatId == destChatId && watch.uploadWatch != null) {
+                highest = Math.max(highest, watch.uploadWatch.highestBytes);
+            }
+        }
+        return highest;
     }
 
     public long forwardBlocking(QJob job, AtomicBoolean cancelled) throws Exception {
@@ -2717,6 +2855,43 @@ public final class Tg {
         }
     }
 
+    /**
+     * Dedicated upload watcher reading ONLY {@code file.remote.uploadedSize}
+     * (never {@code file.local.downloadedSize}, which is already 100% on disk)
+     * and keeping progress strictly below 100% until Telegram confirms delivery.
+     */
+    private static final class UploadWatch {
+        final int fileId;
+        final long expected;
+        final Progress progress;
+        volatile boolean done;
+        volatile long highestBytes;
+
+        UploadWatch(int fileId, long expected, Progress progress) {
+            this.fileId = fileId;
+            this.expected = expected;
+            this.progress = progress;
+        }
+
+        void onFile(TdApi.File file) {
+            if (done || file == null) {
+                return;
+            }
+            long total = Math.max(expected, file.expectedSize > 0 ? file.expectedSize : file.size);
+            long uploaded = file.remote == null ? 0L : file.remote.uploadedSize;
+            if (uploaded > highestBytes) {
+                highestBytes = uploaded;
+            }
+            long reported = highestBytes;
+            if (total > 1L && reported >= total) {
+                reported = total - 1L;
+            }
+            if (progress != null) {
+                progress.onBytes(reported, total);
+            }
+        }
+    }
+
     private final class SendWatch {
         final long destChatId;
         final long messageId;
@@ -2726,6 +2901,7 @@ public final class Tg {
         final Cb<Long> callback;
         /** How to send these bytes again as a new file, or null. */
         final Runnable freshRetry;
+        final UploadWatch uploadWatch;
         volatile boolean done;
 
         SendWatch(long destChatId, long messageId, int fileId, long expected,
@@ -2737,33 +2913,19 @@ public final class Tg {
             this.progress = progress;
             this.callback = callback;
             this.freshRetry = freshRetry;
+            this.uploadWatch = new UploadWatch(fileId, expected, progress);
         }
 
-        /**
-         * Ends this watch so the same bytes can be sent once more, as a file
-         * Telegram has never seen.  True when that is worth doing: only a
-         * protected-content refusal, and only before the retry was tried.
-         */
         boolean retryWithFreshName(String raw) {
             if (freshRetry == null || done || !Retry.forwardBlocked(raw)) {
                 return false;
             }
             done = true;
+            uploadWatch.done = true;
             uploads.remove(fileId);
             downloads.remove(fileId);
             Log.engine(app, "upload refused (" + raw + "); uploading the bytes as a new file");
             return true;
-        }
-
-        FileWatch progressWatch() {
-            return new FileWatch(fileId, new Progress() {
-                @Override
-                public void onBytes(long done, long total) {
-                    if (progress != null) {
-                        progress.onBytes(done, total > 0 ? total : expected);
-                    }
-                }
-            }, null);
         }
 
         void finish(long realMessageId, String error) {
@@ -2771,11 +2933,15 @@ public final class Tg {
                 return;
             }
             done = true;
+            uploadWatch.done = true;
             uploads.remove(fileId);
             downloads.remove(fileId);
             if (error != null) {
                 callback.fail(error);
             } else {
+                if (progress != null && expected > 0L) {
+                    progress.onBytes(expected, expected);
+                }
                 callback.ok(realMessageId);
             }
         }

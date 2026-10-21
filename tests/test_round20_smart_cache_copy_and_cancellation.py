@@ -128,3 +128,28 @@ def test_native_copy_attempted_first_with_data_download_fallback():
     assert copy_pos < download_pos, "tryNativeCopy must execute BEFORE mobile data download!"
     assert "nativeCopyBlocking(" in tg_source
     assert "new TdApi.ForwardMessages(" in tg_source
+
+
+def test_upload_watch_uses_remote_uploaded_size_and_never_freezes_at_100_percent():
+    tg_source = _read(JAVA_DIR / "Tg.java")
+    qjob_source = _read(JAVA_DIR / "QJob.java")
+    main_source = _read(JAVA_DIR / "MainActivity.java")
+    assert "class UploadWatch" in tg_source
+    assert "file.remote == null ? 0L : file.remote.uploadedSize" in tg_source
+    assert "reported = total - 1L" in tg_source
+    assert "ensureChatReady(" in tg_source
+    assert "Files.createLink(" not in tg_source
+    assert "Math.min(99, Format.percent(uploaded, total))" in qjob_source
+    assert "QJob.UPLOADING.equals(stage)" in main_source
+
+
+def test_smart_floating_menu_is_quarter_size_glitch_free_and_clean_dot_count():
+    overlay = _read(JAVA_DIR / "SmartOverlayService.java")
+    pointer = _read(JAVA_DIR / "SmartPointerView.java")
+    access = _read(JAVA_DIR / "SmartAccessibilityService.java")
+    assert "dm.widthPixels * 0.50f" in overlay
+    assert "WindowManager.LayoutParams.MATCH_PARENT" not in overlay
+    assert "Jobs.get(this).size()" not in overlay
+    assert "ValueAnimator.INFINITE" not in pointer
+    assert "hasChatHeaderSubtitle" in access
+

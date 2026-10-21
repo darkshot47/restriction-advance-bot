@@ -560,7 +560,8 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
                 ? Ui.stageLabel(stage) : Ui.stageLabel(stage) + ": " + error);
         long done = QueueService.Live.DONE.get();
         long total = QueueService.Live.TOTAL.get();
-        int percent = Format.percent(done, total);
+        int rawPercent = Format.percent(done, total);
+        int percent = QJob.UPLOADING.equals(stage) ? Math.min(99, rawPercent) : rawPercent;
         progressBar.setProgress(total > 0 ? percent : 0);
         progressBar.setIndeterminate(total <= 0);
         StringBuilder builder = new StringBuilder();
@@ -570,7 +571,8 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         } else if (done > 0) {
             builder.append(Format.size(done));
         }
-        if (QueueService.Live.SPEED > 0 && QJob.DOWNLOADING.equals(stage)) {
+        if (QueueService.Live.SPEED > 0
+                && (QJob.DOWNLOADING.equals(stage) || QJob.UPLOADING.equals(stage))) {
             builder.append(" • ").append(Format.speed(QueueService.Live.SPEED));
             String eta = Format.eta(done, total, QueueService.Live.SPEED);
             if (!eta.isEmpty()) {

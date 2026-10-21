@@ -29,6 +29,7 @@ public class SmartAccessibilityService extends AccessibilityService {
         public int cellOffsetFromAnchor;
         public int cellIndexFromBottom;
         public boolean hasComposerBar;
+        public boolean hasChatHeaderSubtitle;
     }
 
     private static final class CellBox {
@@ -162,7 +163,7 @@ public class SmartAccessibilityService extends AccessibilityService {
         if (root.getPackageName() != null) {
             target.packageName = root.getPackageName().toString();
         }
-        int headerBandBottom = (int) (screenH * 0.165f);
+        int headerBandBottom = (int) (screenH * 0.20f);
         int composerBandTop = (int) (screenH * 0.84f);
 
         List<String> headerCandidates = new ArrayList<>();
@@ -235,6 +236,7 @@ public class SmartAccessibilityService extends AccessibilityService {
         }
 
         target.looksLikeChatList = !target.hasComposerBar
+                && !target.hasChatHeaderSubtitle
                 && (target.headerTitle.isEmpty() || isGenericHomeTitle(target.headerTitle))
                 && visibleCells.size() >= 3;
         return target;
@@ -254,9 +256,21 @@ public class SmartAccessibilityService extends AccessibilityService {
             target.hasComposerBar = true;
         }
         String text = ownLabel(node);
+        if (!text.isEmpty() && r.top >= composerTop) {
+            String low = text.toLowerCase();
+            if ("mute".equals(low) || "unmute".equals(low) || "discuss".equals(low)
+                    || "message".equals(low) || "broadcast".equals(low)) {
+                target.hasComposerBar = true;
+            }
+        }
         if (!text.isEmpty() && r.bottom <= headerBottom && r.top >= 0
-                && r.left > (int) (screenW * 0.08f) && r.left < (int) (screenW * 0.72f)) {
+                && r.left >= 0 && r.left < (int) (screenW * 0.80f)) {
             headers.add(text);
+            String low = text.toLowerCase();
+            if (low.contains("subscriber") || low.contains("member")
+                    || low.contains("online") || low.contains("last seen")) {
+                target.hasChatHeaderSubtitle = true;
+            }
         }
         // Message bubble or chat-list row cell container
         int h = r.height();
@@ -368,7 +382,7 @@ public class SmartAccessibilityService extends AccessibilityService {
                 if (clean.length() < 2) {
                     continue;
                 }
-                if (SmartMatcher.isSubtitleNoise(clean)) {
+                if (isToolbarChromeLabel(clean) || SmartMatcher.isSubtitleNoise(clean)) {
                     continue;
                 }
                 if (!SmartMatcher.extractClockTimes(clean).isEmpty() && clean.length() <= 9) {
@@ -378,6 +392,14 @@ public class SmartAccessibilityService extends AccessibilityService {
             }
         }
         return "";
+    }
+
+    private static boolean isToolbarChromeLabel(String label) {
+        String low = label.trim().toLowerCase();
+        return "go back".equals(low) || "navigate up".equals(low) || "back".equals(low)
+                || "search".equals(low) || "more options".equals(low)
+                || "open navigation menu".equals(low) || "profile photo".equals(low)
+                || "call".equals(low) || "video call".equals(low);
     }
 
     private static boolean isGenericHomeTitle(String header) {
