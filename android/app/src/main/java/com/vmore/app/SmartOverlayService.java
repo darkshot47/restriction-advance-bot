@@ -13,6 +13,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.provider.Settings;
+import android.text.InputType;
 import android.text.TextUtils;
 import android.util.DisplayMetrics;
 import android.view.Gravity;
@@ -21,11 +22,13 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
+import android.widget.ScrollView;
 import android.widget.TextView;
 
 import java.util.ArrayList;
@@ -64,7 +67,6 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
     private WindowManager.LayoutParams menuParams;
     private TextView menuStepText;
     private TextView menuGuideText;
-    private LinearLayout menuPermBox;
     private LinearLayout menuLiveCard;
     private TextView menuLiveLabel;
     private ProgressBar menuLiveBar;
@@ -76,10 +78,23 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
 
     private boolean pointerVisible = true;
     private boolean guideExpanded = false;
-    private boolean resolvingTap = false;
     private String lastAnnouncedStage = "";
     private String lastStepRendered = "";
     private String lastLiveLabelRendered = "";
+
+    // Exact-file picker (server side, no screen reading at all)
+    private FrameLayout pickerPanel;
+    private WindowManager.LayoutParams pickerParams;
+    private LinearLayout pickerChatStrip;
+    private LinearLayout pickerFileList;
+    private TextView pickerHint;
+    private Button pickerAddBtn;
+    private Button pickerMoreBtn;
+    private EditText pickerInput;
+    private Tg.Chat pickerChat;
+    private long pickerNextFrom;
+    private final List<Tg.Media> pickerSelected = new ArrayList<>();
+    private final List<Tg.Media> pickerLoaded = new ArrayList<>();
 
     private final Runnable hideBannerTask = () -> {
         if (bannerRoot != null) {
@@ -140,6 +155,28 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
         }
     }
 
+    /** Any post the user reacts to inside Telegram becomes a captured file. */
+    private final Tg.SmartReactionListener reactionListener = media -> {
+        onMediaCaptured(media, null);
+        if (captured.size() == 1) {
+            announceStep("CAPTURED",
+                    shortStr(media.name, 22) + " • tap dot to add more",
+                    0xFF10B981, 3200L);
+        }
+    };
+
+    /** Account switches fire a new state; destinations are reloaded from scratch. */
+    private final Tg.Listener stateWatcher = (state, detail) -> handler.post(() -> {
+        if (Tg.STATE_READY.equals(state)) {
+            writableChats.clear();
+            renderDestinationAvatars();
+            refreshWritableDestinations();
+        } else if (Tg.STATE_NONE.equals(state)) {
+            writableChats.clear();
+            renderDestinationAvatars();
+        }
+    });
+
     @Override
     public void onCreate() {
         super.onCreate();
@@ -148,10 +185,14 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
         wm = (WindowManager) getSystemService(WINDOW_SERVICE);
         startForegroundSafely(getString(R.string.smart_step_ready));
         Jobs.get(this).addListener(this);
+        Tg.get(this).addStateWatcher(stateWatcher);
+        Tg.get(this).setSmartReactionListener(reactionListener);
         mountOverlays();
         refreshWritableDestinations();
         handler.post(liveTicker);
-        announceStep("SMART READY", "Double-tap any file with white dot", 0xFF38BDF8, 3200L);
+        announceStep("SMART READY",
+                "Double-tap (react) a post, or tap the dot to pick files",
+                0xFF38BDF8, 3600L);
     }
 
     @Override
@@ -182,6 +223,8 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
     public void onDestroy() {
         handler.removeCallbacksAndMessages(null);
         Jobs.get(this).removeListener(this);
+        Tg.get(this).removeStateWatcher(stateWatcher);
+        Tg.get(this).setSmartReactionListener(null);
         removeAllWindows();
         if (current == this) {
             current = null;
@@ -205,7 +248,7 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
             if (Build.VERSION.SDK_INT >= 34) {
                 startForeground(Notifications.ID_SMART,
                         Notifications.smart(this, statusLine),
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
             } else {
                 startForeground(Notifications.ID_SMART,
                         Notifications.smart(this, statusLine));
@@ -277,20 +320,12 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
 
                 @Override
                 public void onSingleTap() {
-                    if (captured.isEmpty()) {
-                        announceStep("STEP 1",
-                                "Place white dot on any file and double-tap",
-                                0xFF38BDF8, 2400L);
-                    } else {
-                        announceStep(captured.size() + " IN DOT",
-                                "Open target channel and double-tap to send",
-                                0xFF10B981, 2600L);
-                    }
+                    openPicker();
                 }
 
                 @Override
                 public void onDoubleTap(int centerRawX, int centerRawY) {
-                    handleWhiteCircleDoubleTap(centerRawX, centerRawY);
+                    sendCapturedToRememberedDestination();
                 }
             });
             safeAddView(whiteCircle, whiteParams);
@@ -346,154 +381,472 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
         }
     }
 
-    // ------------------------------------------ double-tap smart engine ---- //
+    // ------------------------------------------- exact file & channel work //
 
-    private void handleWhiteCircleDoubleTap(final int rawX, final int rawY) {
-        if (resolvingTap) {
+    /**
+     * Double-tapping the dot sends whatever is in it to the saved channel.
+     *
+     * The destination is remembered per account, so a second account never
+     * inherits the first one's channel and the file never lands somewhere the
+     * user did not choose.
+     */
+    private void sendCapturedToRememberedDestination() {
+        if (captured.isEmpty()) {
+            openPicker();
             return;
         }
-        if (!SmartAccessibilityService.isEnabled(this)
-                || !SmartAccessibilityService.isRunning()) {
-            setPointerState(SmartPointerView.STATE_ALERT);
-            announceStep("ALLOW READER",
-                    "Tap Allow in the mini menu once",
-                    0xFFF59E0B, 3600L);
-            showMenuPanel();
+        long destId = Prefs.destChatId(this);
+        if (destId == 0L) {
+            announceStep("PICK CHANNEL", "Choose the destination channel first",
+                    0xFFF59E0B, 2600L);
+            openPicker();
+            return;
+        }
+        for (Tg.Chat row : writableChats) {
+            if (row.id == destId) {
+                sendToChat(row);
+                return;
+            }
+        }
+        Tg.get(this).chat(destId, new Tg.Cb<Tg.Chat>() {
+            @Override
+            public void ok(Tg.Chat chat) {
+                sendToChat(chat);
+            }
+
+            @Override
+            public void fail(String message) {
+                announceStep("NO CHANNEL", shortStr(message, 30), 0xFFEF4444, 3200L);
+            }
+        });
+    }
+
+    private void sendToChat(Tg.Chat destination) {
+        if (destination == null) {
+            return;
+        }
+        if (!destination.canSend) {
+            announceStep("NO POST ACCESS",
+                    "Cannot send to " + shortStr(destination.title, 20),
+                    0xFFEF4444, 3400L);
+            return;
+        }
+        boolean ok = pasteCapturedIntoChat(destination);
+        if (ok) {
+            closePicker();
+        }
+    }
+
+    // -------------------------------------------- exact file picker panel -- //
+
+    /**
+     * The picker is the whole reason Smart no longer needs Accessibility.
+     *
+     * The user types or pastes the channel link/@username (or taps a channel
+     * avatar) and Vmore asks Telegram for that chat's real posts, with their
+     * real names and sizes.  Screens, scroll positions and other apps are
+     * never read, so files cannot be taken from the wrong chat by mistake.
+     */
+    public void openPicker() {
+        if (wm == null) {
             return;
         }
         if (!Tg.get(this).isReady()) {
-            Tg.get(this).start(null);
-            setPointerState(SmartPointerView.STATE_SCANNING);
-            announceStep("CONNECTING",
-                    "Waking session — double-tap again in 1s",
-                    0xFF38BDF8, 2800L);
+            announceStep("NOT READY", "Sign in to Telegram first", 0xFFF59E0B, 2600L);
             return;
         }
+        if (pickerPanel != null) {
+            closePicker();
+        }
+        DisplayMetrics dm = getResources().getDisplayMetrics();
+        int width = Math.min((int) (dm.widthPixels * 0.92f), Ui.dp(this, 340));
+        int maxHeight = (int) (dm.heightPixels * 0.58f);
 
-        resolvingTap = true;
-        setPointerState(SmartPointerView.STATE_SCANNING);
+        pickerPanel = new FrameLayout(this);
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        GradientDrawable bg = new GradientDrawable(
+                GradientDrawable.Orientation.TOP_BOTTOM,
+                new int[]{0xFA0F172A, 0xFA111827});
+        bg.setCornerRadius(Ui.dp(this, 16));
+        bg.setStroke(Ui.dp(this, 1), 0x66818CF8);
+        card.setBackground(bg);
+        card.setPadding(Ui.dp(this, 10), Ui.dp(this, 9),
+                Ui.dp(this, 10), Ui.dp(this, 9));
 
-        final SmartAccessibilityService.ScreenTarget screen =
-                SmartAccessibilityService.inspectAt(rawX, rawY);
-        if (screen == null) {
-            resolvingTap = false;
-            restoreIdleOrCapturedState();
-            announceStep("TRY AGAIN",
-                    "Place white dot right on a Telegram post or channel",
-                    0xFFF59E0B, 2800L);
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        GradientDrawable headerBg = new GradientDrawable(
+                GradientDrawable.Orientation.LEFT_RIGHT,
+                new int[]{0xFF4F46E5, 0xFF0284C7, 0xFF0D9488});
+        headerBg.setCornerRadius(Ui.dp(this, 11));
+        header.setBackground(headerBg);
+        header.setPadding(Ui.dp(this, 9), Ui.dp(this, 6), Ui.dp(this, 6), Ui.dp(this, 6));
+
+        TextView title = new TextView(this);
+        title.setText("Pick exact files");
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(12f);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        title.setSingleLine(true);
+        header.addView(title, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        Button closeBtn = miniChip("×", 0x44000000, Color.WHITE);
+        closeBtn.setContentDescription(getString(R.string.common_close));
+        closeBtn.setOnClickListener(v -> closePicker());
+        header.addView(closeBtn);
+        card.addView(header);
+
+        pickerHint = new TextView(this);
+        pickerHint.setText("Paste a channel link or @username, then tap Load.");
+        pickerHint.setTextColor(0xFFBAE6FD);
+        pickerHint.setTextSize(10.5f);
+        pickerHint.setLineSpacing(0f, 1.1f);
+        pickerHint.setPadding(Ui.dp(this, 3), Ui.dp(this, 6), Ui.dp(this, 3), Ui.dp(this, 0));
+        card.addView(pickerHint);
+
+        LinearLayout inputRow = new LinearLayout(this);
+        inputRow.setOrientation(LinearLayout.HORIZONTAL);
+        inputRow.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams irlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        irlp.topMargin = Ui.dp(this, 6);
+        inputRow.setLayoutParams(irlp);
+
+        pickerInput = new EditText(this);
+        pickerInput.setHint("https://t.me/channel  or  @channel");
+        pickerInput.setHintTextColor(0xFF64748B);
+        pickerInput.setTextColor(Color.WHITE);
+        pickerInput.setTextSize(11.5f);
+        pickerInput.setSingleLine(true);
+        pickerInput.setInputType(InputType.TYPE_CLASS_TEXT
+                | InputType.TYPE_TEXT_VARIATION_URI);
+        pickerInput.setBackground(roundedCard(0xFF1E293B, 0x5538BDF8, 9));
+        pickerInput.setPadding(Ui.dp(this, 7), Ui.dp(this, 5),
+                Ui.dp(this, 7), Ui.dp(this, 5));
+        inputRow.addView(pickerInput, new LinearLayout.LayoutParams(
+                0, Ui.dp(this, 32), 1f));
+
+        Button loadBtn = miniActionButton("Load", 0xFF2563EB, Color.WHITE);
+        loadBtn.setOnClickListener(v -> loadFromTypedReference());
+        LinearLayout.LayoutParams loadLp = new LinearLayout.LayoutParams(
+                Ui.dp(this, 52), Ui.dp(this, 32));
+        loadLp.leftMargin = Ui.dp(this, 6);
+        inputRow.addView(loadBtn, loadLp);
+        card.addView(inputRow);
+
+        pickerChatStrip = new LinearLayout(this);
+        pickerChatStrip.setOrientation(LinearLayout.HORIZONTAL);
+        pickerChatStrip.setGravity(Gravity.CENTER_VERTICAL);
+        HorizontalScrollView chatScroll = new HorizontalScrollView(this);
+        chatScroll.setHorizontalScrollBarEnabled(false);
+        chatScroll.addView(pickerChatStrip);
+        LinearLayout.LayoutParams cslp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        cslp.topMargin = Ui.dp(this, 7);
+        card.addView(chatScroll, cslp);
+
+        ScrollView fileScroll = new ScrollView(this);
+        fileScroll.setVerticalScrollBarEnabled(false);
+        pickerFileList = new LinearLayout(this);
+        pickerFileList.setOrientation(LinearLayout.VERTICAL);
+        fileScroll.addView(pickerFileList);
+        LinearLayout.LayoutParams fslp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, maxHeight);
+        fslp.topMargin = Ui.dp(this, 6);
+        card.addView(fileScroll, fslp);
+
+        LinearLayout footer = new LinearLayout(this);
+        footer.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams flp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        flp.topMargin = Ui.dp(this, 8);
+        footer.setLayoutParams(flp);
+
+        pickerMoreBtn = miniActionButton("Load more", 0xFF1E293B, 0xFFE2E8F0);
+        pickerMoreBtn.setOnClickListener(v -> loadPickerPage(false));
+        pickerMoreBtn.setVisibility(View.GONE);
+        footer.addView(pickerMoreBtn, new LinearLayout.LayoutParams(
+                0, Ui.dp(this, 30), 1f));
+
+        View gap = new View(this);
+        footer.addView(gap, new LinearLayout.LayoutParams(Ui.dp(this, 6), 1));
+
+        pickerAddBtn = miniActionButton("Add 0", 0xFF10B981, Color.WHITE);
+        pickerAddBtn.setOnClickListener(v -> commitPickerSelection());
+        footer.addView(pickerAddBtn, new LinearLayout.LayoutParams(
+                0, Ui.dp(this, 30), 1f));
+        card.addView(footer);
+
+        pickerPanel.addView(card, new FrameLayout.LayoutParams(
+                width, ViewGroup.LayoutParams.WRAP_CONTENT));
+        pickerParams = new WindowManager.LayoutParams(
+                width,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                overlayWindowType(),
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                        | WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+                PixelFormat.TRANSLUCENT);
+        pickerParams.gravity = Gravity.CENTER;
+        safeAddView(pickerPanel, pickerParams);
+        renderPickerChats();
+        renderPickerFiles();
+    }
+
+    private void closePicker() {
+        if (pickerPanel != null) {
+            safeRemoveView(pickerPanel);
+            pickerPanel = null;
+        }
+        pickerParams = null;
+        pickerChatStrip = null;
+        pickerFileList = null;
+        pickerHint = null;
+        pickerAddBtn = null;
+        pickerMoreBtn = null;
+        pickerInput = null;
+        pickerLoaded.clear();
+        pickerSelected.clear();
+        pickerNextFrom = 0L;
+    }
+
+    private void loadFromTypedReference() {
+        if (pickerInput == null) {
             return;
         }
-
-        if (screen.looksLikeChatList && !screen.targetLines.isEmpty()) {
-            resolveChatRowTap(screen);
+        String typed = pickerInput.getText() == null ? "" : pickerInput.getText().toString().trim();
+        if (typed.isEmpty()) {
+            if (pickerHint != null) {
+                pickerHint.setText("Type a channel link or @username first.");
+            }
             return;
         }
-
-        String chatQuery = !screen.headerTitle.isEmpty()
-                ? screen.headerTitle
-                : firstTitleCandidate(screen.targetLines);
-        if (chatQuery.isEmpty()) {
-            resolvingTap = false;
-            restoreIdleOrCapturedState();
-            announceStep("MOVE DOT",
-                    "Keep channel title visible and tap on the file",
-                    0xFFF59E0B, 3000L);
-            return;
+        if (pickerHint != null) {
+            pickerHint.setText("Finding " + shortStr(typed, 28) + " …");
         }
-
-        Tg.get(this).findChatsMatching(chatQuery, new Tg.Cb<List<Tg.Chat>>() {
+        Tg.get(this).resolveAnyChat(typed, new Tg.Cb<Tg.Chat>() {
             @Override
-            public void ok(List<Tg.Chat> matches) {
-                if (matches == null || matches.isEmpty()) {
-                    resolvingTap = false;
-                    restoreIdleOrCapturedState();
-                    announceStep("NOT FOUND",
-                            "Open \"" + shortStr(chatQuery, 20) + "\" in your signed-in account",
-                            0xFFF59E0B, 3200L);
-                    return;
-                }
-                final Tg.Chat matchedChat = matches.get(0);
-                boolean sameAsLastSource = !captured.isEmpty()
-                        && captured.get(captured.size() - 1).chatId == matchedChat.id;
-                boolean looksLikeMediaBubble = hasMediaHints(screen.targetLines);
-
-                if (!captured.isEmpty() && (!sameAsLastSource || !looksLikeMediaBubble)) {
-                    resolvingTap = false;
-                    pasteCapturedIntoChat(matchedChat);
-                    return;
-                }
-
-                Tg.get(SmartOverlayService.this).matchMediaInChat(
-                        matchedChat.id,
-                        screen.targetLines,
-                        screen.siblingAnchorLines,
-                        screen.cellOffsetFromAnchor,
-                        screen.cellIndexFromBottom,
-                        new Tg.Cb<Tg.Media>() {
-                            @Override
-                            public void ok(Tg.Media media) {
-                                resolvingTap = false;
-                                onMediaCaptured(media, matchedChat);
-                            }
-
-                            @Override
-                            public void fail(String message) {
-                                resolvingTap = false;
-                                if (!captured.isEmpty() && matchedChat.canSend) {
-                                    pasteCapturedIntoChat(matchedChat);
-                                    return;
-                                }
-                                restoreIdleOrCapturedState();
-                                announceStep("NO FILE", shortStr(message, 34), 0xFFF59E0B, 3000L);
-                            }
-                        });
+            public void ok(Tg.Chat chat) {
+                openPickerChat(chat);
             }
 
             @Override
             public void fail(String message) {
-                resolvingTap = false;
-                restoreIdleOrCapturedState();
-                announceStep("BUSY", shortStr(message, 32), 0xFFF59E0B, 2800L);
+                if (pickerHint != null) {
+                    pickerHint.setText(shortStr(message, 60));
+                }
             }
         });
     }
 
-    private void resolveChatRowTap(final SmartAccessibilityService.ScreenTarget screen) {
-        String rowTitle = firstTitleCandidate(screen.targetLines);
-        if (rowTitle.isEmpty()) {
-            resolvingTap = false;
-            restoreIdleOrCapturedState();
+    private void openPickerChat(Tg.Chat chat) {
+        if (chat == null) {
             return;
         }
-        Tg.get(this).findChatsMatching(rowTitle, new Tg.Cb<List<Tg.Chat>>() {
+        pickerChat = chat;
+        pickerNextFrom = 0L;
+        pickerLoaded.clear();
+        pickerSelected.clear();
+        if (pickerHint != null) {
+            pickerHint.setText("Files in \"" + shortStr(chat.title, 24) + "\"");
+        }
+        renderPickerFiles();
+        loadPickerPage(true);
+    }
+
+    private void loadPickerPage(final boolean firstPage) {
+        final Tg.Chat chat = pickerChat;
+        if (chat == null) {
+            return;
+        }
+        if (firstPage) {
+            pickerNextFrom = 0L;
+        }
+        if (pickerHint != null && !firstPage) {
+            pickerHint.setText("Loading older files …");
+        }
+        final long from = pickerNextFrom;
+        Tg.get(this).listChatMedia(chat.id, from, 25, true, new Tg.Cb<Tg.MediaPage>() {
             @Override
-            public void ok(List<Tg.Chat> matches) {
-                resolvingTap = false;
-                if (matches == null || matches.isEmpty()) {
-                    restoreIdleOrCapturedState();
-                    announceStep("OPEN CHAT",
-                            "Open the channel first, then double-tap",
-                            0xFFF59E0B, 2800L);
+            public void ok(Tg.MediaPage page) {
+                if (page == null) {
                     return;
                 }
-                Tg.Chat chat = matches.get(0);
-                if (!captured.isEmpty()) {
-                    pasteCapturedIntoChat(chat);
+                pickerNextFrom = page.nextFromMessageId;
+                if (firstPage) {
+                    pickerLoaded.clear();
+                }
+                pickerLoaded.addAll(page.items);
+                if (pickerHint != null) {
+                    pickerHint.setText(pickerLoaded.isEmpty()
+                            ? "No files found in this chat."
+                            : "Tap files to add • \"" + shortStr(chat.title, 20) + "\"");
+                }
+                renderPickerFiles();
+            }
+
+            @Override
+            public void fail(String message) {
+                if (pickerHint != null) {
+                    pickerHint.setText(shortStr(message, 60));
+                }
+            }
+        });
+    }
+
+    private void renderPickerChats() {
+        if (pickerChatStrip == null) {
+            return;
+        }
+        pickerChatStrip.removeAllViews();
+        int max = Math.min(12, writableChats.size());
+        for (int i = 0; i < max; i++) {
+            final Tg.Chat chat = writableChats.get(i);
+            FrameLayout holder = new FrameLayout(this);
+            int ringPx = Ui.dp(this, 34);
+            int imgPx = Ui.dp(this, 28);
+            GradientDrawable ring = new GradientDrawable();
+            ring.setShape(GradientDrawable.OVAL);
+            boolean selected = pickerChat != null && pickerChat.id == chat.id;
+            ring.setColor(selected ? 0x3310B981 : 0x1AFFFFFF);
+            ring.setStroke(Ui.dp(this, selected ? 2 : 1),
+                    selected ? 0xFF10B981 : 0x3394A3B8);
+            holder.setBackground(ring);
+
+            ImageView avatar = new ImageView(this);
+            holder.addView(avatar, new FrameLayout.LayoutParams(
+                    imgPx, imgPx, Gravity.CENTER));
+            Ui.paintChatAvatar(this, avatar, chat, 28);
+            holder.setContentDescription(chat.title);
+            holder.setOnClickListener(v -> openPickerChat(chat));
+
+            LinearLayout.LayoutParams hlp = new LinearLayout.LayoutParams(ringPx, ringPx);
+            hlp.rightMargin = Ui.dp(this, 6);
+            pickerChatStrip.addView(holder, hlp);
+        }
+    }
+
+    private void renderPickerFiles() {
+        if (pickerFileList == null) {
+            return;
+        }
+        pickerFileList.removeAllViews();
+        if (pickerMoreBtn != null) {
+            pickerMoreBtn.setVisibility(pickerNextFrom > 0L ? View.VISIBLE : View.GONE);
+        }
+        if (pickerLoaded.isEmpty()) {
+            return;
+        }
+        for (final Tg.Media media : pickerLoaded) {
+            final boolean[] chosen = {pickerSelected.contains(media)};
+            LinearLayout row = new LinearLayout(this);
+            row.setOrientation(LinearLayout.HORIZONTAL);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(Ui.dp(this, 7), Ui.dp(this, 5),
+                    Ui.dp(this, 7), Ui.dp(this, 5));
+            row.setBackground(roundedCard(chosen[0] ? 0xFF14312A : 0xFF16233A,
+                    chosen[0] ? 0xFF10B981 : 0x33475569, 9));
+            LinearLayout.LayoutParams rlp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            rlp.bottomMargin = Ui.dp(this, 4);
+            row.setLayoutParams(rlp);
+
+            TextView mark = new TextView(this);
+            mark.setText(chosen[0] ? "[x]" : "[ ]");
+            mark.setTextColor(chosen[0] ? 0xFF34D399 : 0xFF64748B);
+            mark.setTextSize(13f);
+            mark.setTypeface(Typeface.DEFAULT_BOLD);
+            row.addView(mark);
+
+            LinearLayout texts = new LinearLayout(this);
+            texts.setOrientation(LinearLayout.VERTICAL);
+            LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+            tlp.leftMargin = Ui.dp(this, 7);
+            texts.setLayoutParams(tlp);
+
+            TextView name = new TextView(this);
+            name.setText(shortStr(media.name == null || media.name.isEmpty()
+                    ? media.kind : media.name, 30));
+            name.setTextColor(Color.WHITE);
+            name.setTextSize(11f);
+            name.setSingleLine(true);
+            name.setEllipsize(TextUtils.TruncateAt.END);
+            texts.addView(name);
+
+            TextView meta = new TextView(this);
+            meta.setText(displayKind(media.kind) + " • " + Format.size(media.size)
+                    + (media.messageId > 0 ? " • #" + media.messageId : ""));
+            meta.setTextColor(0xFF94A3B8);
+            meta.setTextSize(9.5f);
+            meta.setSingleLine(true);
+            texts.addView(meta);
+            row.addView(texts);
+
+            row.setOnClickListener(v -> {
+                chosen[0] = !chosen[0];
+                if (chosen[0]) {
+                    if (!pickerSelected.contains(media)) {
+                        pickerSelected.add(media);
+                    }
                 } else {
-                    restoreIdleOrCapturedState();
-                    announceStep("OPEN CHAT",
-                            "Open \"" + shortStr(chat.title, 20) + "\" to pick a file",
-                            0xFF38BDF8, 2800L);
+                    pickerSelected.remove(media);
                 }
-            }
-
-            @Override
-            public void fail(String message) {
-                resolvingTap = false;
-                restoreIdleOrCapturedState();
-            }
-        });
+                renderPickerFiles();
+            });
+            pickerFileList.addView(row);
+        }
+        if (pickerAddBtn != null) {
+            pickerAddBtn.setText("Add " + pickerSelected.size());
+            pickerAddBtn.setBackground(roundedCard(
+                    pickerSelected.isEmpty() ? 0xFF334155 : 0xFF10B981, 0x00000000, 9));
+        }
     }
+
+    private void commitPickerSelection() {
+        if (pickerSelected.isEmpty()) {
+            if (pickerHint != null) {
+                pickerHint.setText("Tap at least one file first.");
+            }
+            return;
+        }
+        int added = 0;
+        for (Tg.Media media : new ArrayList<>(pickerSelected)) {
+            if (!containsMedia(captured, media)) {
+                captured.add(media);
+                added++;
+            }
+        }
+        pickerSelected.clear();
+        restoreIdleOrCapturedState();
+        startForegroundSafely(currentStepSummary());
+        announceStep("ADDED (" + captured.size() + ")",
+                added == 0 ? "Already in Vmore"
+                        : added + " file(s) ready to send",
+                0xFF10B981, 2800L);
+        syncLiveTransferUi();
+        closePicker();
+        showMenuPanel();
+    }
+
+    private static boolean containsMedia(List<Tg.Media> list, Tg.Media media) {
+        for (Tg.Media item : list) {
+            if (item.chatId == media.chatId && item.messageId == media.messageId) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String displayKind(String kind) {
+        if (kind == null || kind.isEmpty()) {
+            return "file";
+        }
+        return kind.substring(0, 1).toUpperCase() + kind.substring(1);
+    }
+
 
     private void onMediaCaptured(Tg.Media media, Tg.Chat sourceChat) {
         for (Tg.Media existing : captured) {
@@ -516,9 +869,9 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
         syncLiveTransferUi();
     }
 
-    private void pasteCapturedIntoChat(Tg.Chat destination) {
+    private boolean pasteCapturedIntoChat(Tg.Chat destination) {
         if (destination == null) {
-            return;
+            return false;
         }
         if (!destination.canSend) {
             setPointerState(SmartPointerView.STATE_ALERT);
@@ -526,12 +879,12 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
             announceStep("NO POST ACCESS",
                     "Cannot send to \"" + shortStr(destination.title, 22) + "\"",
                     0xFFEF4444, 3400L);
-            return;
+            return false;
         }
         if (captured.isEmpty()) {
             announceStep("PICK FILE FIRST",
-                    "Double-tap any file first", 0xFF38BDF8, 2600L);
-            return;
+                    "Tap the white dot to pick files", 0xFF38BDF8, 2600L);
+            return false;
         }
 
         List<QJob> batch = new ArrayList<>();
@@ -540,8 +893,10 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
             QJob job = new QJob();
             job.batchId = batchId;
             job.batchLabel = "Smart transfer";
-            job.raw = item.chatTitle.isEmpty() ? item.name : item.chatTitle + " / " + item.name;
+            job.raw = item.chatTitle == null || item.chatTitle.isEmpty()
+                    ? item.name : item.chatTitle + " / " + item.name;
             job.chatId = item.chatId;
+            job.internalId = TgLink.internalFromChatId(item.chatId);
             job.messageId = item.messageId;
             job.fileId = item.fileId;
             job.remoteFileId = item.remoteFileId;
@@ -574,6 +929,7 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
         announceStep("SENDING", msg, 0xFF38BDF8, 3000L);
         renderDestinationAvatars();
         syncLiveTransferUi();
+        return true;
     }
 
     // ----------------------------------------- compact floating pill toast - //
@@ -720,30 +1076,13 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
 
         // Collapsible short guide (hidden by default so popup stays compact 1/4 size)
         menuGuideText = new TextView(this);
-        menuGuideText.setText("1. Drag white dot on file & double-tap\n2. Open channel & double-tap to send");
+        menuGuideText.setText("1. Tap white dot to pick exact files\n2. Or double-tap (react) a post in Telegram\n3. Tap channel avatar to send");
         menuGuideText.setTextColor(0xFFBAE6FD);
         menuGuideText.setTextSize(10.5f);
         menuGuideText.setLineSpacing(0f, 1.12f);
         menuGuideText.setPadding(Ui.dp(this, 4), Ui.dp(this, 6), Ui.dp(this, 4), Ui.dp(this, 2));
         menuGuideText.setVisibility(guideExpanded ? View.VISIBLE : View.GONE);
         card.addView(menuGuideText);
-
-        // Accessibility permission row (only visible when reader permission is missing)
-        menuPermBox = new LinearLayout(this);
-        menuPermBox.setOrientation(LinearLayout.VERTICAL);
-        menuPermBox.setPadding(0, Ui.dp(this, 6), 0, 0);
-        Button enableBtn = miniActionButton("Allow Screen Reader", 0xFFF59E0B, 0xFF0F172A);
-        enableBtn.setOnClickListener(v -> {
-            closeMenuPanel();
-            Intent s = new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS);
-            s.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            startActivity(s);
-        });
-        menuPermBox.addView(enableBtn, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(this, 28)));
-        menuPermBox.setVisibility(SmartAccessibilityService.isEnabled(this)
-                ? View.GONE : View.VISIBLE);
-        card.addView(menuPermBox);
 
         // 2. Status row + Clear chip when files are in dot
         LinearLayout statusRow = new LinearLayout(this);
@@ -833,19 +1172,27 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
         brLp.topMargin = Ui.dp(this, 8);
         bottomRow.setLayoutParams(brLp);
 
+        Button pickBtn = miniActionButton("Pick files", 0xFF2563EB, Color.WHITE);
+        pickBtn.setOnClickListener(v -> openPicker());
+        bottomRow.addView(pickBtn, new LinearLayout.LayoutParams(
+                0, Ui.dp(this, 28), 1f));
+
+        View bGap = new View(this);
+        bottomRow.addView(bGap, new LinearLayout.LayoutParams(Ui.dp(this, 5), 1));
+
         togglePointerBtn = miniActionButton(pointerVisible ? "Hide Dot" : "Show Dot",
                 0xFF1E293B, 0xFFE2E8F0);
         togglePointerBtn.setOnClickListener(v -> togglePointerVisibility());
         bottomRow.addView(togglePointerBtn, new LinearLayout.LayoutParams(
                 0, Ui.dp(this, 28), 1f));
 
-        View bGap = new View(this);
-        bottomRow.addView(bGap, new LinearLayout.LayoutParams(Ui.dp(this, 6), 1));
+        View bGap2 = new View(this);
+        bottomRow.addView(bGap2, new LinearLayout.LayoutParams(Ui.dp(this, 5), 1));
 
         Button offBtn = miniActionButton("Off", 0xFFDC2626, Color.WHITE);
         offBtn.setOnClickListener(v -> shutdownCleanly());
         bottomRow.addView(offBtn, new LinearLayout.LayoutParams(
-                Ui.dp(this, 56), Ui.dp(this, 28)));
+                Ui.dp(this, 44), Ui.dp(this, 28)));
 
         card.addView(bottomRow);
         menuPopup.addView(card, new FrameLayout.LayoutParams(
@@ -899,7 +1246,6 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
         menuParams = null;
         menuStepText = null;
         menuGuideText = null;
-        menuPermBox = null;
         menuLiveCard = null;
         menuLiveLabel = null;
         menuLiveBar = null;
@@ -963,8 +1309,8 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
         long currentDestId = Prefs.destChatId(this);
         String destTitle = Prefs.destTitle(this);
         menuDestActiveLabel.setText(destTitle == null || destTitle.isEmpty()
-                ? "Channel: tap avatar below"
-                : "To: " + shortStr(destTitle, 22));
+                ? "Send to: tap a channel below"
+                : "Send to: " + shortStr(destTitle, 22));
 
         menuAvatarStrip.removeAllViews();
         int max = Math.min(10, writableChats.size());
@@ -1027,19 +1373,11 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
                 announceStep("DONE", "Sent successfully", 0xFF10B981, 2600L);
                 startForegroundSafely(currentStepSummary());
             }
-            if (!resolvingTap) {
-                restoreIdleOrCapturedState();
-            }
+            restoreIdleOrCapturedState();
         }
 
         if (menuPopup == null) {
             return;
-        }
-        if (menuPermBox != null) {
-            int want = SmartAccessibilityService.isEnabled(this) ? View.GONE : View.VISIBLE;
-            if (menuPermBox.getVisibility() != want) {
-                menuPermBox.setVisibility(want);
-            }
         }
         if (menuClearBtn != null) {
             int wantClear = captured.isEmpty() ? View.GONE : View.VISIBLE;
@@ -1095,9 +1433,9 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
 
     private String compactStepLine() {
         if (!captured.isEmpty()) {
-            return captured.size() + " file in dot -> open channel";
+            return captured.size() + " in dot • tap avatar to send";
         }
-        return "Ready • double-tap file";
+        return "Tap dot to pick files";
     }
 
     private String currentStepSummary() {
@@ -1175,41 +1513,6 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
         return d;
     }
 
-    private static boolean hasMediaHints(List<String> lines) {
-        if (lines == null || lines.isEmpty()) {
-            return true;
-        }
-        if (SmartMatcher.extractSizeBytes(lines) > 0 || SmartMatcher.extractDurationSec(lines) > 0) {
-            return true;
-        }
-        for (String line : lines) {
-            String l = line.toLowerCase();
-            if (l.contains("photo") || l.contains("video") || l.contains("gif")
-                    || l.contains("audio") || l.contains("voice") || l.contains("file")
-                    || l.contains(".mp4") || l.contains(".mkv") || l.contains(".pdf")
-                    || l.contains(".zip") || l.contains(".apk") || l.contains(".mp3")) {
-                return true;
-            }
-        }
-        return !lines.isEmpty();
-    }
-
-    private static String firstTitleCandidate(List<String> lines) {
-        if (lines == null) {
-            return "";
-        }
-        for (String line : lines) {
-            for (String piece : line.split("\\n")) {
-                String c = piece.trim();
-                if (c.length() >= 2 && !SmartMatcher.isSubtitleNoise(c)
-                        && SmartMatcher.extractClockTimes(c).isEmpty()) {
-                    return c;
-                }
-            }
-        }
-        return "";
-    }
-
     private static String shortStr(String s, int max) {
         if (s == null) {
             return "";
@@ -1250,6 +1553,7 @@ public class SmartOverlayService extends Service implements Jobs.Listener {
     }
 
     private void removeAllWindows() {
+        closePicker();
         closeMenuPanel();
         safeRemoveView(whiteCircle);
         whiteCircle = null;

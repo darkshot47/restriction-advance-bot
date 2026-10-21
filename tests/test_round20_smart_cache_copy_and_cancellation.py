@@ -89,13 +89,11 @@ def test_smart_feature_button_permissions_white_circle_and_colorful_menu():
     assert '<string name="smart_button">Smart feature</string>' in strings_xml
     assert "android.permission.SYSTEM_ALERT_WINDOW" in manifest
     assert ".SmartOverlayService" in manifest
-    assert ".SmartAccessibilityService" in manifest
     assert "onDoubleTap" in pointer
     assert "MODE_WHITE_CIRCLE" in pointer and "MODE_MENU_ORB" in pointer
-    assert "handleWhiteCircleDoubleTap" in overlay
+    assert "sendCapturedToRememberedDestination" in overlay
     assert "showMenuPanel" in overlay and "closeMenuPanel" in overlay
     assert "ACTION_MANAGE_OVERLAY_PERMISSION" in sheet
-    assert "ACTION_ACCESSIBILITY_SETTINGS" in sheet
 
 
 def test_destination_profile_avatars_and_send_permission_filtering():
@@ -146,10 +144,72 @@ def test_upload_watch_uses_remote_uploaded_size_and_never_freezes_at_100_percent
 def test_smart_floating_menu_is_quarter_size_glitch_free_and_clean_dot_count():
     overlay = _read(JAVA_DIR / "SmartOverlayService.java")
     pointer = _read(JAVA_DIR / "SmartPointerView.java")
-    access = _read(JAVA_DIR / "SmartAccessibilityService.java")
     assert "dm.widthPixels * 0.50f" in overlay
     assert "WindowManager.LayoutParams.MATCH_PARENT" not in overlay
     assert "Jobs.get(this).size()" not in overlay
+    assert "captured.size()" in overlay
     assert "ValueAnimator.INFINITE" not in pointer
-    assert "hasChatHeaderSubtitle" in access
+
+
+def test_smart_feature_needs_no_restricted_permissions_for_play_protect():
+    """Play Protect blocks sideloads that ask for Accessibility / specialUse FGS."""
+    manifest = _read(ANDROID_MAIN / "AndroidManifest.xml")
+    assert "BIND_ACCESSIBILITY_SERVICE" not in manifest
+    assert "accessibilityservice" not in manifest
+    assert ".SmartAccessibilityService" not in manifest
+    assert "specialUse" not in manifest
+    assert "FOREGROUND_SERVICE_SPECIAL_USE" not in manifest
+    assert 'android:foregroundServiceType="dataSync"' in manifest
+    assert "android.permission.SYSTEM_ALERT_WINDOW" in manifest
+    assert not (JAVA_DIR / "SmartAccessibilityService.java").exists()
+    assert not (RES_DIR / "xml" / "smart_accessibility.xml").exists()
+    sheet = _read(JAVA_DIR / "SmartFeatureSheet.java")
+    assert "ACTION_ACCESSIBILITY_SETTINGS" not in sheet
+    overlay = _read(JAVA_DIR / "SmartOverlayService.java")
+    assert "SmartAccessibilityService" not in overlay
+
+
+def test_exact_file_picker_reads_telegram_servers_not_the_screen():
+    overlay = _read(JAVA_DIR / "SmartOverlayService.java")
+    tg_source = _read(JAVA_DIR / "Tg.java")
+    # Screen reading is gone; Telegram itself lists the chat's media by id.
+    assert "listChatMedia(" in tg_source
+    assert "new TdApi.GetChatHistory(" in tg_source
+    assert "public void openPicker()" in overlay
+    assert "resolveAnyChat(" in overlay
+    assert "commitPickerSelection(" in overlay
+    # The picker never trusts a guessed or auto-prefixed username.
+    assert 'link.error = "paste a direct Telegram link (https://t.me/...) or @username"' in _read(
+        JAVA_DIR / "TgLink.java")
+    assert 'value.startsWith("@")' in _read(JAVA_DIR / "TgLink.java")
+
+
+def test_reacting_to_a_post_captures_that_exact_post():
+    tg_source = _read(JAVA_DIR / "Tg.java")
+    overlay = _read(JAVA_DIR / "SmartOverlayService.java")
+    assert "interface SmartReactionListener" in tg_source
+    assert "TdApi.UpdateMessageInteractionInfo" in tg_source
+    assert "isChosen" in tg_source
+    assert "setSmartReactionListener(" in overlay
+    assert "onReactedMedia(" in tg_source
+
+
+def test_switching_accounts_reloads_chats_and_never_reuses_old_session():
+    tg_source = _read(JAVA_DIR / "Tg.java")
+    overlay = _read(JAVA_DIR / "SmartOverlayService.java")
+    assert "public void addStateWatcher(" in tg_source
+    assert "public void removeStateWatcher(" in tg_source
+    assert "Tg.STATE_NONE.equals(state)" in overlay
+    assert "Tg.STATE_READY.equals(state)" in overlay
+    assert "tell(STATE_NONE, null);" in tg_source
+    assert "new TdApi.LoadChats(new TdApi.ChatListArchive(), limit)" in tg_source
+    assert "new TdApi.GetChats(new TdApi.ChatListArchive(), limit)" in tg_source
+
+
+def test_version_is_2_3_2_with_new_version_code():
+    gradle = _read(REPO_ROOT / "android" / "app" / "build.gradle")
+    vmore = _read(JAVA_DIR / "Vmore.java")
+    assert "versionCode 19" in gradle
+    assert 'versionName "2.3.2"' in gradle
+    assert 'VERSION = "2.3.2"' in vmore
 

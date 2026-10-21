@@ -631,8 +631,7 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
             }
         }
         if (usable.isEmpty()) {
-            Ui.toast(this, notes.length() == 0 ? getString(R.string.home_no_link)
-                    : notes.toString().trim());
+            Ui.toast(this, "Paste a direct Telegram link (https://t.me/...) or @username");
             return;
         }
         if (!notes.toString().trim().isEmpty()) {

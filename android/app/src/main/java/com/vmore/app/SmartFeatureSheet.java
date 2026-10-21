@@ -20,10 +20,10 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
-// Interactive setup & step-by-step launcher dialog opened from the top-left
-// "Smart feature" button in MainActivity. Checks and requests required overlay
-// and screen-reader permissions, explains every step clearly, and launches or
-// manages SmartOverlayService.
+// Launcher dialog opened from the top-left "Smart feature" button in MainActivity.
+// Uses ZERO Play-Protect-restricted permissions (no Accessibility service at all):
+// only standard floating overlay permission so the compact Smart button & white dot
+// float over Telegram across all signed-in accounts.
 public final class SmartFeatureSheet {
 
     private SmartFeatureSheet() {
@@ -54,7 +54,6 @@ public final class SmartFeatureSheet {
         card.setPadding(Ui.dp(activity, 18), Ui.dp(activity, 18),
                 Ui.dp(activity, 18), Ui.dp(activity, 18));
 
-        // Colorful Aurora Header
         LinearLayout hero = new LinearLayout(activity);
         hero.setOrientation(LinearLayout.VERTICAL);
         hero.setBackground(aurora);
@@ -91,7 +90,6 @@ public final class SmartFeatureSheet {
         hero.addView(subtitle);
         card.addView(hero);
 
-        // Permission Row 1: Display over other apps
         final Button overlayBtn = actionChip(activity,
                 activity.getString(R.string.smart_perm_grant), 0xFF2563EB, Color.WHITE);
         overlayBtn.setOnClickListener(v -> openOverlayPermission(activity));
@@ -100,16 +98,6 @@ public final class SmartFeatureSheet {
                 activity.getString(R.string.smart_perm_overlay_hint),
                 overlayBtn));
 
-        // Permission Row 2: Accessibility screen reader
-        final Button accessBtn = actionChip(activity,
-                activity.getString(R.string.smart_perm_grant), 0xFF2563EB, Color.WHITE);
-        accessBtn.setOnClickListener(v -> openAccessibilitySettings(activity));
-        card.addView(permissionCard(activity,
-                activity.getString(R.string.smart_perm_access_title),
-                activity.getString(R.string.smart_perm_access_hint),
-                accessBtn));
-
-        // Full Step-by-Step Guide Card
         LinearLayout guideBox = new LinearLayout(activity);
         guideBox.setOrientation(LinearLayout.VERTICAL);
         GradientDrawable guideBg = new GradientDrawable();
@@ -132,7 +120,6 @@ public final class SmartFeatureSheet {
         guideBox.addView(steps);
         card.addView(guideBox);
 
-        // Primary CTA buttons
         final Button startBtn = new Button(activity);
         startBtn.setAllCaps(false);
         startBtn.setTextSize(15f);
@@ -162,16 +149,12 @@ public final class SmartFeatureSheet {
                     return;
                 }
                 boolean overlayOk = SmartOverlayService.canDrawOverlays(activity);
-                boolean accessOk = SmartAccessibilityService.isEnabled(activity);
                 paintPermButton(activity, overlayBtn, overlayOk);
-                paintPermButton(activity, accessBtn, accessOk);
 
                 boolean active = SmartOverlayService.isRunning();
                 stopBtn.setVisibility(active ? View.VISIBLE : View.GONE);
                 if (!overlayOk) {
                     startBtn.setText(R.string.smart_perm_overlay_title);
-                } else if (!accessOk && !active) {
-                    startBtn.setText(R.string.smart_start);
                 } else {
                     startBtn.setText(active ? R.string.smart_open_menu : R.string.smart_start);
                 }
@@ -182,13 +165,6 @@ public final class SmartFeatureSheet {
         startBtn.setOnClickListener(v -> {
             if (!SmartOverlayService.canDrawOverlays(activity)) {
                 openOverlayPermission(activity);
-                return;
-            }
-            if (!SmartAccessibilityService.isEnabled(activity)) {
-                // Launch the floating overlay AND open Accessibility settings so both permissions are guided cleanly
-                SmartOverlayService.start(activity, false);
-                openAccessibilitySettings(activity);
-                dialog.dismiss();
                 return;
             }
             SmartOverlayService.start(activity, true);
@@ -305,14 +281,6 @@ public final class SmartFeatureSheet {
             } catch (Throwable ignored) {
                 Ui.toast(activity, activity.getString(R.string.smart_need_overlay));
             }
-        }
-    }
-
-    private static void openAccessibilitySettings(Activity activity) {
-        try {
-            activity.startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
-        } catch (Throwable ignored) {
-            Ui.toast(activity, activity.getString(R.string.smart_perm_access_hint));
         }
     }
 }

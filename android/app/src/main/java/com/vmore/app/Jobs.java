@@ -272,6 +272,32 @@ public final class Jobs {
         notifyListeners();
     }
 
+    /**
+     * Stops work that belonged to the account which is no longer signed in.
+     *
+     * Every job holds a chat id and a message id of *one* Telegram session, so
+     * after an account switch those ids mean a different chat or nothing at
+     * all — Telegram would answer "message not found".  Rather than letting a
+     * stale job fail at random, it is cancelled here with the exact reason.
+     */
+    public synchronized int cancelQueuedForAccountSwitch() {
+        int changed = 0;
+        for (QJob job : jobs) {
+            if (QJob.QUEUED.equals(job.stage) || QJob.RESOLVING.equals(job.stage)
+                    || QJob.PAUSED.equals(job.stage)) {
+                job.stage = QJob.CANCELLED;
+                job.error = "the account was switched; this job belonged to the other one";
+                job.note = job.error;
+                changed++;
+            }
+        }
+        if (changed > 0) {
+            persist();
+            notifyListeners();
+        }
+        return changed;
+    }
+
     private void trim() {
         while (jobs.size() > MAX_JOBS) {
             jobs.remove(0);
