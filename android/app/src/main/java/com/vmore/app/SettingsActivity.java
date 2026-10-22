@@ -72,12 +72,7 @@ public class SettingsActivity extends Activity {
         box.removeAllViews();
 
         box.addView(Ui.section(this, getString(R.string.home_send_to)));
-        addRow(R.drawable.ic_chat, Prefs.destTitle(this).isEmpty()
-                        ? getString(R.string.home_no_destination) : Prefs.destTitle(this),
-                "tap to choose the chat that receives every upload",
-                v -> startActivityForResult(
-                        new Intent(this, ChatPickerActivity.class).putExtra("mode", "destination"),
-                        PICK_CHAT));
+        addDestinationRow();
         addSwitch(R.string.settings_ask_every_time, Prefs.askDestination(this),
                 value -> Prefs.setAskDestination(this, value));
 
@@ -137,6 +132,15 @@ public class SettingsActivity extends Activity {
                         render();
                     });
         }
+
+        box.addView(Ui.section(this, getString(R.string.settings_mirror)));
+        addRow(R.drawable.ic_send,
+                Prefs.mirrorEnabled(this)
+                        ? getString(R.string.mirror_on) : getString(R.string.settings_mirror),
+                Prefs.mirrorEnabled(this)
+                        ? mirrorSummary()
+                        : getString(R.string.settings_mirror_hint),
+                v -> startActivity(new Intent(this, MirrorActivity.class)));
 
         box.addView(Ui.section(this, getString(R.string.filters_title)));
         addSwitch(R.string.settings_skip_duplicates, Prefs.skipDuplicates(this),
@@ -268,6 +272,41 @@ public class SettingsActivity extends Activity {
         return fingerprint.isEmpty() ? "" : AppSignature.grouped(fingerprint);
     }
 
+    private void addDestinationRow() {
+        long chatId = Prefs.destChatId(this);
+        String title = Prefs.destTitle(this);
+        View.OnClickListener pick = v -> startActivityForResult(
+                new Intent(this, ChatPickerActivity.class).putExtra("mode", "destination"),
+                PICK_CHAT);
+        if (chatId == 0L || title.isEmpty()) {
+            addRow(R.drawable.ic_chat, getString(R.string.home_no_destination),
+                    "tap to choose the chat that receives every upload", pick);
+            return;
+        }
+        Tg.Chat placeholder = new Tg.Chat();
+        placeholder.id = chatId;
+        placeholder.title = title;
+        final LinearLayout row = Ui.chatRow(this, placeholder,
+                "tap to choose the chat that receives every upload");
+        row.setOnClickListener(pick);
+        Anim.pressible(row);
+        box.addView(row);
+        box.addView(Ui.divider(this));
+        final ImageView avatar = (ImageView) row.getChildAt(0);
+        Tg.get(this).chat(chatId, new Tg.Cb<Tg.Chat>() {
+            @Override
+            public void ok(Tg.Chat value) {
+                if (!isFinishing() && !isDestroyed()) {
+                    Ui.paintChatAvatar(SettingsActivity.this, avatar, value, 44);
+                }
+            }
+
+            @Override
+            public void fail(String message) {
+            }
+        });
+    }
+
     private void addRow(int icon, String title, String subtitle, View.OnClickListener click) {
         View row = Ui.row(this, icon, title, subtitle);
         if (click != null) {
@@ -280,6 +319,16 @@ public class SettingsActivity extends Activity {
 
     private interface Toggle {
         void onChanged(boolean value);
+    }
+
+    /** "Channel A to B", the line under the auto-copy row. */
+    private String mirrorSummary() {
+        String source = Prefs.mirrorSourceTitle(this);
+        String dest = Prefs.mirrorDestTitle(this);
+        if (source == null || source.isEmpty() || dest == null || dest.isEmpty()) {
+            return getString(R.string.settings_mirror_hint);
+        }
+        return source + " to " + dest;
     }
 
     /** "Full speed" or the cap, in the words on the data-saving screen. */

@@ -31,7 +31,11 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
     private static final int REQUEST_SCAN = 102;
 
     private EditText linkField;
+    private android.widget.ImageView destAvatar;
     private TextView destTitle;
+    private View smartFeatureButton;
+    private TextView smartFeatureLabel;
+    private android.animation.ValueAnimator crownAnimator;
     private TextView accountText;
     private Button startButton;
     //: The three switches of the home screen, one per row, exactly as the
@@ -102,7 +106,12 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         askForNotifications();
 
         linkField = findViewById(R.id.linkField);
+        destAvatar = findViewById(R.id.destAvatar);
         destTitle = findViewById(R.id.destTitle);
+        smartFeatureButton = findViewById(R.id.smartFeatureButton);
+        smartFeatureLabel = findViewById(R.id.smartFeatureLabel);
+        crownAnimator = Crown.bind(this, smartFeatureButton,
+                findViewById(R.id.smartFeatureCrown), smartFeatureLabel);
         accountText = findViewById(R.id.accountText);
         startButton = findViewById(R.id.startButton);
         switchUpload = findViewById(R.id.switchUpload);
@@ -131,6 +140,9 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         //: noticed only when looked at.
         StoryRingView profileRing = findViewById(R.id.profileRing);
         profileRing.setTurnSeconds(14f);
+
+        smartFeatureButton.setOnClickListener(v -> SmartFeatureSheet.show(this));
+        Anim.pressible(smartFeatureButton);
 
         findViewById(R.id.themeButton).setOnClickListener(v -> Skin.toggle(this));
         findViewById(R.id.profileBox).setOnClickListener(v ->
@@ -197,6 +209,7 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         Anim.pageIn(findViewById(R.id.destCard));
         Anim.pageIn(findViewById(R.id.inputCard));
         Anim.stagger(recentList);
+        LaunchIntro.playIfNeeded(this, null);
     }
 
     /** Android 13 and newer only show the queue row once this is allowed. */
@@ -231,18 +244,27 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         History.get(this).addListener(this);
         paintAccount();
         paintProfile();
+        paintSmartButton();
         Skin.paintToggle(this, findViewById(R.id.themeButton));
         paintDestination();
         paintOptions();
         paintRecent();
         paintLive();
         paintClipboard();
+        if (crownAnimator != null && !crownAnimator.isStarted()) {
+            crownAnimator.start();
+        }
         handler.post(watcher);
     }
 
     @Override
     protected void onPause() {
         handler.removeCallbacks(watcher);
+        //: The shimmer is decoration, not information: it stops with the
+        //: screen so a backgrounded app never keeps an animator alive.
+        if (crownAnimator != null) {
+            crownAnimator.cancel();
+        }
         Jobs.get(this).removeListener(this);
         History.get(this).removeListener(this);
         super.onPause();
@@ -295,13 +317,47 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         }
     }
 
+    private void paintSmartButton() {
+        if (smartFeatureLabel != null) {
+            smartFeatureLabel.setText(SmartOverlayService.isRunning()
+                    ? R.string.smart_button_on : R.string.smart_button);
+        }
+    }
+
     private void paintDestination() {
         long chatId = Prefs.destChatId(this);
         String title = Prefs.destTitle(this);
         if (chatId == 0L || title.isEmpty()) {
             destTitle.setText(R.string.home_no_destination);
-        } else {
-            destTitle.setText(title);
+            if (destAvatar != null) {
+                destAvatar.setTag(null);
+                destAvatar.setImageResource(R.drawable.ic_chat);
+                destAvatar.setImageTintList(
+                        android.content.res.ColorStateList.valueOf(getColor(R.color.vmore_blue)));
+                destAvatar.setPadding(Ui.dp(this, 10), Ui.dp(this, 10),
+                        Ui.dp(this, 10), Ui.dp(this, 10));
+            }
+            return;
+        }
+        destTitle.setText(title);
+        if (destAvatar != null) {
+            Tg.Chat placeholder = new Tg.Chat();
+            placeholder.id = chatId;
+            placeholder.title = title;
+            Ui.paintChatAvatar(this, destAvatar, placeholder, 42);
+            Tg.get(this).chat(chatId, new Tg.Cb<Tg.Chat>() {
+                @Override
+                public void ok(Tg.Chat value) {
+                    if (!isFinishing() && !isDestroyed()
+                            && Prefs.destChatId(MainActivity.this) == chatId) {
+                        Ui.paintChatAvatar(MainActivity.this, destAvatar, value, 42);
+                    }
+                }
+
+                @Override
+                public void fail(String message) {
+                }
+            });
         }
     }
 
@@ -517,7 +573,8 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
                 ? Ui.stageLabel(stage) : Ui.stageLabel(stage) + ": " + error);
         long done = QueueService.Live.DONE.get();
         long total = QueueService.Live.TOTAL.get();
-        int percent = Format.percent(done, total);
+        int rawPercent = Format.percent(done, total);
+        int percent = QJob.UPLOADING.equals(stage) ? Math.min(99, rawPercent) : rawPercent;
         progressBar.setProgress(total > 0 ? percent : 0);
         progressBar.setIndeterminate(total <= 0);
         StringBuilder builder = new StringBuilder();
@@ -527,7 +584,8 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         } else if (done > 0) {
             builder.append(Format.size(done));
         }
-        if (QueueService.Live.SPEED > 0 && QJob.DOWNLOADING.equals(stage)) {
+        if (QueueService.Live.SPEED > 0
+                && (QJob.DOWNLOADING.equals(stage) || QJob.UPLOADING.equals(stage))) {
             builder.append(" • ").append(Format.speed(QueueService.Live.SPEED));
             String eta = Format.eta(done, total, QueueService.Live.SPEED);
             if (!eta.isEmpty()) {
@@ -586,8 +644,7 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
             }
         }
         if (usable.isEmpty()) {
-            Ui.toast(this, notes.length() == 0 ? getString(R.string.home_no_link)
-                    : notes.toString().trim());
+            Ui.toast(this, "Paste a direct Telegram link (https://t.me/...) or @username");
             return;
         }
         if (!notes.toString().trim().isEmpty()) {

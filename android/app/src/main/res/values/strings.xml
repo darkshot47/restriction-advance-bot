@@ -339,4 +339,44 @@
     <string name="common_audio">audio</string>
     <string name="common_notification_channel">Downloads and uploads</string>
     <string name="common_notification_channel_done">Finished jobs</string>
+    <string name="common_notification_channel_smart">Smart floating controls</string>
+
+    <!-- Smart feature -->
+    <string name="smart_button">Smart feature</string>
+    <string name="smart_button_on">Smart feature • On</string>
+    <string name="smart_service_label">Vmore Smart Feature</string>
+    <string name="smart_setup_title">Smart feature</string>
+    <string name="smart_setup_subtitle">Float Vmore right above Telegram with a compact mini menu and white dot.</string>
+    <string name="smart_guide_steps">1. Tap Start Smart feature to float the compact Vmore button and white dot on top of Telegram.\n\n2. To capture any exact file: either double-tap (react) on that post directly inside Telegram, OR double-tap Vmore\'s white dot to pick the exact file by name and size from any chat or channel (including restricted &amp; archived channels across all signed-in accounts).\n\n3. Tap your destination channel avatar (or double-tap the white dot) to send immediately — Vmore tries zero-data instant server copy first and automatically falls back to cache upload when forwarding is restricted.</string>
+    <string name="smart_perm_overlay_title">Display over other apps</string>
+    <string name="smart_perm_overlay_hint">Allows the compact Smart button and white dot to float above Telegram.</string>
+    <string name="smart_perm_granted">Granted</string>
+    <string name="smart_perm_grant">Allow</string>
+    <string name="smart_start">Start Smart feature</string>
+    <string name="smart_stop">Turn off Smart feature</string>
+    <string name="smart_open_menu">Show floating menu</string>
+    <string name="smart_started">Smart feature is active on screen</string>
+    <string name="smart_stopped">Smart feature turned off</string>
+    <string name="smart_need_overlay">Allow Display over other apps first</string>
+    <string name="smart_step_ready">Double-tap (react) any post in Telegram or double-tap the white dot to pick a file.</string>
+    <string name="common_copying">Copying instantly</string>
+    <string name="intro_subtitle">Instant Copy and Smart Transfer Engine</string>
+    <string name="chats_no_send_permission">You do not have permission to send messages in that chat</string>
+    <!-- Auto-copy (mirror) -->
+    <string name="settings_mirror">Auto-copy new posts</string>
+    <string name="settings_mirror_hint">Copy every new post of one channel into another, automatically</string>
+    <string name="mirror_title">Auto-copy</string>
+    <string name="mirror_section">Source and destination</string>
+    <string name="mirror_switch">Copy new posts automatically</string>
+    <string name="mirror_source">Source channel</string>
+    <string name="mirror_dest">Destination channel</string>
+    <string name="mirror_pick">Tap to pick</string>
+    <string name="mirror_need_both">Pick both a source and a destination first</string>
+    <string name="mirror_on">Auto-copy is on</string>
+    <string name="mirror_off">Auto-copy is off</string>
+    <string name="mirror_hint">Vmore looks at the source twice an hour and copies only posts newer than the last one it sent — never the old back catalogue. Your file filters, send mode and delete-local setting apply to every copied post.</string>
+    <string name="mirror_check_now">Check now</string>
+    <string name="mirror_checking">Checking the source channel now</string>
+    <string name="mirror_mark_now">Start from the newest post</string>
+    <string name="mirror_marked">The next copy starts from now</string>
 </resources>

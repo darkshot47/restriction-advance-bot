@@ -52,6 +52,7 @@ public final class Jobs {
 
     private final Context app;
     private final List<QJob> jobs = new ArrayList<>();
+    private final List<String> removedIds = new ArrayList<>();
     private final List<Listener> listeners = new CopyOnWriteArrayList<>();
     private final ExecutorService writer = Executors.newSingleThreadExecutor();
     private volatile boolean pausedAll;
@@ -80,14 +81,28 @@ public final class Jobs {
         return null;
     }
 
-    /** The job the engine should run now: the oldest queued one. */
+    /** The job the engine should run now: the oldest queued one that is due. */
     public synchronized QJob nextQueued() {
+        long now = System.currentTimeMillis();
         for (QJob job : jobs) {
-            if (QJob.QUEUED.equals(job.stage)) {
+            if (QJob.QUEUED.equals(job.stage) && job.notBefore <= now) {
                 return job;
             }
         }
         return null;
+    }
+
+    /** The soonest moment a queued job is allowed to run (0 when none waits). */
+    public synchronized long nextDueAt() {
+        long soonest = 0L;
+        for (QJob job : jobs) {
+            if (QJob.QUEUED.equals(job.stage) && job.notBefore > 0L) {
+                if (soonest == 0L || job.notBefore < soonest) {
+                    soonest = job.notBefore;
+                }
+            }
+        }
+        return soonest;
     }
 
     public synchronized QJob active() {
@@ -191,6 +206,7 @@ public final class Jobs {
         if (job.id == null || job.id.isEmpty()) {
             job.id = UUID.randomUUID().toString();
         }
+        removedIds.remove(job.id);
         long now = System.currentTimeMillis();
         if (job.created == 0L) {
             job.created = now;
@@ -209,7 +225,14 @@ public final class Jobs {
         }
     }
 
+    public synchronized boolean wasRemoved(String id) {
+        return id != null && removedIds.contains(id);
+    }
+
     public synchronized void update(QJob job) {
+        if (job == null || removedIds.contains(job.id)) {
+            return;
+        }
         job.updated = System.currentTimeMillis();
         persist();
         notifyListeners();
@@ -220,10 +243,27 @@ public final class Jobs {
         notifyListeners();
     }
 
-    public synchronized void remove(String id) {
-        jobs.removeIf(job -> job.id.equals(id));
+    public synchronized QJob removeAndGet(String id) {
+        QJob found = null;
+        for (int index = 0; index < jobs.size(); index++) {
+            if (jobs.get(index).id.equals(id)) {
+                found = jobs.remove(index);
+                break;
+            }
+        }
+        if (id != null && !id.isEmpty()) {
+            removedIds.add(id);
+            while (removedIds.size() > 500) {
+                removedIds.remove(0);
+            }
+        }
         persist();
         notifyListeners();
+        return found;
+    }
+
+    public synchronized void remove(String id) {
+        removeAndGet(id);
     }
 
     /** Finished and cancelled jobs leave the queue; their record is in History. */
@@ -244,6 +284,32 @@ public final class Jobs {
         pausedAll = false;
         persist();
         notifyListeners();
+    }
+
+    /**
+     * Stops work that belonged to the account which is no longer signed in.
+     *
+     * Every job holds a chat id and a message id of *one* Telegram session, so
+     * after an account switch those ids mean a different chat or nothing at
+     * all — Telegram would answer "message not found".  Rather than letting a
+     * stale job fail at random, it is cancelled here with the exact reason.
+     */
+    public synchronized int cancelQueuedForAccountSwitch() {
+        int changed = 0;
+        for (QJob job : jobs) {
+            if (QJob.QUEUED.equals(job.stage) || QJob.RESOLVING.equals(job.stage)
+                    || QJob.PAUSED.equals(job.stage)) {
+                job.stage = QJob.CANCELLED;
+                job.error = "the account was switched; this job belonged to the other one";
+                job.note = job.error;
+                changed++;
+            }
+        }
+        if (changed > 0) {
+            persist();
+            notifyListeners();
+        }
+        return changed;
     }
 
     private void trim() {

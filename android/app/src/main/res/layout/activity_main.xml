@@ -113,46 +113,81 @@
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="4dp"
+                android:layout_marginTop="8dp"
                 android:orientation="horizontal"
-                android:gravity="end|center_vertical">
+                android:gravity="center_vertical">
+
+                <LinearLayout
+                    android:id="@+id/smartFeatureButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="38dp"
+                    android:minHeight="38dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingLeft="11dp"
+                    android:paddingRight="13dp"
+                    android:background="@drawable/bg_chip_active"
+                    android:contentDescription="@string/smart_button">
+
+                    <ImageView
+                        android:id="@+id/smartFeatureCrown"
+                        android:layout_width="19dp"
+                        android:layout_height="19dp"
+                        android:src="@drawable/ic_crown"
+                        android:contentDescription="@string/smart_button" />
+
+                    <TextView
+                        android:id="@+id/smartFeatureLabel"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginLeft="6dp"
+                        android:textSize="13sp"
+                        android:textStyle="bold"
+                        android:letterSpacing="0.01"
+                        android:text="@string/smart_button" />
+                </LinearLayout>
+
+                <View
+                    android:layout_width="0dp"
+                    android:layout_height="1dp"
+                    android:layout_weight="1" />
 
                 <ImageView
                     android:id="@+id/themeButton"
-                    android:layout_width="42dp"
-                    android:layout_height="42dp"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
                     android:padding="9dp"
                     android:src="@drawable/ic_moon"
                     android:contentDescription="@string/home_nav_theme" />
 
                 <ImageView
                     android:id="@+id/queueButton"
-                    android:layout_width="42dp"
-                    android:layout_height="42dp"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
                     android:padding="9dp"
                     android:src="@drawable/ic_queue"
                     android:contentDescription="@string/home_nav_queue" />
 
                 <ImageView
                     android:id="@+id/historyButton"
-                    android:layout_width="42dp"
-                    android:layout_height="42dp"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
                     android:padding="9dp"
                     android:src="@drawable/ic_history"
                     android:contentDescription="@string/home_nav_history" />
 
                 <ImageView
                     android:id="@+id/filesButton"
-                    android:layout_width="42dp"
-                    android:layout_height="42dp"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
                     android:padding="9dp"
                     android:src="@drawable/ic_folder"
                     android:contentDescription="@string/files_title" />
 
                 <ImageView
                     android:id="@+id/settingsButton"
-                    android:layout_width="42dp"
-                    android:layout_height="42dp"
+                    android:layout_width="40dp"
+                    android:layout_height="40dp"
                     android:padding="9dp"
                     android:src="@drawable/ic_settings"
                     android:contentDescription="@string/home_nav_settings" />
@@ -171,9 +206,13 @@
             android:padding="16dp">
 
             <ImageView
-                android:layout_width="24dp"
-                android:layout_height="24dp"
+                android:id="@+id/destAvatar"
+                android:layout_width="42dp"
+                android:layout_height="42dp"
                 android:layout_marginRight="14dp"
+                android:background="@drawable/bg_avatar"
+                android:padding="9dp"
+                android:scaleType="fitCenter"
                 android:src="@drawable/ic_chat"
                 android:contentDescription="@string/home_send_to" />
 

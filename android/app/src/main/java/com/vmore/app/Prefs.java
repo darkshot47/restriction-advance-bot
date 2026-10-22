@@ -23,6 +23,13 @@ public final class Prefs {
     private static final String KEY_DEST_ID = "dest_chat_id";
     private static final String KEY_DEST_TITLE = "dest_title";
     private static final String KEY_ASK_DEST = "ask_destination";
+    /** Auto-copy (mirroring) is per account: a chat id only exists in one session. */
+    private static final String KEY_MIRROR_ON = "mirror_on";
+    private static final String KEY_MIRROR_SOURCE = "mirror_source_id";
+    private static final String KEY_MIRROR_SOURCE_TITLE = "mirror_source_title";
+    private static final String KEY_MIRROR_DEST = "mirror_dest_id";
+    private static final String KEY_MIRROR_DEST_TITLE = "mirror_dest_title";
+    private static final String KEY_MIRROR_LAST = "mirror_last_message_id";
 
     private static final String KEY_AUTO_UPLOAD = "auto_upload";
     private static final String KEY_AUTO_DELETE = "auto_delete_local";
@@ -492,19 +499,101 @@ public final class Prefs {
 
     // -------------------------------------------------------- destination //
 
+    /**
+     * The destination is remembered per account, never per phone.
+     *
+     * A chat id only means something inside the session that saw it: the
+     * channel saved on account 1 is a different chat — or no chat at all — on
+     * account 2.  Keeping one number for the whole phone is exactly how a file
+     * ends up "not found" after a switch, so every slot keeps its own.
+     */
     public static long destChatId(Context context) {
-        return prefs(context).getLong(KEY_DEST_ID, 0L);
+        SharedPreferences store = prefs(context);
+        long saved = store.getLong(KEY_DEST_ID + "_s" + activeSlot(context), 0L);
+        if (saved != 0L) {
+            return saved;
+        }
+        //: Older builds saved one destination for the phone; it belongs to the
+        //: first account, which is where it is copied now.
+        if (activeSlot(context) == 1) {
+            long legacy = store.getLong(KEY_DEST_ID, 0L);
+            if (legacy != 0L) {
+                saveDestination(context, legacy, store.getString(KEY_DEST_TITLE, ""));
+                return legacy;
+            }
+        }
+        return 0L;
     }
 
     public static String destTitle(Context context) {
-        return prefs(context).getString(KEY_DEST_TITLE, "");
+        return prefs(context).getString(KEY_DEST_TITLE + "_s" + activeSlot(context), "");
     }
 
     public static void saveDestination(Context context, long chatId, String title) {
         prefs(context).edit()
-                .putLong(KEY_DEST_ID, chatId)
-                .putString(KEY_DEST_TITLE, title == null ? "" : title)
+                .putLong(KEY_DEST_ID + "_s" + activeSlot(context), chatId)
+                .putString(KEY_DEST_TITLE + "_s" + activeSlot(context),
+                        title == null ? "" : title)
                 .apply();
+    }
+
+    // ------------------------------------------------------------- mirroring //
+
+    /** Copy new posts of one source chat into one destination, automatically. */
+    public static boolean mirrorEnabled(Context context) {
+        return prefs(context).getBoolean(slotKey(context, KEY_MIRROR_ON), false);
+    }
+
+    public static void setMirrorEnabled(Context context, boolean value) {
+        prefs(context).edit().putBoolean(slotKey(context, KEY_MIRROR_ON), value).apply();
+    }
+
+    public static long mirrorSourceId(Context context) {
+        return prefs(context).getLong(slotKey(context, KEY_MIRROR_SOURCE), 0L);
+    }
+
+    public static String mirrorSourceTitle(Context context) {
+        return prefs(context).getString(slotKey(context, KEY_MIRROR_SOURCE_TITLE), "");
+    }
+
+    public static long mirrorDestId(Context context) {
+        return prefs(context).getLong(slotKey(context, KEY_MIRROR_DEST), 0L);
+    }
+
+    public static String mirrorDestTitle(Context context) {
+        return prefs(context).getString(slotKey(context, KEY_MIRROR_DEST_TITLE), "");
+    }
+
+    /** The newest source message already copied, so nothing is sent twice. */
+    public static long mirrorLastId(Context context) {
+        return prefs(context).getLong(slotKey(context, KEY_MIRROR_LAST), 0L);
+    }
+
+    public static void setMirrorLastId(Context context, long messageId) {
+        prefs(context).edit().putLong(slotKey(context, KEY_MIRROR_LAST), messageId).apply();
+    }
+
+    public static void saveMirror(Context context, long sourceId, String sourceTitle,
+                                  long destId, String destTitle) {
+        prefs(context).edit()
+                .putLong(slotKey(context, KEY_MIRROR_SOURCE), sourceId)
+                .putString(slotKey(context, KEY_MIRROR_SOURCE_TITLE),
+                        sourceTitle == null ? "" : sourceTitle)
+                .putLong(slotKey(context, KEY_MIRROR_DEST), destId)
+                .putString(slotKey(context, KEY_MIRROR_DEST_TITLE),
+                        destTitle == null ? "" : destTitle)
+                .apply();
+    }
+
+    /**
+     * Starts the mirror from now on.
+     *
+     * The newest message in the source becomes the starting line, so switching
+     * auto-copy on never floods a chat with the source's whole back catalogue;
+     * the user picks an older starting point from the mirror screen instead.
+     */
+    public static void setMirrorStart(Context context, long newestMessageId) {
+        setMirrorLastId(context, newestMessageId);
     }
 
     public static boolean askDestination(Context context) {

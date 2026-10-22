@@ -14,6 +14,7 @@ public final class QJob {
 
     public static final String QUEUED = "queued";
     public static final String RESOLVING = "resolving";
+    public static final String COPYING = "copying";
     public static final String DOWNLOADING = "downloading";
     public static final String UPLOADING = "uploading";
     public static final String DONE = "done";
@@ -59,6 +60,7 @@ public final class QJob {
     public long done;
     public long uploaded;
     public int fileId;
+    public String remoteFileId = "";
     public String path = "";
     public String caption = "";
     public long durationSec;
@@ -69,6 +71,14 @@ public final class QJob {
     public long created;
     public long updated;
     public int attempts;
+    /**
+     * Telegram's own "come back later" (FLOOD_WAIT).
+     *
+     * The queue never fails a job for asking to slow down: it parks the job
+     * until this moment and shows the countdown, which turns a scary red error
+     * into a wait the user can actually see the end of.
+     */
+    public long notBefore;
 
     /**
      * Per-batch rules, carried by every job of the batch: which kinds to keep,
@@ -109,13 +119,14 @@ public final class QJob {
     }
 
     public boolean isActive() {
-        return RESOLVING.equals(stage) || DOWNLOADING.equals(stage) || UPLOADING.equals(stage);
+        return RESOLVING.equals(stage) || COPYING.equals(stage)
+                || DOWNLOADING.equals(stage) || UPLOADING.equals(stage);
     }
 
     public int percent() {
         if (UPLOADING.equals(stage)) {
             long total = size > 0 ? size : uploaded;
-            return Format.percent(uploaded, total);
+            return Math.min(99, Format.percent(uploaded, total));
         }
         return Format.percent(done, size);
     }
@@ -157,6 +168,7 @@ public final class QJob {
             json.put("done", done);
             json.put("uploaded", uploaded);
             json.put("file_id", fileId);
+            json.put("remote_file_id", remoteFileId);
             json.put("path", path);
             json.put("caption", caption);
             json.put("duration", durationSec);
@@ -167,6 +179,7 @@ public final class QJob {
             json.put("created", created);
             json.put("updated", updated);
             json.put("attempts", attempts);
+            json.put("not_before", notBefore);
             json.put("only_kinds", onlyKinds);
             json.put("min_size", minSize);
             json.put("max_size", maxSize);
@@ -202,6 +215,7 @@ public final class QJob {
         job.done = json.optLong("done", 0L);
         job.uploaded = json.optLong("uploaded", 0L);
         job.fileId = json.optInt("file_id", 0);
+        job.remoteFileId = json.optString("remote_file_id", "");
         job.path = json.optString("path", "");
         job.caption = json.optString("caption", "");
         job.durationSec = json.optLong("duration", 0L);
@@ -212,6 +226,7 @@ public final class QJob {
         job.created = json.optLong("created", 0L);
         job.updated = json.optLong("updated", 0L);
         job.attempts = json.optInt("attempts", 0);
+        job.notBefore = json.optLong("not_before", 0L);
         job.onlyKinds = json.optString("only_kinds", "");
         job.minSize = json.optLong("min_size", 0L);
         job.maxSize = json.optLong("max_size", 0L);
