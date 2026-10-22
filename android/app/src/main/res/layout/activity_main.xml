@@ -117,15 +117,35 @@
                 android:orientation="horizontal"
                 android:gravity="center_vertical">
 
-                <Button
+                <LinearLayout
                     android:id="@+id/smartFeatureButton"
                     android:layout_width="wrap_content"
                     android:layout_height="38dp"
                     android:minHeight="38dp"
-                    android:paddingLeft="13dp"
+                    android:gravity="center_vertical"
+                    android:orientation="horizontal"
+                    android:paddingLeft="11dp"
                     android:paddingRight="13dp"
-                    style="@style/VmoreChipActive"
-                    android:text="@string/smart_button" />
+                    android:background="@drawable/bg_chip_active"
+                    android:contentDescription="@string/smart_button">
+
+                    <ImageView
+                        android:id="@+id/smartFeatureCrown"
+                        android:layout_width="19dp"
+                        android:layout_height="19dp"
+                        android:src="@drawable/ic_crown"
+                        android:contentDescription="@string/smart_button" />
+
+                    <TextView
+                        android:id="@+id/smartFeatureLabel"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginLeft="6dp"
+                        android:textSize="13sp"
+                        android:textStyle="bold"
+                        android:letterSpacing="0.01"
+                        android:text="@string/smart_button" />
+                </LinearLayout>
 
                 <View
                     android:layout_width="0dp"

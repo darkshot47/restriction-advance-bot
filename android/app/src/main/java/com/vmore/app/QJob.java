@@ -71,6 +71,14 @@ public final class QJob {
     public long created;
     public long updated;
     public int attempts;
+    /**
+     * Telegram's own "come back later" (FLOOD_WAIT).
+     *
+     * The queue never fails a job for asking to slow down: it parks the job
+     * until this moment and shows the countdown, which turns a scary red error
+     * into a wait the user can actually see the end of.
+     */
+    public long notBefore;
 
     /**
      * Per-batch rules, carried by every job of the batch: which kinds to keep,
@@ -171,6 +179,7 @@ public final class QJob {
             json.put("created", created);
             json.put("updated", updated);
             json.put("attempts", attempts);
+            json.put("not_before", notBefore);
             json.put("only_kinds", onlyKinds);
             json.put("min_size", minSize);
             json.put("max_size", maxSize);
@@ -217,6 +226,7 @@ public final class QJob {
         job.created = json.optLong("created", 0L);
         job.updated = json.optLong("updated", 0L);
         job.attempts = json.optInt("attempts", 0);
+        job.notBefore = json.optLong("not_before", 0L);
         job.onlyKinds = json.optString("only_kinds", "");
         job.minSize = json.optLong("min_size", 0L);
         job.maxSize = json.optLong("max_size", 0L);

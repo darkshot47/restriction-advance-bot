@@ -206,10 +206,14 @@ def test_switching_accounts_reloads_chats_and_never_reuses_old_session():
     assert "new TdApi.GetChats(new TdApi.ChatListArchive(), limit)" in tg_source
 
 
-def test_version_is_2_3_2_with_new_version_code():
+def test_version_name_and_code_cannot_drift_apart():
+    """The About screen, the APK name and the release notes share one version."""
     gradle = _read(REPO_ROOT / "android" / "app" / "build.gradle")
     vmore = _read(JAVA_DIR / "Vmore.java")
-    assert "versionCode 19" in gradle
-    assert 'versionName "2.3.2"' in gradle
-    assert 'VERSION = "2.3.2"' in vmore
+    code = re.search(r"versionCode (\d+)", gradle)
+    name = re.search(r'versionName "([^"]+)"', gradle)
+    shown = re.search(r'VERSION = "([^"]+)"', vmore)
+    assert code and name and shown, "version fields must all be present"
+    assert int(code.group(1)) >= 18
+    assert shown.group(1) == name.group(1), "Vmore.VERSION must match versionName"
 

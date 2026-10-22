@@ -408,6 +408,17 @@ public class QueueService extends Service {
             if (!QJob.FAILED.equals(job.stage)) {
                 return;
             }
+            long flood = floodSeconds(lastFailure, job.error);
+            if (flood > 0L) {
+                //: Asking to slow down is not a failure: the job keeps its
+                //: place and waits exactly as long as Telegram asked.
+                waitOutFlood(jobs, job, flood);
+                if (cancelled.get() || jobs.pausedAll() || shuttingDown) {
+                    return;
+                }
+                attempt = Math.max(0, attempt - 1);
+                continue;
+            }
             boolean staleReference = job.fileId != 0;
             boolean again = attempt < MAX_ATTEMPTS && !cancelled.get() && !jobs.pausedAll()
                     && worthRetrying(lastFailure, job.error, staleReference);
@@ -431,6 +442,73 @@ public class QueueService extends Service {
             postProgress(false);
             sleep(RETRY_WAIT_MS * attempt);
         }
+    }
+
+
+    /** How long Telegram asked this job to wait, in seconds (0 when it did not). */
+    private static long floodSeconds(Exception failure, String message) {
+        long seconds = 0L;
+        if (failure instanceof Tg.Failure) {
+            seconds = Retry.floodSeconds(((Tg.Failure) failure).raw);
+        }
+        if (seconds == 0L) {
+            seconds = Retry.floodSeconds(message);
+        }
+        return seconds;
+    }
+
+    /**
+     * Parks a job for the whole flood window, with the countdown on screen.
+     *
+     * The wait happens here rather than in a red error so the queue never
+     * forgets the job and the user can see the seconds actually going down.
+     */
+    private void waitOutFlood(Jobs jobs, QJob job, long seconds) {
+        long until = System.currentTimeMillis() + seconds * 1000L;
+        job.stage = QJob.QUEUED;
+        job.notBefore = until;
+        job.error = "";
+        jobs.update(job);
+        Log.step(this, "job " + job.id + " waiting out a flood wait of "
+                + seconds + "s");
+        while (!shuttingDown && !cancelled.get() && !jobs.pausedAll()
+                && !jobs.wasRemoved(job.id) && System.currentTimeMillis() < until) {
+            long left = Math.max(0L, (until - System.currentTimeMillis()) / 1000L);
+            Live.STAGE = "";
+            Live.RUNNING.set(true);
+            Live.NAME = "Telegram asked to wait " + left + "s";
+            Live.ETA_MS = until - System.currentTimeMillis();
+            postProgress(false);
+            sleep(Math.min(1000L, Math.max(120L, until - System.currentTimeMillis())));
+        }
+        job.notBefore = 0L;
+        if (!jobs.wasRemoved(job.id)) {
+            jobs.update(job);
+        }
+    }
+
+    /**
+     * A finished download must really hold bytes before it is uploaded.
+     *
+     * A transfer killed at the wrong moment can leave a 0 byte file in cache
+     * while the queue still believes it succeeded; sending that would upload an
+     * empty file and the receiver would see a broken message.
+     */
+    private boolean fileLooksEmpty(QJob job) {
+        if (job.path == null || job.path.isEmpty()) {
+            return true;
+        }
+        File file = new File(job.path);
+        if (!file.exists()) {
+            return true;
+        }
+        long length = file.length();
+        if (length <= 0L) {
+            return true;
+        }
+        //: A known size that does not match is just as unusable — but only when
+        //: Telegram actually told us the size.
+        return job.size > 0L && length + 1024L < job.size;
     }
 
     private void hold(String reason) {
@@ -597,6 +675,18 @@ public class QueueService extends Service {
             job.size = job.size > 0 ? job.size : new File(stagedPath).length();
             job.done = job.size;
             Live.DONE.set(job.done);
+
+            if (fileLooksEmpty(job)) {
+                //: Drop the hollow file and let the retry rule download it
+                //: again, instead of uploading an empty message.
+                File hollow = new File(stagedPath);
+                long ignored = hollow.length();
+                job.path = "";
+                job.done = 0L;
+                throw new Tg.Failure("the downloaded file arrived empty ("
+                        + Format.size(ignored) + "); downloading it again",
+                        "empty download", true);
+            }
 
             if (job.uploadAfter && job.destChatId != 0L) {
                 job.stage = QJob.UPLOADING;

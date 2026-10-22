@@ -50,12 +50,14 @@ public class ChatPickerActivity extends Activity {
         rememberSwitch = findViewById(R.id.rememberSwitch);
 
         TextView title = findViewById(R.id.chatsTitle);
-        title.setText("scan".equals(mode) ? R.string.chats_scan : R.string.chats_title);
+        title.setText("scan".equals(mode) ? R.string.chats_scan
+                : "mirror_source".equals(mode) ? R.string.mirror_source
+                : R.string.chats_title);
 
         ImageView back = findViewById(R.id.backButton);
         back.setOnClickListener(v -> finish());
 
-        if ("scan".equals(mode)) {
+        if ("scan".equals(mode) || "mirror_source".equals(mode)) {
             rememberSwitch.setVisibility(View.GONE);
         } else {
             rememberSwitch.setChecked(true);
@@ -170,7 +172,7 @@ public class ChatPickerActivity extends Activity {
     }
 
     private void choose(Tg.Chat chat) {
-        if (!"scan".equals(mode) && !chat.canSend) {
+        if (!"scan".equals(mode) && !"mirror_source".equals(mode) && !chat.canSend) {
             Ui.toast(this, getString(R.string.chats_no_send_permission));
             return;
         }
@@ -188,7 +190,8 @@ public class ChatPickerActivity extends Activity {
             @Override
             public void ok(Tg.Chat value) {
                 progress.setVisibility(View.GONE);
-                if (!"scan".equals(mode) && !value.canSend) {
+                if (!"scan".equals(mode) && !"mirror_source".equals(mode)
+                        && !value.canSend) {
                     Ui.toast(ChatPickerActivity.this,
                             getString(R.string.chats_no_send_permission));
                     return;

@@ -81,14 +81,28 @@ public final class Jobs {
         return null;
     }
 
-    /** The job the engine should run now: the oldest queued one. */
+    /** The job the engine should run now: the oldest queued one that is due. */
     public synchronized QJob nextQueued() {
+        long now = System.currentTimeMillis();
         for (QJob job : jobs) {
-            if (QJob.QUEUED.equals(job.stage)) {
+            if (QJob.QUEUED.equals(job.stage) && job.notBefore <= now) {
                 return job;
             }
         }
         return null;
+    }
+
+    /** The soonest moment a queued job is allowed to run (0 when none waits). */
+    public synchronized long nextDueAt() {
+        long soonest = 0L;
+        for (QJob job : jobs) {
+            if (QJob.QUEUED.equals(job.stage) && job.notBefore > 0L) {
+                if (soonest == 0L || job.notBefore < soonest) {
+                    soonest = job.notBefore;
+                }
+            }
+        }
+        return soonest;
     }
 
     public synchronized QJob active() {

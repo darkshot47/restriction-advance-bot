@@ -66,6 +66,42 @@ final class Retry {
     }
 
     /**
+     * Telegram's "come back in N seconds", in seconds, or 0 when it is not a
+     * flood wait at all.
+     *
+     * The number is read out of `FLOOD_WAIT_42` — and out of the friendlier
+     * sentence the app builds around it — because waiting exactly as long as
+     * Telegram asked is the only way to make the next attempt land.
+     */
+    static long floodSeconds(String reason) {
+        if (reason == null || reason.isEmpty()) {
+            return 0L;
+        }
+        String lower = reason.toLowerCase(Locale.US);
+        if (!lower.contains("flood_wait") && !lower.contains("flood wait")
+                && !lower.contains("too many requests") && !lower.contains("asked to wait")
+                && !lower.contains("slow down")) {
+            return 0L;
+        }
+        String digits = "";
+        for (String token : reason.split("[^0-9]+")) {
+            if (!token.isEmpty()) {
+                digits = token;
+                break;
+            }
+        }
+        if (digits.isEmpty()) {
+            //: "Slow down" without a number still deserves a short pause.
+            return 30L;
+        }
+        try {
+            return Math.max(1L, Long.parseLong(digits));
+        } catch (NumberFormatException notANumber) {
+            return 30L;
+        }
+    }
+
+    /**
      * True when Telegram refused to *forward* the message, as opposed to
      * refusing to move it at all.
      *

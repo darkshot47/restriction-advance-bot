@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The Smart feature mark: a small king's crown, drawn as a vector so it stays
+     crisp on every density and can be tinted per skin. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#F59E0B"
+        android:pathData="M4.2,6.1 L7.6,9.4 L12,4.1 L16.4,9.4 L19.8,6.1 L18.3,16.4 L5.7,16.4 Z" />
+    <path
+        android:fillColor="#FDE68A"
+        android:pathData="M5.4,17.6 L18.6,17.6 L18.2,20.1 L5.8,20.1 Z" />
+    <path
+        android:fillColor="#38BDF8"
+        android:pathData="M6.2,7.9 m-0.9,0 a0.9,0.9 0,1 0,1.8 0 a0.9,0.9 0,1 0,-1.8 0" />
+    <path
+        android:fillColor="#A78BFA"
+        android:pathData="M12,4.1 m-1.0,0 a1.0,1.0 0,1 0,2.0 0 a1.0,1.0 0,1 0,-2.0 0" />
+    <path
+        android:fillColor="#34D399"
+        android:pathData="M17.8,7.9 m-0.9,0 a0.9,0.9 0,1 0,1.8 0 a0.9,0.9 0,1 0,-1.8 0" />
+</vector>

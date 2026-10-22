@@ -190,9 +190,9 @@ public final class SmartFeatureSheet {
             watcher.removeCallbacksAndMessages(null);
             aurora.stop();
             if (activity instanceof MainActivity) {
-                Button smartBtn = activity.findViewById(R.id.smartFeatureButton);
-                if (smartBtn != null) {
-                    smartBtn.setText(SmartOverlayService.isRunning()
+                TextView label = activity.findViewById(R.id.smartFeatureLabel);
+                if (label != null) {
+                    label.setText(SmartOverlayService.isRunning()
                             ? R.string.smart_button_on : R.string.smart_button);
                 }
             }

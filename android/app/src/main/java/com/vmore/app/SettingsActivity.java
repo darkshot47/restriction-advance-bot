@@ -133,6 +133,15 @@ public class SettingsActivity extends Activity {
                     });
         }
 
+        box.addView(Ui.section(this, getString(R.string.settings_mirror)));
+        addRow(R.drawable.ic_send,
+                Prefs.mirrorEnabled(this)
+                        ? getString(R.string.mirror_on) : getString(R.string.settings_mirror),
+                Prefs.mirrorEnabled(this)
+                        ? mirrorSummary()
+                        : getString(R.string.settings_mirror_hint),
+                v -> startActivity(new Intent(this, MirrorActivity.class)));
+
         box.addView(Ui.section(this, getString(R.string.filters_title)));
         addSwitch(R.string.settings_skip_duplicates, Prefs.skipDuplicates(this),
                 value -> Prefs.setSkipDuplicates(this, value),
@@ -310,6 +319,16 @@ public class SettingsActivity extends Activity {
 
     private interface Toggle {
         void onChanged(boolean value);
+    }
+
+    /** "Channel A to B", the line under the auto-copy row. */
+    private String mirrorSummary() {
+        String source = Prefs.mirrorSourceTitle(this);
+        String dest = Prefs.mirrorDestTitle(this);
+        if (source == null || source.isEmpty() || dest == null || dest.isEmpty()) {
+            return getString(R.string.settings_mirror_hint);
+        }
+        return source + " to " + dest;
     }
 
     /** "Full speed" or the cap, in the words on the data-saving screen. */

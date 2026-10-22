@@ -33,7 +33,9 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
     private EditText linkField;
     private android.widget.ImageView destAvatar;
     private TextView destTitle;
-    private Button smartFeatureButton;
+    private View smartFeatureButton;
+    private TextView smartFeatureLabel;
+    private android.animation.ValueAnimator crownAnimator;
     private TextView accountText;
     private Button startButton;
     //: The three switches of the home screen, one per row, exactly as the
@@ -107,6 +109,9 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         destAvatar = findViewById(R.id.destAvatar);
         destTitle = findViewById(R.id.destTitle);
         smartFeatureButton = findViewById(R.id.smartFeatureButton);
+        smartFeatureLabel = findViewById(R.id.smartFeatureLabel);
+        crownAnimator = Crown.bind(this, smartFeatureButton,
+                findViewById(R.id.smartFeatureCrown), smartFeatureLabel);
         accountText = findViewById(R.id.accountText);
         startButton = findViewById(R.id.startButton);
         switchUpload = findViewById(R.id.switchUpload);
@@ -246,12 +251,20 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         paintRecent();
         paintLive();
         paintClipboard();
+        if (crownAnimator != null && !crownAnimator.isStarted()) {
+            crownAnimator.start();
+        }
         handler.post(watcher);
     }
 
     @Override
     protected void onPause() {
         handler.removeCallbacks(watcher);
+        //: The shimmer is decoration, not information: it stops with the
+        //: screen so a backgrounded app never keeps an animator alive.
+        if (crownAnimator != null) {
+            crownAnimator.cancel();
+        }
         Jobs.get(this).removeListener(this);
         History.get(this).removeListener(this);
         super.onPause();
@@ -305,8 +318,8 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
     }
 
     private void paintSmartButton() {
-        if (smartFeatureButton != null) {
-            smartFeatureButton.setText(SmartOverlayService.isRunning()
+        if (smartFeatureLabel != null) {
+            smartFeatureLabel.setText(SmartOverlayService.isRunning()
                     ? R.string.smart_button_on : R.string.smart_button);
         }
     }
