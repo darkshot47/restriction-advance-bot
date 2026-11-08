@@ -448,10 +448,11 @@ def test_a_zero_or_missing_cap_disables_the_throttle(value):
 
 
 def test_throttle_rate_matches_the_configured_mbps():
-    throttle = telemetry.SpeedThrottle(config.ENGINE_PYTHON_SPEED_LIMIT_MBPS,
-                                       burst_seconds=0)
+    #: Round 22 ships the cap at 0, so the rate is asserted on an explicit
+    #: setting — the mechanism itself is unchanged and still deployed-ready.
+    throttle = telemetry.SpeedThrottle(3.0, burst_seconds=0)
     assert throttle.enabled is True
-    assert throttle.rate == pytest.approx(config.ENGINE_PYTHON_SPEED_LIMIT_MBPS * MB)
+    assert throttle.rate == pytest.approx(3.0 * MB)
     assert throttle.capacity == 0.0, "no burst credit by default"
 
 
@@ -502,15 +503,25 @@ def test_resume_drops_the_accrued_credit():
 #  2b. Which engine is capped
 # --------------------------------------------------------------------------- #
 
-def test_only_python_standard_is_capped():
-    assert main.engine_speed_limit(python_decision()) == \
-        pytest.approx(config.ENGINE_PYTHON_SPEED_LIMIT_MBPS)
+def test_only_python_standard_can_carry_a_cap(monkeypatch):
+    #: Round 22: the shipped limit is 0, so Python is uncapped too.
+    assert config.ENGINE_PYTHON_SPEED_LIMIT_MBPS == 0.0
+    assert main.engine_speed_limit(python_decision()) == 0.0
+    assert main.engine_speed_limit(turbo_decision()) == 0.0
+
+    #: A deploy that sets the env knob still gets the old behaviour on Python…
+    monkeypatch.setattr(main, "ENGINE_PYTHON_SPEED_LIMIT_MBPS", 3.0)
+    assert main.engine_speed_limit(python_decision()) == pytest.approx(3.0)
+    #: …and Turbo is never paced, no matter what is configured.
     assert main.engine_speed_limit(turbo_decision()) == 0.0
 
 
 def test_the_cap_is_a_documented_env_overridable_knob():
-    assert config.ENGINE_PYTHON_SPEED_LIMIT_MBPS == 3.0
+    #: The 3 MB/s ceiling existed only to sell C++ Turbo; with the add-on gone
+    #: the shipped default is uncapped and nothing is throttled.
+    assert config.ENGINE_PYTHON_SPEED_LIMIT_MBPS == 0.0
     assert config.ENGINE_PYTHON_SPEED_BURST_SECONDS == 0.0
+    assert ui.speed_cap_label() == "uncapped"
 
 
 def test_engine_speed_limit_survives_a_bogus_cap(monkeypatch):
@@ -566,11 +577,15 @@ def live_job():
     return jobs[0]
 
 
-async def _run_capped_transfer(db, fake_bot, monkeypatch, *, turbo, size=6 * MB):
+async def _run_capped_transfer(db, fake_bot, monkeypatch, *, turbo, size=6 * MB,
+                                cap=3.0):
     await db.add_user(1001, "Tester")
     await db.add_premium(1001, 30, tier="all")
     if turbo:
         await db.set_engine_mode("lock_cpp")
+    #: Round 22 ships ``ENGINE_PYTHON_SPEED_LIMIT_MBPS = 0``; these tests still
+    #: exercise the pacer itself, so they configure the cap explicitly.
+    monkeypatch.setattr(main, "ENGINE_PYTHON_SPEED_LIMIT_MBPS", cap)
     clock = FakeClock()
     monkeypatch.setattr(main, "TRANSFER_CLOCK", clock)
     monkeypatch.setattr(main, "TRANSFER_SLEEPER", clock.sleep)
@@ -588,7 +603,7 @@ async def _run_capped_transfer(db, fake_bot, monkeypatch, *, turbo, size=6 * MB)
 async def test_python_standard_is_paced_to_about_three_megabytes_per_second(
         db, fake_bot, monkeypatch):
     clock, _status = await _run_capped_transfer(db, fake_bot, monkeypatch, turbo=False)
-    expected = (6 * MB) / (config.ENGINE_PYTHON_SPEED_LIMIT_MBPS * MB)
+    expected = (6 * MB) / (3.0 * MB)
     assert clock.waited == pytest.approx(expected, rel=1e-6)
     assert clock.waited == pytest.approx(2.0), "6 MB at 3 MB/s takes 2 seconds"
     #: No busy-wait: exactly one sleep per chunk that needed budget.
@@ -608,10 +623,12 @@ async def test_the_hud_shows_the_throttled_speed(db, fake_bot, monkeypatch):
     assert sc("Speed") in status.shown_text
 
 
-async def test_disabling_the_cap_removes_every_delay(db, fake_bot, monkeypatch):
-    monkeypatch.setattr(main, "ENGINE_PYTHON_SPEED_LIMIT_MBPS", 0.0)
-    clock, _status = await _run_capped_transfer(db, fake_bot, monkeypatch, turbo=False)
+async def test_the_shipped_default_adds_no_delay_at_all(db, fake_bot, monkeypatch):
+    """Round 22: nobody is throttled — not free, not premium, not Turbo."""
+    clock, _status = await _run_capped_transfer(db, fake_bot, monkeypatch,
+                                                turbo=False, cap=0.0)
     assert clock.sleeps == []
+    assert main.engine_speed_limit(python_decision()) == 0.0
 
 
 async def test_the_progress_contract_and_cancellation_survive_the_throttle(
@@ -622,6 +639,8 @@ async def test_the_progress_contract_and_cancellation_survive_the_throttle(
     clock = FakeClock()
     monkeypatch.setattr(main, "TRANSFER_CLOCK", clock)
     monkeypatch.setattr(main, "TRANSFER_SLEEPER", clock.sleep)
+    #: Round 22 ships the cap at 0; this test is about the pacer, so set it.
+    monkeypatch.setattr(main, "ENGINE_PYTHON_SPEED_LIMIT_MBPS", 3.0)
     msg = media_message(22, size=4 * MB)
 
     async def cancel_on_second_chunk(number):
@@ -644,6 +663,7 @@ async def test_the_progress_contract_and_cancellation_survive_the_throttle(
 async def test_pause_and_resume_keep_working_with_the_pacer(db, fake_bot, monkeypatch):
     await db.add_user(1001, "Tester")
     await db.add_premium(1001, 30, tier="all")
+    monkeypatch.setattr(main, "ENGINE_PYTHON_SPEED_LIMIT_MBPS", 3.0)
     clock = FakeClock()
     monkeypatch.setattr(main, "TRANSFER_CLOCK", clock)
     monkeypatch.setattr(main, "TRANSFER_SLEEPER", clock.sleep)
@@ -705,7 +725,7 @@ def test_diagnostics_list_the_real_turbo_differences():
     #: Zero-copy in-memory piping up to the configured budget.
     assert "zero-copy" in lowered
     assert str(config.ENGINE_ZERO_COPY_MAX_MB) in text
-    #: Uncapped speed, stated against Python Standard's real cap.
+    #: Round 22 — neither engine is artificially capped any more.
     assert "uncapped" in lowered
     assert ui.speed_cap_label() in text
     #: Priority routing above the peak threshold.
@@ -727,9 +747,12 @@ def test_the_owner_diagnostics_are_not_an_upsell():
 
 
 def test_the_speed_cap_is_still_shown_honestly():
-    cap = ui.speed_cap_label()
-    assert cap == "~3 MB/s"
-    assert cap in ui.engine_diagnostics_text(PYTHON)
+    #: Shipped default is uncapped; a deploy that re-enables the knob is shown
+    #: with the real number rather than a stale "3 MB/s" claim.
+    assert ui.speed_cap_label() == "uncapped"
+    assert "no speed cap" in ui.engine_diagnostics_text(PYTHON).lower()
+    assert ui.speed_cap_label(3) == "~3 MB/s"
+    assert "~3 MB/s" in ui.speed_cap_label(3.0)
 
 
 def test_speed_cap_label_reports_uncapped_when_disabled():

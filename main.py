@@ -526,9 +526,10 @@ TRANSFER_SLEEPER = asyncio.sleep
 def engine_speed_limit(decision) -> float:
     """MB/s cap of the resolved engine — ``0.0`` means "uncapped".
 
-    ⚙️ Python Standard is throttled to ``config.ENGINE_PYTHON_SPEED_LIMIT_MBPS``
-    (default 3 MB/s); 🚀 C++ Turbo is never capped.  Setting the constant to
-    ``0`` disables the cap for Python Standard too.
+    Since Round 22 the shipped default is ``0`` — **uncapped** — because the
+    3 MB/s ceiling existed only to make the deleted C++ Turbo add-on look
+    faster.  A deploy can still set ``ENGINE_PYTHON_SPEED_LIMIT_MBPS`` (for
+    example ``3``) to pace ⚙️ Python Standard; 🚀 C++ Turbo is never capped.
     """
     engine = getattr(decision, "engine", None) or decision
     if engines.normalize_engine(engine) != ENGINE_PYTHON:

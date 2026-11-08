@@ -152,12 +152,16 @@ ENGINE_TURBO_WORKERS = int(os.environ.get("ENGINE_TURBO_WORKERS", "4"))
 #: channel dump cooldown uses (``CHANNEL_EXTRACT_COOLDOWN``).
 ENGINE_START_GAP_SECONDS = float(os.environ.get(
     "ENGINE_START_GAP_SECONDS", "3.0"))
-#: Download throughput cap of the ⚙️ Python Standard engine, in MB/s.  This is
-#: what makes C++ Turbo visibly faster on a single stream: Python Standard is
-#: paced by a token bucket, C++ Turbo is uncapped.  ``0`` (or an empty value)
-#: disables the cap entirely.
+#: Download throughput cap of the ⚙️ Python Standard engine, in MB/s.
+#: **Round 22: uncapped by default.**  The 3 MB/s ceiling only ever existed to
+#: make the (now deleted) C++ Turbo add-on look faster on a single stream, so
+#: with nothing left to upsell every extraction runs at line rate.
+#: ``0`` (or an empty value) means no cap — that is the shipped default.
+#: Set ``ENGINE_PYTHON_SPEED_LIMIT_MBPS=3`` to bring the token bucket back on a
+#: deploy that has to protect a shared host; the mechanism is unchanged and
+#: still tested.
 ENGINE_PYTHON_SPEED_LIMIT_MBPS = float(os.environ.get(
-    "ENGINE_PYTHON_SPEED_LIMIT_MBPS", "3.0") or 0)
+    "ENGINE_PYTHON_SPEED_LIMIT_MBPS", "0") or 0)
 #: Burst allowance of the Python Standard token bucket, expressed in seconds of
 #: full-rate transfer.  ``0`` (the default) means a strict cap: the transfer of
 #: *N* bytes takes exactly ``N / ENGINE_PYTHON_SPEED_LIMIT_MBPS`` seconds, which

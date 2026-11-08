@@ -2001,7 +2001,7 @@ def channel_download_notice(percent=None, paused: bool = False, hud: str | None 
 
 
 def speed_cap_label(mbps=None) -> str:
-    """``~3 MB/s`` for the Python Standard cap, ``uncapped`` when there is none."""
+    """``uncapped`` by default (Round 22), ``~3 MB/s`` if a cap is configured."""
     from config import ENGINE_PYTHON_SPEED_LIMIT_MBPS
     value = ENGINE_PYTHON_SPEED_LIMIT_MBPS if mbps is None else mbps
     try:
@@ -2026,6 +2026,8 @@ def engine_diagnostics_text(active=None) -> str:
     workers = max(1, int(ENGINE_TURBO_WORKERS))
     zero_copy_mb = max(0, int(ENGINE_ZERO_COPY_MAX_MB))
     cap = speed_cap_label(ENGINE_PYTHON_SPEED_LIMIT_MBPS)
+    throughput = (f"Capped at {cap} (ENGINE_PYTHON_SPEED_LIMIT_MBPS)"
+                  if cap != "uncapped" else "No speed cap — line rate")
     return "\n".join([
         "🧠 **ENGINE DIAGNOSTICS** (owner only)",
         "",
@@ -2033,13 +2035,13 @@ def engine_diagnostics_text(active=None) -> str:
         "",
         "⚙️ **PYTHON STANDARD**",
         "• Single-thread, single-stream pipeline",
-        f"• Download throughput capped at {cap}",
+        f"• Download throughput: {throughput}",
         "• Streamed to disk, then re-uploaded",
         "",
         "🚀 **C++ TURBO**",
         f"• Parallel worker pool — up to {workers} items of a batch at once",
         f"• Zero-copy piping up to {zero_copy_mb} MB — no temp file, no re-read",
-        "• Uncapped speed",
+        "• Same uncapped throughput — the win is parallelism, not a bigger pipe",
         f"• Priority routing above {int(ENGINE_PEAK_THRESHOLD)} concurrent extractions",
         "",
         "🤖 **AUTO MODE (default)**",

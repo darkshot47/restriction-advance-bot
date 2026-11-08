@@ -94,6 +94,27 @@ def test_the_payment_screen_shows_the_plan_price_only():
     assert text == plain(ui.payment_text(month, turbo=True))
 
 
+def test_the_python_speed_cap_is_gone_by_default():
+    """The 3 MB/s ceiling only existed to make the Turbo add-on look faster."""
+    assert config.ENGINE_PYTHON_SPEED_LIMIT_MBPS == 0.0
+    assert config.ENGINE_PYTHON_SPEED_BURST_SECONDS == 0.0
+    assert ui.speed_cap_label() == "uncapped"
+    python = main.engines.resolve_engine("auto")
+    assert main.engine_speed_limit(python) == 0.0
+    turbo = main.engines.resolve_engine("lock_cpp")
+    assert main.engine_speed_limit(turbo) == 0.0
+    diagnostics = ui.engine_diagnostics_text("python")
+    assert "no speed cap" in diagnostics.lower()
+    assert "~3 MB/s" not in diagnostics
+
+
+def test_the_throttle_mechanism_is_still_available_for_a_protected_host():
+    """Removing the default must not remove the ability to pace a deploy."""
+    throttle = main.telemetry.SpeedThrottle(3.0, burst_seconds=0)
+    assert throttle.enabled is True
+    assert ui.speed_cap_label(3.0) == "~3 MB/s"
+
+
 def test_the_grant_has_two_tiers_and_legacy_names_still_map():
     assert config.GRANT_TIER_KEYS == ("public", "private")
     assert config.GRANT_TIERS["public"]["has_private_access"] is False

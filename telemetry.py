@@ -427,9 +427,10 @@ class TransferMeter:
 # --------------------------------------------------------------------------- #
 #  Python Standard throughput cap — a real token bucket
 #
-#  ⚙️ Python Standard is deliberately the slower engine: its download is paced
-#  to ``config.ENGINE_PYTHON_SPEED_LIMIT_MBPS`` (default 3 MB/s) while 🚀 C++
-#  Turbo stays uncapped.  The bucket refills continuously at the capped rate and
+#  Optional throttle: when ``config.ENGINE_PYTHON_SPEED_LIMIT_MBPS`` is set (it
+#  ships as ``0`` = uncapped since Round 22 removed the C++ Turbo add-on this cap
+#  used to sell) a ⚙️ Python Standard download is paced by a token bucket.  The
+#  bucket refills continuously at the capped rate and
 #  each progress chunk spends the bytes it just moved, so the *average* transfer
 #  rate can never drift above the cap — and because the pacing decision is taken
 #  once per progress chunk, it costs a single comparison plus (at most) one
