@@ -200,7 +200,9 @@ async def _private_batch_overlap(db, monkeypatch, message, *, turbo):
     """Run one private-chat batch and measure the real overlap."""
     await db.add_user(1001, "Tester")
     if turbo:
-        await db.add_premium(1001, 30, tier="all")
+        await db.add_premium(1001, 30, tier="private")
+        #: Round 22 — no tier sets the engine flag, so the test sets it itself.
+        await db.set_models_access(1001, True)
         await db.set_user_engine(1001, CPP)
     overlap = Overlap()
 
@@ -252,7 +254,8 @@ def _seed_range(fake_bot, ids, *, media=True):
 
 async def test_private_range_path_pools_on_turbo(db, fake_bot, monkeypatch):
     await db.add_user(1001, "Tester")
-    await db.add_premium(1001, 30, tier="all")
+    await db.add_premium(1001, 30, tier="private")
+    await db.set_models_access(1001, True)
     await db.set_user_engine(1001, CPP)
     _seed_range(fake_bot, range(1, 9))
     overlap = Overlap()
@@ -269,7 +272,7 @@ async def test_private_range_path_pools_on_turbo(db, fake_bot, monkeypatch):
 
 async def test_private_range_path_is_sequential_on_python(db, fake_bot, monkeypatch):
     await db.add_user(1001, "Tester")
-    await db.add_premium(1001, 30, tier="all")   # premium: no daily-quota stop
+    await db.add_premium(1001, 30, tier="private")   # premium: no daily-quota stop
     _seed_range(fake_bot, range(1, 6))
     overlap = Overlap()
 
@@ -286,7 +289,8 @@ async def test_private_range_path_is_sequential_on_python(db, fake_bot, monkeypa
 
 async def test_channel_dump_path_shares_the_same_runner(db, monkeypatch):
     await db.add_user(1001, "Tester")
-    await db.add_premium(1001, 30, tier="all")
+    await db.add_premium(1001, 30, tier="private")
+    await db.set_models_access(1001, True)
     await db.set_user_engine(1001, CPP)
     await db.set_user_chat(1001, -100777, "Dump")
     post = FakeMessage(text="\n".join(f"https://t.me/source/{i}" for i in range(1, 9)),
@@ -311,7 +315,8 @@ async def test_channel_dump_path_shares_the_same_runner(db, monkeypatch):
 
 async def test_batch_reports_one_status_per_item_and_an_exact_tally(db, monkeypatch):
     await db.add_user(1001, "Tester")
-    await db.add_premium(1001, 30, tier="all")
+    await db.add_premium(1001, 30, tier="private")
+    await db.set_models_access(1001, True)
     await db.set_user_engine(1001, CPP)
     monkeypatch.setattr(main, "ENGINE_START_GAP_SECONDS", 0.0)
 
@@ -385,7 +390,8 @@ async def test_an_item_that_raises_is_counted_as_failed(db, monkeypatch):
 
 async def test_run_private_batch_resolves_one_engine_for_the_whole_batch(db, monkeypatch):
     await db.add_user(1001, "Tester")
-    await db.add_premium(1001, 30, tier="all")
+    await db.add_premium(1001, 30, tier="private")
+    await db.set_models_access(1001, True)
     await db.set_user_engine(1001, CPP)
     decisions = []
     real = main.resolve_engine_for
@@ -676,9 +682,8 @@ async def test_pause_and_resume_keep_working_with_the_pacer(db, fake_bot, monkey
 # --------------------------------------------------------------------------- #
 
 ENGINE_PAGES = [
-    ("architecture", lambda: ui.models_architecture_text(CPP)),
-    ("upsell", ui.models_upsell_text),
-    ("switcher", lambda: ui.models_locked_text(CPP)),
+    ("diagnostics", lambda: ui.engine_diagnostics_text(CPP)),
+    ("diagnostics_python", lambda: ui.engine_diagnostics_text(PYTHON)),
 ]
 
 
@@ -690,8 +695,8 @@ def test_no_page_claims_a_native_c_cipher_as_a_turbo_feature(name, render):
     assert "native c " not in text
 
 
-def test_architecture_page_lists_the_real_turbo_differences():
-    text = ui.models_architecture_text(CPP)
+def test_diagnostics_list_the_real_turbo_differences():
+    text = ui.engine_diagnostics_text(CPP)
     lowered = text.lower()
     #: A parallel worker pool on batches — Python Standard is single-stream.
     assert "parallel worker pool" in lowered
@@ -707,18 +712,24 @@ def test_architecture_page_lists_the_real_turbo_differences():
     assert str(config.ENGINE_PEAK_THRESHOLD) in text
 
 
-def test_architecture_page_says_plainly_where_turbo_changes_nothing():
-    lowered = ui.models_architecture_text(CPP).lower()
-    assert "where turbo does not change anything" in lowered
-    assert "one mtproto stream on both engines" in lowered
+def test_the_owner_diagnostics_are_not_an_upsell():
+    """Round 22: the model add-on pages, prices and upgrade pitch are deleted."""
+    text = ui.engine_diagnostics_text(CPP)
+    lowered = text.lower()
+    assert "owner only" in lowered
+    assert "₹" not in text
+    assert "with c++ turbo" not in lowered
+    assert "upgrade" not in lowered
+    for gone in ("models_upsell_text", "models_upsell_keyboard",
+                 "models_architecture_text", "models_architecture_keyboard",
+                 "models_switcher_text", "models_switcher_keyboard"):
+        assert not hasattr(ui, gone), f"{gone} should be deleted"
 
 
-def test_the_speed_cap_is_visible_where_the_addon_is_sold():
+def test_the_speed_cap_is_still_shown_honestly():
     cap = ui.speed_cap_label()
     assert cap == "~3 MB/s"
-    assert cap in ui.models_upsell_text()
-    assert "uncapped" in ui.models_upsell_text().lower()
-    assert cap in ui.models_architecture_text(PYTHON)
+    assert cap in ui.engine_diagnostics_text(PYTHON)
 
 
 def test_speed_cap_label_reports_uncapped_when_disabled():

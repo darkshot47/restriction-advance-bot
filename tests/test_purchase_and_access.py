@@ -153,7 +153,7 @@ async def test_only_owner_can_grant_private_access(db, press, monkeypatch):
     grant.assert_not_called()
     assert sc("GRANULAR VIP GRANT") in message.shown_text
     assert main.premium_tier_pending[main.OWNER_ID] == {"user_id": 2002, "days": 30}
-    assert message.button("grant_tier:private").text == sc("3️⃣ Public + Private")
+    assert message.button("grant_tier:private").text == sc("2️⃣ Public + Private")
     assert message.button("grant_tier:public").text == sc("1️⃣ Only Public")
     # step 1 only asks for the tier — the duration comes next
     await press(message, "grant_tier:private")

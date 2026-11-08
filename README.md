@@ -6,14 +6,14 @@ A Telegram bot for saving messages from public channels and, **only for owner-gr
 
 | Plan | Daily extractions | Channels | Engine | Attribution |
 | --- | ---: | --- | --- | --- |
-| Free, no referrals needed | 3 | Public only | ⚙️ Python Standard (🚀 Turbo during traffic peaks) | `Extracted by @wantedkar99bot` |
-| Points premium (`premium_source=redeem`) | Unlimited | Public only | ⚙️ Python Standard | None |
-| Owner-granted **1️⃣ Only Public** (`premium_source=public`) | Unlimited | Public only | ⚙️ Python Standard | None |
-| Owner-granted **2️⃣ Public + Models** (`premium_source=models`) | Unlimited | Public only | ⚙️ / 🚀 switchable with `/models` | None |
-| Owner-granted **3️⃣ Public + Private** (`premium_source=manual`) | Unlimited | Public + authorized private | ⚙️ Python Standard | None |
-| Owner-granted **4️⃣ All-in-One** (`premium_source=manual`) | Unlimited | Public + authorized private | ⚙️ / 🚀 switchable with `/models` | None |
+| Free, no referrals needed | 3 | Public only | Automatic (fast pool during traffic peaks) | `Extracted by @wantedkar99bot` |
+| Points premium (`premium_source=redeem`) | Unlimited | Public only | Automatic | None |
+| Owner-granted **1️⃣ Only Public** (`premium_source=public`) | Unlimited | Public only | Automatic | None |
+| Owner-granted **2️⃣ Public + Private** (`premium_source=manual`) | Unlimited | Public + authorized private | Automatic | None |
 
-Access is stored as three independent flags on the user document — `is_premium`, `has_private_access` and `has_models_access` — plus `premium_tier` and `premium_expiry`. Documents written before this change carry no flags at all and keep working: the legacy `premium_source` (`manual` / purchase) still implies private access, while an explicitly stored `false` never falls back.
+Access is stored as `is_premium`, `has_private_access`, `premium_tier` and `premium_expiry` on the user document. Documents written before this change carry no flags at all and keep working: the legacy `premium_source` (`manual` / purchase) still implies private access, while an explicitly stored `false` never falls back.
+
+> **There is no C++ Turbo add-on.** It was removed from the product: nothing is sold as an "engine upgrade", there is **one price per plan**, and the engine (⚙️ Python Standard / 🚀 C++ Turbo) is chosen automatically. The legacy `has_models_access` field is still read for old documents but no code path grants it any more.
 
 - Each **new user** joining through `/refer`'s personal link awards the referrer **10 points**. Self-referrals, nonexistent referrers and repeat starts do not award extra points.
 - `/redeem` and the inline redeem button spend **100 points** for **1 calendar month** of public-only premium, immediately.
@@ -21,30 +21,51 @@ Access is stored as three independent flags on the user document — `is_premium
 - Private-link restrictions are checked before single, range or bulk work begins and at the extraction boundary. Logging in alone does not unlock private links.
 - A private/restricted link shows the **🔒 Private Channel Access (Premium Only)** pitch with one row: **[ 💎 Buy Premium ] [ 🎁 Earn Points ]**. The same screen is shown for single links, bulk lists and ranges, in private chat and inside a dump channel.
 - Free daily slots are reserved atomically before extraction, including concurrent requests, and refunded on failure/cancellation. The quota resets at **00:00 UTC** (`database.utcnow()`), and hitting it shows the reason plus the same **[ 💎 Buy Premium ] [ 🎁 Earn Points ]** row.
-- `/addpremium USER_ID [DAYS]` never grants immediately: the owner picks one of the **four feature tiers** first, then the **duration**, and only then are the flags written and the user notified. See [Granular VIP grant](#granular-vip-grant-addpremium).
+- `/addpremium USER_ID [DAYS]` never grants immediately: the owner picks one of the **two feature tiers** first, then the **duration**, and only then are the flags written and the user notified. See [Granular VIP grant](#granular-vip-grant-addpremium).
 - Free extractions preserve the source message. When the owner has connected a dump channel **and the user has a custom caption in play** (`/setcaption`, `/setprefix` or `/setsuffix`), the content is downloaded into the dump first, the caption/attribution is applied to that temporary copy, and the finished copy is then copied from the dump to the user, so the recipient sees neither a “Forwarded from” header nor an “Edited” label. Every other link is delivered directly and never touches the dump (a free user's attribution on such a link is added the legacy way, by editing the copy). Premium custom-caption commands remain available; free extractions without a custom caption do not replace the source caption. If Telegram's 1,024-character caption limit leaves no room, the original stays on the media and attribution follows in a separate message. Sticker/video-note attribution is also sent separately because these media cannot have captions. Long text is split without truncation.
 
 ## Premium purchase flow
 
 1. `/premium` or **Premium** opens benefits, access conditions and prices — it does **not** immediately start checkout.
-2. **Buy Plan** opens the plan selector. Every plan is sold in two variants — Standard (⚙️ Python engine) and **with the 🚀 C++ Turbo add-on** — and both prices come straight from `config.PREMIUM_PLANS`:
+2. **Buy Plan** opens the plan selector. Each duration is **one plan at one price**, straight from `config.PREMIUM_PLANS` — there is no second variant and no add-on:
 
-   | Plan | Standard | C++ Turbo add-on | With Turbo |
-   | --- | ---: | ---: | ---: |
-   | 1 month (30 days) | ₹99 | +₹50 | **₹149** |
-   | 3 months (90 days) | ₹249 | +₹100 | **₹349** |
-   | 1 year (365 days) | ₹700 | +₹149 | **₹849** |
+   | Plan | Price | Everything included |
+   | --- | ---: | --- |
+   | 1 month (30 days) | **₹99** | public + private, 2 GB files, no watermark |
+   | 3 months (90 days) | **₹249** | same |
+   | 1 year (365 days) | **₹700** | same |
 
-3. Selecting a plan displays the owner's QR, the exact amount for the chosen variant (`₹99 base + ₹50 C++ Turbo add-on` for a Turbo month) and the instructions.
+3. Selecting a plan displays the owner's QR, that single amount and the instructions. `plan_addon_price()` still exists as a **zero-valued shim** so an old stored proof that mentions `turbo` renders instead of crashing; `plan_total_price()` always equals the plan price.
 4. **I've paid** asks for a screenshot **as a photo**. Text alone is not accepted as proof.
-5. The screenshot, plan, variant, price and duration are stored for `/payments`, then sent to the owner and, best effort, **@XyrDeveloper**.
-6. The owner verifies the actual payment. Every proof arrives with owner-only buttons: **✅ Approve** (activates the plan, stamps *✅ Approved by Owner* and notifies the user), **⚠️ Fake** (rejects, stamps the caption and notifies the user) and **🚫 Ban User** (bans for fraudulent proof, stamps the caption and notifies the user). Approving a **Standard** proof grants tier 3️⃣ (public + private); approving a **Turbo** proof grants tier 4️⃣ (public + private + C++ Turbo models). `/addpremium USER_ID [DAYS]` is still available and asks for the tier first. A screenshot or button press **never auto-approves payment**, and the review buttons only respond to `OWNER_ID`.
+5. The screenshot, plan, price and duration are stored for `/payments`, then sent to the owner and, best effort, **@XyrDeveloper**.
+6. The owner verifies the actual payment. Every proof arrives with owner-only buttons: **✅ Approve** (activates the plan, stamps *✅ Approved by Owner* and notifies the user), **⚠️ Fake** (rejects, stamps the caption and notifies the user) and **🚫 Ban User** (bans for fraudulent proof, stamps the caption and notifies the user). Approving a proof grants **2️⃣ Public + Private** (`tier=private`). A stale `payok:<uid>:<plan>:turbo` press from an old keyboard still works and grants exactly the same single-price plan. `/addpremium USER_ID [DAYS]` is still available and asks for the tier first. A screenshot or button press **never auto-approves payment**, and the review buttons only respond to `OWNER_ID`.
 
-**💬 Contact Owner** — an inline `url=` button pointing at `https://t.me/XyrDeveloper` — is rendered on every plan display, every pricing screen, the C++ Turbo upsell, the architecture page and the payment-proof wizard. `config.PAYMENT_CONTACT` is the single source of truth: changing it moves the button, the `@mention` and every amount breakdown at once. The link only ever appears inside a `url=` button, never in body copy.
+**💬 Contact Owner** — an inline `url=` button pointing at `https://t.me/XyrDeveloper` — is rendered on every plan display, every pricing screen, the owner's engine pages and the payment-proof wizard. `config.PAYMENT_CONTACT` is the single source of truth: changing it moves the button, the `@mention` and every amount breakdown at once. The link only ever appears inside a `url=` button, never in body copy.
 
 **Owner setup:** set `OWNER_ID` to @XyrDeveloper's numeric Telegram user ID and open/start the bot from that account. Telegram bots cannot initiate chats with arbitrary accounts; a username alone does not guarantee proof delivery. If both delivery attempts fail, the proof remains stored and the user is told to contact @XyrDeveloper directly — no false “sent” confirmation.
 
 Use `/addqr`, then send the QR as a photo (or reply to a QR photo with `/addqr`). `/delqr` and `/removeqr` both remove it. Missing/invalid QR images do not start a proof-submission session. Checkout prompts are held in memory: after a restart, users can choose the plan again; already submitted proofs remain in MongoDB.
+
+## Owner test mode (`/testmode`)
+
+A payment screen is only ever seen by someone who is about to pay, and the screens *after* it only by someone who already did. `/testmode` (owner only — `MENU_OWNER_ONLY`, never in a user's or an admin's Telegram menu) opens a **dry run of the whole journey** so the owner can read every next message before a user ever sees it:
+
+```
+🧪 TEST MODE — nothing is charged, nothing is saved
+📍 Step: 💳 Payment screen
+…the real payment copy, rendered by the same ui.payment_text()…
+➡️ Next: I've paid → the bot asks for a screenshot as a photo
+[◀️ Back] [Next ▶️]
+[✏️ Type an amount]
+[🖥 All steps]
+[❌ Exit test mode]
+```
+
+- **Every step** is one tap: `/start` → daily quota hit → private link locked → premium page → plan chooser → payment screen → proof asked → owner review caption → what the user gets after approval → premium extraction.
+- **Any number** — press **✏️ Type an amount**, or send `/testmode 249`, and the payment screen is rendered with *that* amount. `testmode.amount_outcome()` says honestly what the bot would do with it: **exact** price (granted), **below** the cheapest plan (nothing auto-activates), **between** two plans (owner decides), **above** the longest plan (longest plan + the extra left to the owner), or **invalid**.
+- **The copy is the real copy.** Screens are built by the same `ui.*` and `testmode.screen()` functions the product uses, so a wording bug shows up here instead of in a user's chat.
+- **Nothing is written.** No MongoDB write, no `add_premium`, no `payment_pending`, no message to any user, no charge. `/cancel`, **❌ Exit test mode** and any real command drop the state; tests assert the account document is byte-for-byte unchanged after walking every step.
+- The `[TESTMODE]` banner on every screen means a screenshot of it can never be mistaken for the real thing.
 
 ## Commands, feedback and admin panel
 
@@ -78,8 +99,8 @@ Every command in the panel also appears in the `/admins` list, and every panel b
 
 | Engine | Pipeline | Throughput cap | Who gets it |
 | --- | --- | --- | --- |
-| ⚙️ **Python Standard** | single stream, one item at a time in the order sent, buffered download → upload | **~3 MB/s** (`ENGINE_PYTHON_SPEED_LIMIT_MBPS`, token-bucket paced; `0` disables the cap) | free/sample users and anyone without the `models` feature |
-| 🚀 **C++ Turbo** `v2.4` | bounded worker pool (`ENGINE_TURBO_WORKERS`, default **4**) over multi-link, range and channel batches, zero-copy stream piping (files up to `ENGINE_ZERO_COPY_MAX_MB`, default **512 MB**, are handed to the uploader straight from memory), priority routing above `ENGINE_PEAK_THRESHOLD` concurrent extractions | **uncapped** — no throughput limit at all | users whose plan grants `models`, and everybody during a traffic peak or a global C++ lock |
+| ⚙️ **Python Standard** | single stream, one item at a time in the order sent, buffered download → upload | **~3 MB/s** (`ENGINE_PYTHON_SPEED_LIMIT_MBPS`, token-bucket paced; `0` disables the cap) | the default, and everybody under a global Python lock |
+| 🚀 **C++ Turbo** `v2.4` | bounded worker pool (`ENGINE_TURBO_WORKERS`, default **4**) over multi-link, range and channel batches, zero-copy stream piping (files up to `ENGINE_ZERO_COPY_MAX_MB`, default **512 MB**, are handed to the uploader straight from memory), priority routing above `ENGINE_PEAK_THRESHOLD` concurrent extractions | **uncapped** — no throughput limit at all | selected automatically during a traffic peak or a global C++ lock — never bought, never switched by a user |
 
 ### The native C++ engine (`native/`)
 
@@ -97,7 +118,7 @@ Next to the Turbo pipeline there is a **real, compiled C++ engine** — not a la
 
 > **On the old 2-second reply.** Nothing in front of a reply sleeps: the command path is native parse → the handler's own reads → the Telegram call. Every private message and button press now prints `[LATENCY] … update_lag=…ms` — Telegram stamps each update with its own UTC time, so that line separates a **late update** (network/host/queue) from a **slow handler** (the bot's own work, which is microseconds). The only deliberate wait inside a request is the `ENGINE_START_GAP_SECONDS` spacing between items of a batch.
 
-> **TgCrypto is not a Turbo feature.** The native C cipher is installed for the whole bot, so *both* engines use it on every MTProto chunk and it differentiates nothing. Earlier copy claimed otherwise; the engine pages (`/models`, **🧠 Models Architecture**) now list only what the code really does.
+> **TgCrypto is not a Turbo feature.** The native C cipher is installed for the whole bot, so *both* engines use it on every MTProto chunk and it differentiates nothing. Earlier copy claimed otherwise; the owner diagnostics page (🧠 in the engine controller) now lists only what the code really does.
 
 Both differences are real rather than cosmetic, and the test suite measures them: a Turbo batch runs up to four items' slow phases (download + re-upload) at the same time while a Python batch stays strictly sequential in the order sent, a Turbo download asks Kurigram for an in-memory transfer (`download_media(..., in_memory=True)`) whose `BytesIO` is passed straight to `send_video` — no temp file, no re-read — and a Python download is provably paced to ~3 MB/s against a fake clock while a Turbo one sleeps not at all. A single-item request never spawns the pool (there is nothing to overlap), and a file above the zero-copy budget — or an unknown size — keeps the streamed-to-disk path so a multi-GB premium upload can never exhaust RAM.
 
@@ -108,18 +129,20 @@ Both differences are real rather than cosmetic, and the test suite measures them
 | Mode | Behaviour |
 | --- | --- |
 | 🤖 **Auto (Dynamic Autoscaler)** — default | watches live concurrent extractions; above `ENGINE_PEAK_THRESHOLD` (default **8**) *every* request is routed to 🚀 C++ Turbo to kill the queue, and free users fall back to ⚙️ Python Standard as soon as traffic normalises |
-| 🚀 **Lock to C++** | global force: 100% of extractions (free **and** VIP) run on Turbo; the autoscaler is paused and the user switcher is fixed |
-| ⚙️ **Lock to Python** | autoscaler off; free users are locked to Python Standard, while premium users holding the `models` permission keep their manual `/models` toggle |
+| 🚀 **Lock to C++** | global force: 100% of extractions (free **and** VIP) run on Turbo; the autoscaler is paused |
+| ⚙️ **Lock to Python** | autoscaler off; everybody runs on Python Standard unless their document still carries a stored engine preference |
 
 `/setengine` alone opens the button panel; `/setengine auto|cpp|python` locks it in one step. The mode is persisted in MongoDB first and applied in memory second, so a lock survives a restart — and if the write fails nothing is applied and the owner is told. Peak detection is strict: *exceeding* the threshold counts, being equal to it does not. Every routing decision is counted per engine (this run and all time) and printed by `/stats`.
 
-**User model switcher** — `/models` (alias `/engine`), plus the **📺 My Channels**-row button in the main menu:
+**No user engine switcher (Round 22).** `/models`, `/engine`, the `[ 🧠 Models Architecture ]` footer button, the upsell page and the `engine_set:*` callbacks were deleted in this round. A user cannot choose, and nothing about the engine is for sale:
 
-- **With the `models` feature:** an interactive switcher, `[ ⚙️ Python Standard ]` and `[ 🚀 C++ Turbo ]`, the active one green and ticked. The choice is stored on the user document (`engine_preference`) and applies to private-chat extractions *and* dump-channel batches alike. The screen also shows the controller mode and the live traffic count.
-- **Without it:** a feature overview — the C++ speed benefits, what zero-copy and multi-threading change, the add-on pricing per plan — plus **[ 🚀 Upgrade to C++ Turbo ]** and **[ 💬 Contact Owner ]**.
-- The permission is re-checked at *press* time, so a revoked grant stops working immediately even on a keyboard still on screen, and a stored preference can never take effect without it. An expired premium document stops granting `models` too.
+- the routing decision is automatic (AUTO / global lock, both owner-controlled);
+- a document that still carries `engine_preference` from an older deploy is honoured only while `has_models_access` is also set — no migration is required, and nothing new ever sets it;
+- an old keyboard still on someone's phone answers with the stale-button hint instead of failing.
 
-**Red Models button & /start badge.** The last row of `/start` is a dedicated `[ 🧠 Models Architecture ]` button styled **RED** (`ButtonStyle.DANGER`, falling back to a plain button where the library has no styles) opening the Python-vs-Turbo page: pipeline differences, worker counts and traffic-handling benchmarks, how AUTO scales, and how to unlock or purchase the add-on. The `/start` header carries the live engine badge, rendered identically by `/start` and the 🏠 button:
+**Owner diagnostics.** The engine controller (`/setengine`) carries a **🧠 Diagnostics** button (`engine_diag`) that explains, in plain English, what each engine really does — worker pool, zero-copy budget, the ~3 MB/s cap, peak routing — with **no price and no upgrade pitch**.
+
+The `/start` header carries the live engine badge, rendered identically by `/start` and the 🏠 button:
 
 ```
 ⚡ Active Engine: [C++ Turbo 🚀 (Peak Auto-Scale)]
@@ -148,19 +171,19 @@ While a file is being extracted the status message renders a terminal-style HUD 
 
 `/addpremium USER_ID [DAYS]` is a three-step, owner-only flow. Nothing is written until the last button press:
 
-1. **Step 1 — feature tier**, four inline buttons backed by `config.GRANT_TIERS`:
+1. **Step 1 — feature tier**, two inline buttons backed by `config.GRANT_TIERS`:
 
    | Tier | Flags stored | `premium_source` |
    | --- | --- | --- |
    | 1️⃣ Only Public | `is_premium` | `public` |
-   | 2️⃣ Public + Models | `is_premium`, `has_models_access` | `models` |
-   | 3️⃣ Public + Private | `is_premium`, `has_private_access` | `manual` |
-   | 4️⃣ All-in-One | `is_premium`, `has_private_access`, `has_models_access` | `manual` |
+   | 2️⃣ Public + Private | `is_premium`, `has_private_access` | `manual` |
+
+   Retired names are folded onto the closest surviving tier instead of failing: `models` / `cpp` → **public**, `all` / `all-in-one` / `full` → **private**. `database.add_premium` applies the same alias table, so an old giveaway or an old `/addpremium` payload still grants the right access.
 
 2. **Step 2 — duration**: `[📅 1 Month] [📅 3 Months]` / `[📅 1 Year] [♾ Lifetime]` / `[🔢 Custom Days]`. Lifetime stores `premium_expiry = None`. A `DAYS` argument typed with the command becomes a one-tap **✅ Use N days** button; **Custom Days** asks for an exact number (1–`GRANT_MAX_DAYS`, default 36500) in the next message and refuses garbage without dropping the session. **⬅️ Tier** returns to step 1.
-3. **Store & notify**: the tier decides the flags *and* the `premium_source`, so a models-only grant can never inherit the legacy "manual means private" meaning. The owner sees exactly what was written (tier, private channels, C++ Turbo models, expiry) and the user is notified with the full details of their granted tier.
+3. **Store & notify**: the tier decides the flags *and* the `premium_source`, so a public-only grant can never inherit the legacy "manual means private" meaning. The owner sees exactly what was written (tier, private channels, expiry, and *no C++ Turbo models* with the retired flag) and the user is notified with the full details of their granted tier — including **⚡ Automatic engine routing — no setup needed**.
 
-`/removepremium USER_ID` clears premium, both flags and the stored tier in one step and says so. Grant callbacks answer only to `OWNER_ID`; a stale or forged press changes nothing.
+`/removepremium USER_ID` clears premium, both flags (including the retired `has_models_access`) and the stored tier in one step and says so. Grant callbacks answer only to `OWNER_ID`; a stale or forged press changes nothing.
 
 ## User channel dashboard (`/mychannels`)
 
@@ -235,7 +258,7 @@ A registered dump channel is **not** a second bot dashboard. One explicit allow-
 | a posted link or range | extracted, exactly as before |
 | `/setchat`, `/delchat` | keep working (channel vocabulary) |
 | owner/admin panel commands (`/stats`, `/broadcast`, `/setengine`, …) | keep working, still authorised per handler |
-| **every personal command** — `/start`, `/premium`, `/models`, `/mychannels`, `/setcaption`, `/myinfo`, `/history`, `/refer`, `/redeem`, all settings commands, `/login`, `/logout`, … | **zero response**: no reply, no edit, no send, no stack trace |
+| **every personal command** — `/start`, `/premium`, `/testmode`, `/mychannels`, `/setcaption`, `/myinfo`, `/history`, `/refer`, `/redeem`, all settings commands, `/login`, `/logout`, … | **zero response**: no reply, no edit, no send, no stack trace |
 | a callback query on a message the bot did not post | ignored silently, without even a toast |
 
 Each channel handler is registered with `filters.private`, and `channel_dump_handler` routes anything that starts with `/` through the allow-list, so a personal command typed in a channel produces literally nothing. The test suite is parametrised over the registered commands: each one answers in a private chat and produces zero replies, edits and sends inside a registered channel.
@@ -361,7 +384,7 @@ from **/start → 🎁 Start Giveaway** or `/giveaway` → **🎁 New giveaway**
 
 | Step | What the owner chooses |
 | --- | --- |
-| 1/6 | the **prize tier** (the same tiers as `/addpremium`) |
+| 1/6 | the **prize tier** (the two tiers of `/addpremium`) |
 | 2/6 | the **duration** (or a custom number of days) |
 | 3/6 | the **benefit line** shown in the public message (type it, or tap a suggestion) |
 | 4/6 | an optional **custom announcement template**; every `[]` is replaced with the current participant count |
@@ -723,6 +746,7 @@ The newest suite covers the admin-rights fix and the multi force-sub epic: the p
 Seven further suites cover rounds 7-12 and the native engine on the same in-memory fakes:
 
 - `tests/test_round7_saved_messages_fix.py` — **the Saved Messages bug**: `resolve_delivery_target` is asserted to return the exact `(client, chat_id)` pair for all four combinations (private chat with a public link, private chat with a private link through the user's own session, channel with a public link, channel with a private link). Private-channel content downloaded through a user session must never be routed to that user's own id; it falls back to a bot upload with identical attribution, while a dump-channel delivery keeps the fast server-side copy.
+- `tests/test_round22_testmode_and_single_price.py` — **round 22**: one price per plan (`plan_addon_price()` is a zero-valued shim, `plan_total_price() == base`, no `buy:<plan>:turbo`, no `TURBO_BENEFITS`), the two surviving grant tiers plus the legacy aliases, every `/testmode` screen and step transition, custom-amount classification (exact / underpaid / partial / overpaid / invalid), the owner-only guards on the command and on every `tm:*` callback, and the promise that the dry run writes nothing.
 - `tests/test_round8_batch_and_speed_cap.py` — **batch parallelism and the Python speed cap**: the shared `engines.run_engine_batch` runner (pool size, ordering, start gap, `"cancelled"` stopping the batch, an exact tally under concurrency, FloodWait isolation) plus measured overlap on all three real paths (private multi-link, private range, channel dump); `SpeedThrottle` proved against a fake clock at exactly ~3 MB/s for ⚙️ Python Standard and zero delay for 🚀 C++ Turbo, with the HUD reporting the throttled rate and pause/resume/cancellation intact; and the corrected engine claims.
 - `tests/test_round9_channels_and_verification.py` — **two channels per user and real verification**: add-first/add-second/refuse-third, legacy migration on read, the legacy mirror staying in step, disconnect-one-of-two, routing by the posting chat id with separate counters, both channels rendered with per-channel actions, the `/delchat` picker; the requester-admin probe for creator, administrator, plain member, non-member and inconclusive error (each cancelling the wizard and storing nothing); the share-based private-channel registration with every failure mode; and content-link verification for a valid link, a wrong-chat link, a bare number, an unreadable/deleted post, lost bot access and the private share equivalent.
 - `tests/test_round10_channel_rules_and_preflight.py` — **channel command rules and the range pre-flight**: parametrised over the registered commands (each answers in private, each produces zero replies/edits/sends inside a registered channel), every channel limit notice carrying the open-bot `url=` button with no raw link, channel callbacks ignored unless the bot posted the message, and the pre-flight over a deliberately gapped fake message store (counts reported first, only existing ids attempted, quota reserved for the real count, an all-missing range consuming nothing, batching instead of one request per id, and a FloodWait paused and retried).

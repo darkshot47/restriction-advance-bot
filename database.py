@@ -7,6 +7,7 @@ from pymongo.errors import DuplicateKeyError
 from config import (FREE_DAILY_LIMIT, MAX_USER_CHANNELS, REDEEM_PREMIUM_MONTHS,
                     PREMIUM_SOURCE_MANUAL, PREMIUM_SOURCE_REDEEM,
                     DEFAULT_ENGINE_MODE, ENGINE_PYTHON, ENGINES, GRANT_TIERS,
+                    LEGACY_TIER_ALIASES,
                     GIVEAWAY_SINGLE_ACTIVE)
 
 MONGO_URL = os.environ.get("MONGO_URL")
@@ -162,10 +163,11 @@ async def add_premium(user_id, days=30, source=PREMIUM_SOURCE_MANUAL, *, tier=No
                       premium_expiry=None):
     """Grant premium plus the granular feature flags of a tier.
 
-    ``tier`` is a key of ``config.GRANT_TIERS`` (``public`` / ``models`` /
-    ``private`` / ``all``): it fills in the flags *and* the matching
-    ``premium_source`` so a models-only grant can never inherit the legacy
-    "manual means private" meaning.
+    ``tier`` is a key of ``config.GRANT_TIERS`` (``public`` / ``private``): it
+    fills in the flags *and* the matching ``premium_source`` so a public-only
+    grant can never inherit the legacy "manual means private" meaning.  The
+    retired ``models`` flag is always written ``False`` — no grant can hand
+    out the removed C++ Turbo switcher.
 
     ``days=None`` means **lifetime**: no expiry is stored, and :func:`is_premium`
     treats a missing expiry as "still valid".  The explicit
@@ -173,13 +175,15 @@ async def add_premium(user_id, days=30, source=PREMIUM_SOURCE_MANUAL, *, tier=No
     = *leave the stored flag alone*, so renewing one feature never silently
     downgrades the other.  Returns the updates that were written.
     """
-    definition = GRANT_TIERS.get(str(tier or "").strip().lower()) if tier else None
+    tier_key = str(tier or "").strip().lower()
+    tier_key = LEGACY_TIER_ALIASES.get(tier_key, tier_key)
+    definition = GRANT_TIERS.get(tier_key) if tier_key else None
     if definition:
         source = definition.get("source", source)
         if has_private_access is None:
             has_private_access = definition["has_private_access"]
         if has_models_access is None:
-            has_models_access = definition["has_models_access"]
+            has_models_access = bool(definition.get("has_models_access", False))
     updates = {"is_premium": True, "premium_source": source}
     if premium_expiry is not None:
         updates["premium_expiry"] = premium_expiry
@@ -192,7 +196,7 @@ async def add_premium(user_id, days=30, source=PREMIUM_SOURCE_MANUAL, *, tier=No
     if has_models_access is not None:
         updates["has_models_access"] = bool(has_models_access)
     if definition:
-        updates["premium_tier"] = str(tier).strip().lower()
+        updates["premium_tier"] = tier_key
     await users_col.update_one({"user_id": user_id}, {"$set": updates})
     return updates
 
@@ -219,10 +223,11 @@ async def has_private_access(user_id):
 
 
 async def has_models_access(user_id):
-    """True when the user may switch to the C++ Turbo engine (/models).
+    """Legacy flag of the removed C++ Turbo add-on, kept readable only.
 
-    The permission is only meaningful while premium is active, so an expired
-    grant stops advertising the switcher immediately.
+    Nothing grants it any more: :func:`add_premium` always writes ``False``.  The
+    reader stays so an old user document does not crash a migration, and so the
+    owner's own account (handled in main.py) still sees the engine diagnostics.
     """
     user = await users_col.find_one({"user_id": user_id})
     if not user or not user.get("has_models_access"):

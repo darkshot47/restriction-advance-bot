@@ -16,12 +16,13 @@ PAYMENT_CONTACT = "XyrDeveloper"
 #: The single place the owner contact link is built from — every plan display,
 #: pricing screen and payment-proof wizard uses this exact URL button.
 OWNER_CONTACT_URL = f"https://t.me/{PAYMENT_CONTACT}"
-#: Base price is the Standard (Python engine) plan; ``addon_price`` is the
-#: optional C++ Turbo upgrade sold on top of it.  Total = price + addon_price.
+#: One price per plan — there is no add-on and no second tier any more.
+#: ``price`` is the only thing a user ever pays; the engine that runs an
+#: extraction is chosen automatically by the controller, never sold.
 PREMIUM_PLANS = {
-    "month": {"title": "1 month", "price": 99, "addon_price": 50, "days": 30},
-    "quarter": {"title": "3 months", "price": 249, "addon_price": 100, "days": 90},
-    "year": {"title": "1 year", "price": 700, "addon_price": 149, "days": 365},
+    "month": {"title": "1 month", "price": 99, "days": 30},
+    "quarter": {"title": "3 months", "price": 249, "days": 90},
+    "year": {"title": "1 year", "price": 700, "days": 365},
 }
 #: Telegram Stars payment — half of UPI price (stars go to owner's Telegram account).
 #: e.g. ₹99 = 50 stars, ₹249 = 125 stars, ₹700 = 350 stars.
@@ -36,20 +37,16 @@ PREMIUM_BENEFITS = (
     "Up to 2 GB files",
     "Priority support",
 )
-#: Extra benefits unlocked by the C++ Turbo add-on.
-TURBO_BENEFITS = (
-    "Multi-threaded extraction workers",
-    "Zero-copy stream piping",
-    "Priority routing during traffic peaks",
-)
 
 
 def plan_addon_price(plan) -> int:
-    """C++ Turbo add-on price of *plan* (``0`` when the plan has no add-on)."""
-    try:
-        return int((plan or {}).get("addon_price") or 0)
-    except (TypeError, ValueError):
-        return 0
+    """Always ``0``.
+
+    The C++ Turbo add-on was removed: there is one price per plan and one
+    product.  The function stays as a zero-valued shim so older integrations
+    (and stored payment records that mention ``turbo``) keep working.
+    """
+    return 0
 
 
 def plan_base_price(plan) -> int:
@@ -60,8 +57,10 @@ def plan_base_price(plan) -> int:
 
 
 def plan_total_price(plan) -> int:
-    """Standard price + C++ Turbo add-on (₹149 / ₹349 / ₹849 for the shipped plans)."""
-    return plan_base_price(plan) + plan_addon_price(plan)
+    """The one and only price of *plan*."""
+    return plan_base_price(plan)
+
+
 REDEEM_LIMITATION = "This bot extracts restricted content from public channels only."
 RUPEE = "₹"
 
@@ -72,10 +71,9 @@ RUPEE = "₹"
 PREMIUM_SOURCE_MANUAL = "manual"
 #: Premium source for an owner grant that only unlocks public channels.
 PREMIUM_SOURCE_PUBLIC = "public"
-#: Premium source for a public grant that also unlocks the C++ Turbo switcher.
-#: Deliberately distinct from ``manual``: the legacy ``premium_source in
-#: {manual, purchase}`` shortcut means "private links allowed", so a
-#: models-only grant must never carry that value.
+#: Legacy value written by builds that still sold the ``models`` (C++ Turbo)
+#: grant.  Nothing grants it any more; stored documents are mapped to a plain
+#: public grant so an old record never becomes a dead end.
 PREMIUM_SOURCE_MODELS = "models"
 #: Premium source for points redemption (public channels only).
 PREMIUM_SOURCE_REDEEM = "redeem"
@@ -187,44 +185,27 @@ DEFAULT_ENGINE_PREFERENCE = ENGINE_PYTHON
 GRANT_TIERS = {
     "public": {
         "label": "Only Public",
-        "number": "1️⃣",
+        "number": "1\ufe0f\u20e3",
         "has_private_access": False,
-        "has_models_access": False,
         "source": PREMIUM_SOURCE_PUBLIC,
-        "description": "Standard public extraction quota — no private channels, "
-                       "no C++ Turbo switcher.",
-    },
-    "models": {
-        "label": "Public + Models",
-        "number": "2️⃣",
-        "has_private_access": False,
-        "has_models_access": True,
-        "source": PREMIUM_SOURCE_MODELS,
-        "description": "Public extraction plus the C++ Turbo engine switcher "
-                       "(/models and /engine).",
+        "description": "Unlimited public extraction — no private channels.",
     },
     "private": {
         "label": "Public + Private",
-        "number": "3️⃣",
+        "number": "2\ufe0f\u20e3",
         "has_private_access": True,
-        "has_models_access": False,
         "source": PREMIUM_SOURCE_MANUAL,
-        "description": "Public extraction plus private/restricted channels the "
-                       "user's own session may read.",
-    },
-    "all": {
-        "label": "All-in-One",
-        "number": "4️⃣",
-        "has_private_access": True,
-        "has_models_access": True,
-        "source": PREMIUM_SOURCE_MANUAL,
-        "description": "Full VIP access — public, private and the C++ Turbo "
-                       "engine switcher.",
+        "description": "Public extraction plus the private/restricted channels "
+                       "the user's own session may read. This is what a paid "
+                       "plan grants.",
     },
 }
 GRANT_TIER_KEYS = tuple(GRANT_TIERS)
-#: Legacy two-button tier ids kept so older buttons never become dead ends.
-LEGACY_TIER_ALIASES = {"full": "private"}
+#: Legacy tier ids kept so an old button or a stored record never becomes a
+#: dead end.  ``models`` was a public grant with the (now removed) C++ Turbo
+#: switcher, so it lands on the plain public tier; ``all`` was private + models,
+#: which is exactly today's ``private`` tier.
+LEGACY_TIER_ALIASES = {"full": "private", "models": "public", "all": "private"}
 #: duration key -> days (``None`` means lifetime / no expiry).
 GRANT_DURATIONS = {
     "month": {"label": "1 Month", "days": 30},
@@ -295,9 +276,9 @@ GIVEAWAY_MAX_BENEFIT_CHARS = int(os.environ.get("GIVEAWAY_MAX_BENEFIT_CHARS", "2
 GIVEAWAY_MAX_DAYS = int(os.environ.get("GIVEAWAY_MAX_DAYS", "365"))
 #: Suggested benefit lines offered as one-tap buttons in the wizard.
 GIVEAWAY_BENEFIT_SUGGESTIONS = (
-    "Unlimited public + private extractions, 2 GB files, C++ Turbo speed",
-    "C++ Turbo engine: 4 worker slots, zero-copy streaming, no speed cap",
-    "Private channel access + the C++ Turbo switcher, full VIP",
+    "Unlimited public + private extractions, up to 2 GB files",
+    "Private channel access, no watermark, priority support",
+    "Full VIP: public + private channels, unlimited extractions",
 )
 #: Seconds to wait between two giveaway DMs.  The fan-out is deliberately
 #: paced: a burst of hundreds of sends is exactly what earns a FloodWait.

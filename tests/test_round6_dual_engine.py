@@ -392,9 +392,11 @@ async def test_owner_always_holds_the_models_permission(db):
     assert decision.has_models is True
 
 
-async def test_expired_models_grant_stops_working(db):
+async def test_expired_engine_permission_stops_working(db):
+    """Round 22: nothing sells it, but a legacy flag still expires with premium."""
     await db.add_user(1001, "Tester")
-    await db.add_premium(1001, 30, tier="models")
+    await db.add_premium(1001, 30, tier="public")
+    await db.set_models_access(1001, True)
     assert await main.models_access(1001) is True
     db.users[1001]["premium_expiry"] = dt.datetime.now() - dt.timedelta(days=1)
     assert await main.models_access(1001) is False
@@ -453,11 +455,16 @@ def test_engine_registry_describes_both_engines():
     assert engines.engine_label(CPP) != engines.engine_label(PYTHON)
 
 
-async def _run_batch(db, monkeypatch, *, chat_id, user_id, links, tier=None):
+async def _run_batch(db, monkeypatch, *, chat_id, user_id, links, tier=None,
+                     models: bool = False):
     """Post *links* to a dump channel and measure the real overlap."""
     await db.add_user(user_id, "Tester")
     if tier:
         await db.add_premium(user_id, 30, tier=tier)
+    if models:
+        #: The retired flag is never granted by a tier any more, so a test that
+        #: needs the user's own engine preference sets it directly.
+        await db.set_models_access(user_id, True)
     await db.set_user_chat(user_id, chat_id, "Dump")
     post = FakeMessage(text="\n".join(f"https://t.me/source/{i}" for i in links),
                        user=FakeUser(user_id))
@@ -483,7 +490,8 @@ async def test_turbo_runs_a_real_worker_pool(db, monkeypatch):
     """Turbo overlaps the slow parts of several files; Python never does."""
     await db.set_user_engine(1001, CPP)
     success, failed, overlap = await _run_batch(
-        db, monkeypatch, chat_id=-100777, user_id=1001, links=range(1, 9), tier="all")
+        db, monkeypatch, chat_id=-100777, user_id=1001, links=range(1, 9),
+        tier="private", models=True)
     assert (success, failed) == (8, 0)
     assert overlap == config.ENGINE_TURBO_WORKERS
     assert main.ENGINE_CONTROLLER.monitor.snapshot()["routed"][CPP] == 1
@@ -501,7 +509,8 @@ async def test_single_link_post_never_spawns_the_pool(db, monkeypatch):
     """One link has nothing to overlap, so Turbo behaves like Python there."""
     await db.set_user_engine(1001, CPP)
     success, failed, overlap = await _run_batch(
-        db, monkeypatch, chat_id=-100779, user_id=1001, links=[1], tier="all")
+        db, monkeypatch, chat_id=-100779, user_id=1001, links=[1],
+        tier="private", models=True)
     assert (success, failed) == (1, 0)
     assert overlap == 1
 
@@ -509,7 +518,7 @@ async def test_single_link_post_never_spawns_the_pool(db, monkeypatch):
 async def test_turbo_pool_applies_to_a_locked_batch(db, monkeypatch):
     """A global C++ lock gives free users the pool too."""
     await db.set_engine_mode("lock_cpp")
-    # This user never bought the models feature: the global lock still pools them.
+    # This user holds no engine permission: the global lock still pools them.
     success, failed, overlap = await _run_batch(
         db, monkeypatch, chat_id=-100780, user_id=1001, links=range(1, 7),
         tier="public")
@@ -621,8 +630,9 @@ def test_zero_copy_budget_is_configured_and_bounded():
     assert config.ENGINE_ZERO_COPY_MAX_BYTES == config.ENGINE_ZERO_COPY_MAX_MB * 1024 ** 2
     assert engines.get_engine(CPP).zero_copy is True
     assert engines.get_engine(PYTHON).zero_copy is False
-    assert "zero-copy" in ui.models_architecture_text(CPP).lower()
-    assert str(config.ENGINE_ZERO_COPY_MAX_MB) in ui.models_architecture_text(CPP)
+    diagnostics = ui.engine_diagnostics_text(CPP)
+    assert "zero-copy" in diagnostics.lower()
+    assert str(config.ENGINE_ZERO_COPY_MAX_MB) in diagnostics
 
 
 # --------------------------------------------------------------------------- #
@@ -981,23 +991,18 @@ def test_start_badge_strings_match_the_specification():
         "🟢 **Active Engine:** [Python Standard ⚙️]"
 
 
-def test_models_architecture_button_is_red_and_lives_in_the_help_footer():
-    """The red engines page lives one tap deeper, inside the help menu."""
-    button = ui.models_architecture_button()
-    assert button.callback_data == "models_info"
-    assert button.text == sc("🧠 Models Architecture")
-    if ui.styles_enabled():
-        assert button.style == ui.BUTTON_DANGER, "the footer button must be RED"
-
+def test_the_engines_page_is_gone_from_every_user_menu():
+    """Round 22 — the /models page, its red footer button and /engine are gone."""
+    assert not hasattr(ui, "models_architecture_button")
+    assert not hasattr(main, "models_handler")
+    for marker in ("models_info", "cmd_models", "engine_set:"):
+        assert marker not in " ".join(main.COMMAND_NAMES)
     rows = ui.start_keyboard().inline_keyboard
-    # Six rows of commands, then the full-width Vmore App row the owner asked for.
-    assert len(rows) == 7, rows
     assert [b.callback_data for b in rows[-1]] == ["cmd_app"]
-
     help_rows = ui.help_keyboard().inline_keyboard
-    assert help_rows[-2] == [button], "the red button closes the help menu"
-    assert len(help_rows) <= 6
-    assert any(b.callback_data == "cmd_app" for row in help_rows for b in row)
+    callbacks = [b.callback_data for row in help_rows for b in row]
+    assert "models_info" not in callbacks and "cmd_models" not in callbacks
+    assert "cmd_app" in callbacks
 
 
 def test_start_text_carries_the_engine_badge():
@@ -1023,54 +1028,50 @@ async def test_start_shows_the_live_engine_badge(db, press):
     assert "Peak Auto-Scale" not in plain(message2.shown_text)
 
 
-async def test_help_menu_button_opens_the_architecture_page(db, press):
+async def test_a_stale_engines_button_is_reported_instead_of_crashing(db, press):
     await db.add_user(1001, "Tester")
     message = FakeMessage(text="/start")
     await main.start_handler(None, message)
     await press(message, "cmd_help")
-    assert "models_info" in message.callback_data(), "help carries the engines page"
-
+    assert "models_info" not in message.callback_data()
+    #: An old keyboard that is still on someone's phone must not 500.
     await press(message, "models_info")
+    #: Nothing crashes and the help screen stays on the phone.
+    assert plain(message.shown_text).strip()
+    assert "models_info" not in message.callback_data()
+
+
+async def test_the_owner_keeps_the_engine_diagnostics(db, press):
+    await db.add_user(main.OWNER_ID, "Owner")
+    message = owner_message(text="/setengine")
+    await main.setengine_handler(None, message)
+    await press(message, "engine_diag")
     text = plain(message.shown_text)
-    assert "MODELS ARCHITECTURE" in text
+    assert "ENGINE DIAGNOSTICS" in text
     assert "PYTHON STANDARD" in text and "C++ TURBO" in text
-    assert "TRAFFIC HANDLING" in text
-    assert "HOW TO UNLOCK" in text or "unlock" in text.lower()
-    # Pricing of the add-on is quoted from config.
-    assert f"{config.RUPEE}149" in text
-    # Links only live in url= buttons: the page mentions, never prints, a URL.
-    assert "https://" not in text
-    assert f"@{config.PAYMENT_CONTACT}" in text
-    urls = [b.url for b in flat(message.shown_markup) if b.url]
-    assert config.PAYMENT_CONTACT in "".join(urls)
-    # A free user is offered the upgrade, not the switcher.
-    assert "premium_plans" in message.callback_data()
+    assert "₹" not in text, "the diagnostics never sell anything"
 
 
-async def test_architecture_page_offers_the_switcher_to_a_models_holder(db, press):
-    await db.add_user(1001, "Tester")
-    await db.add_premium(1001, 30, tier="models")
-    message = FakeMessage(text="/start")
-    await press(message, "models_info")
-    assert "cmd_models" in message.callback_data()
-    assert "premium_plans" not in message.callback_data()
-
+# --------------------------------------------------------------------------- #
+#  3. One price per plan — no C++ Turbo add-on
+# --------------------------------------------------------------------------- #
 
 # --------------------------------------------------------------------------- #
 #  3. Tiered pricing with the C++ Turbo add-on
 # --------------------------------------------------------------------------- #
 
-def test_shipped_prices_are_the_requested_ones():
+def test_shipped_prices_are_one_price_per_plan():
     plans = config.PREMIUM_PLANS
+    assert sorted((config.plan_base_price(p) for p in plans.values())) == [99, 249, 700]
     assert (config.plan_base_price(plans["month"]),
             config.plan_addon_price(plans["month"]),
-            config.plan_total_price(plans["month"])) == (99, 50, 149)
-    assert (config.plan_base_price(plans["quarter"]),
-            config.plan_addon_price(plans["quarter"]),
-            config.plan_total_price(plans["quarter"])) == (249, 100, 349)
-    assert (config.plan_base_price(plans["year"]),
-            config.plan_addon_price(plans["year"]),
-            config.plan_total_price(plans["year"])) == (700, 149, 849)
+            config.plan_total_price(plans["month"])) == (99, 0, 99)
+    assert config.plan_total_price(plans["quarter"]) == 249
+    assert config.plan_total_price(plans["year"]) == 700
+    #: Every plan is the same product — only the duration changes.
+    for plan in plans.values():
+        assert config.plan_addon_price(plan) == 0
+        assert "addon_price" not in plan and "turbo_price" not in plan
     assert plans["month"]["days"] == 30
     assert plans["quarter"]["days"] == 90
     assert plans["year"]["days"] == 365
@@ -1093,25 +1094,25 @@ def test_contact_button_follows_a_changed_owner(monkeypatch):
     assert ui.owner_contact_button().url == "https://t.me/SomeoneElse"
     assert "@SomeoneElse" in ui.plans_text()
     assert "@SomeoneElse" in ui.payment_text(config.PREMIUM_PLANS["month"])
-    assert "@SomeoneElse" in ui.models_upsell_text() or "SomeoneElse" in \
-        ui.models_architecture_text()
 
 
-def test_plans_table_shows_base_plus_addon_equals_total():
+def test_plans_table_shows_one_price_per_plan():
     table = ui.plans_table()
-    for key, plan in config.PREMIUM_PLANS.items():
-        base = config.plan_base_price(plan)
-        addon = config.plan_addon_price(plan)
+    for plan in config.PREMIUM_PLANS.values():
         line = next(line for line in table.split("\n") if plan["title"] in line)
-        assert f"{config.RUPEE}{base} Standard" in line
-        assert f"+{config.RUPEE}{addon} C++ Turbo" in line
-        assert f"{config.RUPEE}{base + addon}" in line
+        assert f"{config.RUPEE}{config.plan_base_price(plan)}" in line
+        #: No "Standard + Turbo = total" breakdown any more.
+        assert "Turbo" not in line and "Standard" not in line
+        assert "+" not in line
 
 
 def test_plans_screen_lists_every_price_and_the_contact_button():
     text = ui.plans_text()
-    for amount in ("99", "149", "249", "349", "700", "849"):
+    for amount in ("99", "249", "700"):
         assert amount in text
+    for gone in ("149", "349", "849", "C++ Turbo"):
+        assert gone not in text, gone
+    assert "no add-on" in text, "the screen says plainly there is no add-on"
     assert f"@{config.PAYMENT_CONTACT}" in text
     assert "https://" not in text
 
@@ -1119,105 +1120,88 @@ def test_plans_screen_lists_every_price_and_the_contact_button():
     data = [b.callback_data for b in buttons]
     for key in config.PREMIUM_PLANS:
         assert f"buy:{key}" in data
-        assert f"buy:{key}:turbo" in data
+        assert f"buy:{key}:turbo" not in data
     assert any(b.url == ui.contact_owner_url() for b in buttons)
 
 
-def test_payment_wizard_amount_follows_the_chosen_variant():
+def test_the_payment_screen_has_one_amount_and_ignores_a_legacy_turbo_flag():
     month = config.PREMIUM_PLANS["month"]
-    standard = ui.payment_text(month, turbo=False)
-    turbo = ui.payment_text(month, turbo=True)
-    assert f"{config.RUPEE}99" in standard and "₹149" not in standard
-    assert f"{config.RUPEE}149" in turbo
-    assert f"{config.RUPEE}99 base + {config.RUPEE}50 C++ Turbo add-on" in turbo
-    assert "Python Standard" in standard and "C++ Turbo" in turbo
-    assert f"@{config.PAYMENT_CONTACT}" in turbo
+    single = ui.payment_text(month)
+    legacy = ui.payment_text(month, turbo=True)
+    assert single == legacy, "the retired add-on flag changes nothing"
+    assert f"{config.RUPEE}99" in single
+    assert "₹149" not in single and "C++ Turbo" not in single
+    assert "Python Standard" not in single, "the engine is automatic now"
+    assert f"@{config.PAYMENT_CONTACT}" in single
     assert any(b.url == ui.contact_owner_url() for b in flat(ui.payment_keyboard("tok")))
 
 
-def test_turbo_benefits_are_listed_where_the_addon_is_sold():
-    upsell = ui.models_upsell_text()
-    assert "C++ TURBO ENGINE" in upsell
-    #: Round 10 replaced the false "native C cipher" / "multi-threaded" claims
-    #: with what the code really does: a parallel worker pool on batches, an
-    #: uncapped rate against Python Standard's cap, and zero-copy piping.
-    assert "Parallel worker pool" in upsell
-    assert "Zero-copy" in upsell or "zero-copy" in upsell.lower()
-    assert "Uncapped" in upsell or "uncapped" in upsell.lower()
-    assert f"{config.RUPEE}149" in upsell
-    assert any(b.callback_data == "premium_plans"
-               for b in flat(ui.models_upsell_keyboard()))
-    assert any(b.url == ui.contact_owner_url()
-               for b in flat(ui.models_upsell_keyboard()))
-
-
-async def test_buying_the_turbo_variant_charges_the_addon_and_grants_models(db, press):
+async def test_buying_a_plan_charges_one_price_and_grants_private_access(db, press):
     await db.add_user(1001, "Tester")
     await db.set_qr("owner-qr")
     message = FakeMessage(text="/premium")
     await main.premium_handler(None, message)
     await press(message, "premium_plans")
-    assert "buy:month:turbo" in message.callback_data()
+    assert "buy:month" in message.callback_data()
 
-    await press(message, "buy:month:turbo")
-    text = plain(message.shown_text)
-    assert "149" in text and "C++ Turbo" in text
-    pending = main.payment_pending[1001]
-    assert pending["turbo"] is True and pending["plan"] == "month"
-
-    # Owner approves -> the models flag is set by the tier, not by hand.
-    review = owner_message(text="/payments")
-    await press(review, "payok:1001:month:turbo")
-    user = db.users[1001]
-    assert user["is_premium"] is True
-    assert user["has_models_access"] is True
-    assert user["premium_tier"] == "all"
-    assert user["premium_source"] == config.PREMIUM_SOURCE_MANUAL
-
-
-async def test_buying_the_standard_variant_grants_no_models(db, press):
-    await db.add_user(1001, "Tester")
-    await db.set_qr("owner-qr")
-    message = FakeMessage(text="/premium")
-    await press(message, "premium_plans")
     await press(message, "buy:month")
-    assert main.payment_pending[1001]["turbo"] is False
+    text = plain(message.shown_text)
+    assert "99" in text and "149" not in text
+    assert main.payment_pending[1001] == {"plan": "month", "token": main.payment_pending[1001]["token"]}
+
     review = owner_message(text="/payments")
     await press(review, "payok:1001:month")
     user = db.users[1001]
     assert user["is_premium"] is True
-    assert user["has_models_access"] is False
     assert user["has_private_access"] is True
     assert user["premium_tier"] == "private"
+    assert user["premium_source"] == config.PREMIUM_SOURCE_MANUAL
+
+
+async def test_a_stale_turbo_checkout_is_still_honoured_at_the_single_price(db, press):
+    """An old ``buy:month:turbo`` press must not dead-end or charge extra."""
+    await db.add_user(1001, "Tester")
+    await db.set_qr("owner-qr")
+    message = FakeMessage(text="/premium")
+    await press(message, "premium_plans")
+    await press(message, "buy:month:turbo")
+    assert main.payment_pending[1001]["plan"] == "month"
+    assert "149" not in plain(message.shown_text)
+    review = owner_message(text="/payments")
+    await press(review, "payok:1001:month:turbo")
+    user = db.users[1001]
+    assert user["is_premium"] is True
+    assert user["has_private_access"] is True
 
 
 # --------------------------------------------------------------------------- #
 #  4. Granular admin VIP grant (/addpremium)
 # --------------------------------------------------------------------------- #
 
+#: Round 22 — the grant has two tiers: public only, or public + private.
 TIER_FLAGS = {
     "public":  (False, False),
-    "models":  (False, True),
     "private": (True, False),
-    "all":     (True, True),
 }
 
 
-def test_config_grant_tiers_match_the_requested_four_steps():
-    assert config.GRANT_TIER_KEYS == ("public", "models", "private", "all")
+def test_config_grant_tiers_are_the_two_remaining_steps():
+    assert config.GRANT_TIER_KEYS == ("public", "private")
     numbers = [config.GRANT_TIERS[key]["number"] for key in config.GRANT_TIER_KEYS]
-    assert numbers == ["1️⃣", "2️⃣", "3️⃣", "4️⃣"]
+    assert numbers == ["1️⃣", "2️⃣"]
     labels = [config.GRANT_TIERS[key]["label"] for key in config.GRANT_TIER_KEYS]
-    assert labels == ["Only Public", "Public + Models", "Public + Private", "All-in-One"]
+    assert labels == ["Only Public", "Public + Private"]
     for key, (private, models) in TIER_FLAGS.items():
         assert config.GRANT_TIERS[key]["has_private_access"] is private
-        assert config.GRANT_TIERS[key]["has_models_access"] is models
+        #: Nothing grants the retired C++ Turbo flag any more.
+        assert config.GRANT_TIERS[key].get("has_models_access", False) is models
 
 
-def test_grant_tier_keyboard_offers_the_four_tiers():
+def test_grant_tier_keyboard_offers_the_two_tiers():
     buttons = flat(ui.grant_tier_keyboard())
     data = [b.callback_data for b in buttons]
-    assert data[:4] == [f"grant_tier:{key}" for key in config.GRANT_TIER_KEYS]
+    assert data[:2] == [f"grant_tier:{key}" for key in config.GRANT_TIER_KEYS]
+    assert "grant_tier:models" not in data and "grant_tier:all" not in data
     assert "cancel_action" in data
     text = ui.grant_tier_text(1001, "Tester", 45)
     for key in config.GRANT_TIER_KEYS:
@@ -1227,16 +1211,16 @@ def test_grant_tier_keyboard_offers_the_four_tiers():
 
 
 def test_grant_duration_keyboard_offers_every_requested_duration():
-    buttons = flat(ui.grant_duration_keyboard("all"))
+    buttons = flat(ui.grant_duration_keyboard("private"))
     data = [b.callback_data for b in buttons]
     for key in ("month", "quarter", "year", "lifetime", "custom"):
-        assert f"grant_dur:all:{key}" in data
-    assert "grant_back:all" in data and "cancel_action" in data
+        assert f"grant_dur:private:{key}" in data
+    assert "grant_back:private" in data and "cancel_action" in data
     # A duration typed in the command becomes a one-tap button.
-    typed = [b.callback_data for b in flat(ui.grant_duration_keyboard("all", 45))]
-    assert "grant_dur:all:typed:45" in typed
-    text = ui.grant_duration_text(1001, "all", "Tester", 45)
-    assert "Step 2 of 2" in text and "All-in-One" in text
+    typed = [b.callback_data for b in flat(ui.grant_duration_keyboard("private", 45))]
+    assert "grant_dur:private:typed:45" in typed
+    text = ui.grant_duration_text(1001, "private", "Tester", 45)
+    assert "Step 2 of 2" in text and "Public + Private" in text
     assert "no expiry" in text and "365 days" in text
 
 
@@ -1253,11 +1237,12 @@ def test_parse_grant_duration(key, state, days):
 
 
 @pytest.mark.parametrize("value,expected", [
-    ("public", "public"), ("models", "models"), ("private", "private"), ("all", "all"),
-    ("ALL", "all"), ("all-in-one", "all"), ("All in One", "all"),
-    ("public + models", "models"), ("Only Public", "public"),
-    ("Public + Private", "private"), ("full", "private"), ("nope", None),
-    ("", None), (None, None),
+    ("public", "public"), ("private", "private"), ("PRIVATE", "private"),
+    ("Only Public", "public"), ("Public + Private", "private"),
+    # Retired names fold onto the closest surviving tier instead of crashing.
+    ("models", "public"), ("cpp", "public"), ("all", "private"),
+    ("all-in-one", "private"), ("All in One", "private"), ("full", "private"),
+    ("nope", None), ("", None), (None, None),
 ])
 def test_normalize_tier_including_the_legacy_alias(value, expected):
     assert main.normalize_tier(value) == expected
@@ -1268,7 +1253,7 @@ async def test_addpremium_step_one_lists_the_tiers(db):
     message = owner_message(text="/addpremium 1001")
     await main.addpremium_handler(None, message)
     assert "GRANULAR VIP GRANT" in plain(message.shown_text)
-    assert message.callback_data()[:4] == [f"grant_tier:{key}"
+    assert message.callback_data()[:2] == [f"grant_tier:{key}"
                                            for key in config.GRANT_TIER_KEYS]
     assert main.premium_tier_pending[main.OWNER_ID]["user_id"] == 1001
     assert db.users[1001]["is_premium"] is False, "nothing is granted in step 1"
@@ -1295,9 +1280,9 @@ async def test_addpremium_rejects_bad_arguments(db):
 
 @pytest.mark.parametrize("tier,duration,days", [
     ("public", "month", 30),
-    ("models", "quarter", 90),
+    ("private", "quarter", 90),
     ("private", "year", 365),
-    ("all", "lifetime", None),
+    ("private", "lifetime", None),
 ])
 async def test_full_grant_flow_stores_the_tier_flags(db, tier, duration, days):
     await db.add_user(1001, "Tester")
@@ -1330,10 +1315,9 @@ async def test_full_grant_flow_stores_the_tier_flags(db, tier, duration, days):
     notice = plain(notices[-1]["text"])
     assert "VIP ACTIVATED" in notice
     assert config.GRANT_TIERS[tier]["label"] in notice
-    if models:
-        assert "/models" in notice or "C++ Turbo" in notice
-    else:
-        assert "Python Standard" in notice
+    #: Round 22 — the engine is automatic, so no tier advertises a switcher.
+    assert "/models" not in notice and "C++ Turbo" not in notice
+    assert "automatic engine routing" in notice
     assert main.premium_tier_pending == {}
 
 
@@ -1341,27 +1325,27 @@ def fake_bot_sent():
     return main.bot.sent
 
 
-async def test_models_only_grant_does_not_unlock_private_channels(db):
+async def test_a_public_only_grant_keeps_private_channels_locked(db):
     await db.add_user(1001, "Tester")
     message = owner_message(text="/addpremium 1001")
     await main.addpremium_handler(None, message)
-    await main.callback_handler(None, make_query(message, "grant_tier:models",
+    await main.callback_handler(None, make_query(message, "grant_tier:public",
                                                  FakeUser(main.OWNER_ID)))
-    await main.callback_handler(None, make_query(message, "grant_dur:models:month",
+    await main.callback_handler(None, make_query(message, "grant_dur:public:month",
                                                  FakeUser(main.OWNER_ID)))
-    assert await main.models_access(1001) is True
     assert await main.private_access(1001) is False
+    assert db.users[1001]["has_models_access"] is False
     decision = await main.resolve_engine_for(1001, record=False)
-    assert decision.has_models is True
+    assert decision.has_models is False
 
 
 async def test_custom_days_are_typed_then_granted(db):
     await db.add_user(1001, "Tester")
     message = owner_message(text="/addpremium 1001")
     await main.addpremium_handler(None, message)
-    await main.callback_handler(None, make_query(message, "grant_tier:all",
+    await main.callback_handler(None, make_query(message, "grant_tier:private",
                                                  FakeUser(main.OWNER_ID)))
-    await main.callback_handler(None, make_query(message, "grant_dur:all:custom",
+    await main.callback_handler(None, make_query(message, "grant_dur:private:custom",
                                                  FakeUser(main.OWNER_ID)))
     assert main.pending_action[main.OWNER_ID] == "grant_custom_days"
     assert "Custom duration" in plain(message.shown_text) or \
@@ -1370,7 +1354,7 @@ async def test_custom_days_are_typed_then_granted(db):
     typed = FakeMessage(text="45", user=FakeUser(main.OWNER_ID))
     await main.text_handler(None, typed)
     user = db.users[1001]
-    assert user["is_premium"] is True and user["premium_tier"] == "all"
+    assert user["is_premium"] is True and user["premium_tier"] == "private"
     remaining = (user["premium_expiry"] - dt.datetime.now()).days
     assert remaining in (44, 45)
     assert main.pending_action == {}
@@ -1455,7 +1439,8 @@ async def test_unknown_tier_is_reported_not_guessed(db):
 
 async def test_removepremium_clears_every_flag(db):
     await db.add_user(1001, "Tester")
-    await db.add_premium(1001, None, tier="all")
+    await db.add_premium(1001, None, tier="private")
+    await db.set_models_access(1001, True)
     assert await main.models_access(1001) is True
     message = owner_message(text="/removepremium 1001")
     await main.removepremium_handler(None, message)
@@ -1469,131 +1454,30 @@ async def test_removepremium_clears_every_flag(db):
 
 
 # --------------------------------------------------------------------------- #
-#  5. /models and /engine — the user switcher
+#  5. The user switcher is gone; the owner controller still works
 # --------------------------------------------------------------------------- #
 
-async def test_models_shows_the_upsell_to_a_free_user(db):
-    await db.add_user(1001, "Tester")
+async def test_the_models_command_is_gone(db):
+    """/models and /engine were deleted with the C++ Turbo add-on."""
+    for name in ("models", "engine"):
+        assert name not in main.COMMAND_NAMES
+        assert name not in main.COMMAND_HANDLERS
+    assert not hasattr(main, "models_handler")
+    assert not hasattr(main, "apply_engine_choice")
     message = FakeMessage(text="/models")
-    await main.models_handler(None, message)
-    text = plain(message.shown_text)
-    assert "C++ TURBO ENGINE" in text
-    assert f"{config.RUPEE}149" in text
-    assert "engine_set:cpp" not in message.callback_data()
-    assert "premium_plans" in message.callback_data()
-    assert "models_info" in message.callback_data()
+    await main.text_handler(None, message)
+    assert "Unknown command" in plain(message.shown_text)
 
 
-async def test_engine_is_an_alias_of_models(db):
+async def test_engine_set_callback_is_no_longer_routed(db):
     await db.add_user(1001, "Tester")
-    message = FakeMessage(text="/engine")
-    await main.models_handler(None, message)
-    assert "C++ TURBO ENGINE" in plain(message.shown_text)
-
-
-async def test_models_shows_the_switcher_to_an_authorised_user(db):
-    await db.add_user(1001, "Tester")
-    await db.add_premium(1001, 30, tier="models")
-    message = FakeMessage(text="/models")
-    await main.models_handler(None, message)
-    text = plain(message.shown_text)
-    assert "ENGINE SWITCHER" in text
-    labels = [plain(label) for label in message.button_texts()]
-    assert any("Python Standard" in label for label in labels)
-    assert any("C++ Turbo" in label for label in labels)
-    assert "engine_set:python" in message.callback_data()
-    assert "engine_set:cpp" in message.callback_data()
-
-
-async def test_switching_persists_the_preference_and_applies_everywhere(db):
-    await db.add_user(1001, "Tester")
-    await db.add_premium(1001, 30, tier="all")
-    message = FakeMessage(text="/models")
-    await main.models_handler(None, message)
-    await main.callback_handler(None, make_query(message, "engine_set:cpp"))
-
-    assert await db.get_user_engine(1001) == CPP
-    assert "Your Choice" in plain(message.shown_text)
-    assert "✅" in message.button_texts()[1] or \
-        "✅" in plain(message.button("engine_set:cpp").text)
-    # Private-chat extraction and the dump-channel batch read the same value.
-    private = await main.resolve_engine_for(1001, record=False)
-    assert private.engine == CPP and private.reason == engines.REASON_USER_CHOICE
-
-    await main.callback_handler(None, make_query(message, "engine_set:python"))
-    assert await db.get_user_engine(1001) == PYTHON
-    assert (await main.resolve_engine_for(1001, record=False)).engine == PYTHON
-
-
-async def test_switcher_is_refused_once_the_permission_is_revoked(db):
-    await db.add_user(1001, "Tester")
-    await db.add_premium(1001, 30, tier="models")
-    message = FakeMessage(text="/models")
-    await main.models_handler(None, message)
-    await db.remove_premium(1001)
-    query = make_query(message, "engine_set:cpp")
+    message = FakeMessage(text="/start")
+    query = make_query(message, "engine_set:cpp", FakeUser(1001))
     await main.callback_handler(None, query)
-    assert await db.get_user_engine(1001) is None
-    assert "paid add-on" in plain(" ".join(query.answer.texts))
-    assert "C++ TURBO ENGINE" in plain(message.shown_text)
+    #: No route, no crash: the loader answers with a stale-button hint or the
+    #: screen simply stays where it was.
+    assert db.users[1001]["engine_preference"] in (None, "python", "cpp")
 
-
-async def test_switcher_reports_the_global_cpp_lock(db):
-    await db.add_user(1001, "Tester")
-    await db.add_premium(1001, 30, tier="models")
-    await db.set_engine_mode("lock_cpp")
-    message = FakeMessage(text="/models")
-    await main.models_handler(None, message)
-    text = plain(message.shown_text)
-    assert "Global Lock" in text
-    assert "engine_set:cpp" not in message.callback_data()
-    assert "global lock" in text
-
-
-async def test_switcher_survives_the_python_lock_for_models_holders(db):
-    await db.add_user(1001, "Tester")
-    await db.add_premium(1001, 30, tier="models")
-    await db.set_engine_mode("lock_python")
-    message = FakeMessage(text="/models")
-    await main.models_handler(None, message)
-    assert "engine_set:cpp" in message.callback_data()
-    await main.callback_handler(None, make_query(message, "engine_set:cpp"))
-    decision = await main.resolve_engine_for(1001, record=False)
-    assert decision.engine == CPP
-    assert decision.reason == engines.REASON_MODELS_LOCKED
-
-
-async def test_switcher_shows_live_traffic(db):
-    await db.add_user(1001, "Tester")
-    await db.add_premium(1001, 30, tier="models")
-    main.ENGINE_CONTROLLER.monitor.peak_threshold = 1
-    main.ENGINE_CONTROLLER.monitor.enter()
-    main.ENGINE_CONTROLLER.monitor.enter()
-    message = FakeMessage(text="/models")
-    await main.models_handler(None, message)
-    text = plain(message.shown_text)
-    assert "2 concurrent" in text
-    assert "peak above 1" in text
-    assert "above the autoscaler threshold" in text
-
-
-def test_models_switcher_keyboard_marks_the_active_engine():
-    buttons = flat(ui.models_switcher_keyboard(CPP))
-    by_data = {b.callback_data: b for b in buttons}
-    assert "✅" in plain(by_data["engine_set:cpp"].text)
-    assert "✅" not in plain(by_data["engine_set:python"].text)
-    if ui.styles_enabled():
-        assert by_data["engine_set:cpp"].style == ui.BUTTON_SUCCESS
-        assert by_data["engine_set:python"].style == ui.BUTTON_PRIMARY
-    # With the choice fixed there are no engine buttons at all.
-    fixed = [b.callback_data for b in flat(ui.models_switcher_keyboard(CPP,
-                                                                      can_switch=False))]
-    assert "engine_set:cpp" not in fixed and "models_info" in fixed
-
-
-# --------------------------------------------------------------------------- #
-#  6. /setengine — the owner's global engine controller
-# --------------------------------------------------------------------------- #
 
 async def test_setengine_shows_the_controller_panel(db):
     message = owner_message(text="/setengine")
@@ -1647,7 +1531,8 @@ async def test_setengine_lock_cpp_routes_everyone_and_pauses_the_scaler(db):
 
 async def test_setengine_lock_python_turns_the_scaler_off(db):
     await db.add_user(1001, "Tester")
-    await db.add_premium(1001, 30, tier="models")
+    await db.add_premium(1001, 30, tier="private")
+    await db.set_models_access(1001, True)
     await db.set_user_engine(1001, CPP)
     message = owner_message(text="/setengine python")
     await main.setengine_handler(None, message)
@@ -1658,7 +1543,7 @@ async def test_setengine_lock_python_turns_the_scaler_off(db):
     free = await main.resolve_engine_for(2002)
     assert free.engine == PYTHON, "free users are locked to Python"
     vip = await main.resolve_engine_for(1001)
-    assert vip.engine == CPP, "a models holder keeps the manual /models toggle"
+    assert vip.engine == CPP, "a stored engine preference still wins under a Python lock"
 
 
 async def test_setengine_auto_restores_the_scaler(db):
@@ -1885,7 +1770,7 @@ def test_mychannels_text_renders_every_rights_state():
 async def test_stats_includes_the_engine_block(db):
     await db.add_user(1001, "Tester")
     await db.add_user(2002, "Other")
-    await db.add_premium(2002, 30, tier="models")
+    await db.add_premium(2002, 30, tier="private")
     await db.record_engine_use(CPP, 3)
     main.ENGINE_CONTROLLER.monitor.record(engines.resolve_engine("lock_cpp"))
 
@@ -1894,8 +1779,9 @@ async def test_stats_includes_the_engine_block(db):
     text = plain(message.shown_text)
     assert "BOT STATISTICS" in text
     assert "ENGINE ANALYTICS" in text
-    assert "C++ Turbo models: `1`" in text
-    assert "Private channels: `0`" in text
+    #: Round 22 — the stats screen counts the product that still exists.
+    assert "C++ Turbo models" not in text
+    assert "Private channels: `1`" in text
     assert "Routed all time" in text and "3" in text
     assert "Controller mode" in text
 
@@ -1955,7 +1841,8 @@ def test_setengine_and_addpremium_are_in_the_admin_panel(db):
     assert "setengine" in main.ADMIN_PANEL_COMMANDS
     assert "addpremium" in main.ADMIN_PANEL_COMMANDS
     assert "setengine" in main.COMMAND_NAMES
-    assert "models" in main.COMMAND_NAMES
+    assert "models" not in main.COMMAND_NAMES, "the switcher was deleted"
+    assert "testmode" in main.COMMAND_NAMES
     assert "mychannels" in main.COMMAND_NAMES
     panel = "\n".join(main.admin_panel_text(page)
                        for page in range(len(main.ADMIN_PAGES)))
@@ -1993,20 +1880,15 @@ def test_admin_help_mentions_the_new_commands():
 NEW_KEYBOARDS = [
     ("start", lambda: ui.start_keyboard()),
     ("start_admin", lambda: ui.start_keyboard(show_admin=True)),
-    ("models_switcher", lambda: ui.models_switcher_keyboard(CPP)),
-    ("models_switcher_fixed", lambda: ui.models_switcher_keyboard(None,
-                                                                  can_switch=False)),
-    ("models_upsell", lambda: ui.models_upsell_keyboard()),
-    ("models_architecture", lambda: ui.models_architecture_keyboard(CPP,
-                                                                    has_models=True)),
     ("engine_controller", lambda: ui.engine_controller_keyboard("auto")),
+    ("engine_diagnostics", lambda: ui.engine_diagnostics_keyboard()),
     ("grant_tier", lambda: ui.grant_tier_keyboard()),
-    ("grant_duration", lambda: ui.grant_duration_keyboard("all", 45)),
+    ("grant_duration", lambda: ui.grant_duration_keyboard("private", 45)),
     ("mychannels", lambda: ui.mychannels_keyboard(-100777)),
     ("mychannels_empty", lambda: ui.mychannels_keyboard(None, connected=False)),
     ("plans", lambda: ui.plans_keyboard()),
     ("payment", lambda: ui.payment_keyboard("tok")),
-    ("payment_review", lambda: ui.payment_review_keyboard(7, "month", turbo=True)),
+    ("payment_review", lambda: ui.payment_review_keyboard(7, "month")),
 ]
 
 
@@ -2034,18 +1916,14 @@ def test_callback_data_is_ascii_and_links_only_live_in_url_buttons(name, build):
 
 
 NEW_SCREENS = [
-    ("models_upsell", lambda: ui.models_upsell_text()),
-    ("models_architecture", lambda: ui.models_architecture_text(CPP)),
-    ("models_switcher", lambda: ui.models_switcher_text(CPP, "auto", concurrency=2,
-                                                        peak=False, threshold=8)),
-    ("models_locked", lambda: ui.models_locked_text("lock_cpp")),
+    ("engine_diagnostics", lambda: ui.engine_diagnostics_text(CPP)),
     ("engine_controller", lambda: ui.engine_controller_text("auto", {})),
     ("engine_mode_set", lambda: ui.engine_mode_set_text("lock_cpp")),
     ("grant_tier", lambda: ui.grant_tier_text(1001, "Tester", 45)),
-    ("grant_duration", lambda: ui.grant_duration_text(1001, "all", "Tester", 45)),
-    ("grant_custom", lambda: ui.grant_custom_days_text(1001, "all")),
-    ("grant_done", lambda: ui.grant_done_text(1001, "all", 30, "Tester")),
-    ("grant_activated", lambda: ui.grant_activated_user_text("all", 30, "Tester")),
+    ("grant_duration", lambda: ui.grant_duration_text(1001, "private", "Tester", 45)),
+    ("grant_custom", lambda: ui.grant_custom_days_text(1001, "private")),
+    ("grant_done", lambda: ui.grant_done_text(1001, "private", 30, "Tester")),
+    ("grant_activated", lambda: ui.grant_activated_user_text("private", 30, "Tester")),
     ("grant_revoked", lambda: ui.grant_revoked_text(1001, "Tester")),
     ("mychannels_empty", lambda: ui.mychannels_empty_text()),
     ("mychannels", lambda: ui.mychannels_text({"chat_id": -100777, "title": "Dump"},
@@ -2055,7 +1933,7 @@ NEW_SCREENS = [
     ("stats", lambda: ui.stats_text({"total": 1}, 0, ui.engine_analytics_text({}))),
     ("engine_analytics", lambda: ui.engine_analytics_text({})),
     ("plans", lambda: ui.plans_text()),
-    ("payment", lambda: ui.payment_text(config.PREMIUM_PLANS["month"], turbo=True)),
+    ("payment", lambda: ui.payment_text(config.PREMIUM_PLANS["month"])),
     ("admin_featured", lambda: ui.admin_featured_text()),
     ("help", lambda: ui.help_text()),
     ("hud", lambda: ui.telemetry_hud(CPP, 68)),
@@ -2081,8 +1959,10 @@ def test_new_copy_is_english_only_and_link_free(name, build):
 
 def test_help_menu_documents_the_new_commands():
     text = ui.help_text()
-    assert "/models" in text
     assert "/mychannels" in text
+    #: Round 22 — the deleted switcher is not advertised anywhere.
+    assert "/models" not in text
+    assert "Turbo" not in text
 
 
 # --------------------------------------------------------------------------- #
@@ -2117,24 +1997,26 @@ async def test_database_round_trips_the_new_user_fields(store):
 
 async def test_database_add_premium_applies_the_tier_flags(store):
     await database.add_user(1001, "Tester", "tester")
-    await database.add_premium(1001, 30, tier="models")
+    await database.add_premium(1001, 30, tier="public")
     row = await database.get_user(1001)
     assert row["is_premium"] is True
-    assert row["has_models_access"] is True
     assert row["has_private_access"] is False
-    assert row["premium_source"] == config.PREMIUM_SOURCE_MODELS
-    assert row["premium_tier"] == "models"
+    #: Round 22 — no tier hands out the retired C++ Turbo flag any more.
+    assert row["has_models_access"] is False
+    assert row["premium_source"] == config.PREMIUM_SOURCE_PUBLIC
+    assert row["premium_tier"] == "public"
     assert row["premium_expiry"] is not None
 
-    await database.add_premium(1001, None, tier="all")
+    await database.add_premium(1001, None, tier="private")
     row = await database.get_user(1001)
-    assert row["has_private_access"] is True and row["has_models_access"] is True
+    assert row["has_private_access"] is True
+    assert row["has_models_access"] is False
     assert row["premium_expiry"] is None, "days=None means lifetime"
 
 
 async def test_database_remove_premium_clears_the_flags(store):
     await database.add_user(1001, "Tester", "tester")
-    await database.add_premium(1001, 30, tier="all")
+    await database.add_premium(1001, 30, tier="private")
     await database.remove_premium(1001)
     row = await database.get_user(1001)
     assert row["is_premium"] is False
@@ -2173,10 +2055,10 @@ async def test_database_counts_engine_use_and_channel_files(store):
 async def test_database_stats_count_the_feature_grants(store):
     await database.add_user(1001, "A", "a")
     await database.add_user(1002, "B", "b")
-    await database.add_premium(1001, 30, tier="all")
+    await database.add_premium(1001, 30, tier="private")
     await database.add_premium(1002, 30, tier="public")
     stats = await database.get_bot_stats()
-    assert stats["models_access"] == 1
+    assert stats["models_access"] == 0, "no tier grants the retired flag"
     assert stats["private_access"] == 1
     assert stats["premium"] == 2
 

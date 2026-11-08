@@ -968,7 +968,10 @@ def test_an_unknown_menu_role_is_refused():
 def test_users_see_user_commands_only():
     names = {c.command for c in main.telegram_commands("user")}
     assert {"start", "help", "login", "setcaption", "setchat", "mychannels",
-            "models", "premium", "history", "feedback"} <= names
+            "premium", "history", "feedback"} <= names
+    #: Round 22 — the engine switcher is no longer a user-facing command.
+    assert "models" not in names and "engine" not in names
+    assert "testmode" not in names, "the dry run stays with the owner"
     for hidden in ("setdump", "deldump", "dump", "broadcast", "botcast", "ban", "addadmin",
                    "addpremium", "setfsub", "maintenance", "giveaway", "pin", "admin",
                    "users", "stats", "clearlogs", "payments"):

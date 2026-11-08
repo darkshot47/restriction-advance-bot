@@ -134,8 +134,8 @@ NEW_SCREENS = [
     # Rounds 2 and 10 — the corrected engine claims.
     ("speed_cap", ui.speed_cap_label),
     ("speed_cap_disabled", lambda: ui.speed_cap_label(0)),
-    ("models_upsell", ui.models_upsell_text),
-    ("models_architecture", lambda: ui.models_architecture_text(config.ENGINE_CPP)),
+    # Round 22 — the Turbo add-on is gone; only the owner diagnostics remain.
+    ("engine_diagnostics", lambda: ui.engine_diagnostics_text(config.ENGINE_CPP)),
 ]
 
 
@@ -229,12 +229,18 @@ def test_the_bare_number_prompt_is_gone_from_the_whole_ui_module():
     assert "for example `15`" not in source
 
 
-def test_engine_pages_never_claim_a_native_cipher_as_a_turbo_feature():
-    for text in (ui.models_architecture_text(config.ENGINE_CPP),
-                 ui.models_upsell_text()):
-        lowered = text.lower()
-        assert "tgcrypto" not in lowered
-        assert "native c cipher" not in lowered
+def test_the_turbo_addon_pages_are_gone_and_the_diagnostics_stay_honest():
+    """The C++ Turbo upsell, switcher and price list were removed entirely."""
+    for gone in ("models_upsell_text", "models_upsell_keyboard",
+                 "models_architecture_text", "models_architecture_keyboard",
+                 "models_switcher_text", "models_switcher_keyboard",
+                 "models_locked_text"):
+        assert not hasattr(ui, gone), f"{gone} should be deleted"
+    lowered = ui.engine_diagnostics_text(config.ENGINE_CPP).lower()
+    assert "tgcrypto" not in lowered
+    assert "native c cipher" not in lowered
+    assert "₹" not in ui.engine_diagnostics_text(config.ENGINE_CPP), \
+        "the diagnostics never sell anything"
 
 
 def test_the_two_channel_dashboard_stays_inside_the_mobile_budget():

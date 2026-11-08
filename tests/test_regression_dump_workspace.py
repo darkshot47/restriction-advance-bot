@@ -304,7 +304,7 @@ setprefix setsuffix mystats myinfo history settings language refer bookmark book
 share feedback premium stats users loggedusers activeusers newusers topusers broadcast ban unban banlist
 finduser userinfo addpremium removepremium premiumlist addadmin removeadmin adminlist setfsub fsublist
 delfsub fsublabel fsubcheck maintenance feedbacks sendmsg clearlogs export adminhelp admin admins addqr
-delqr removeqr payments redeem setchat delchat models engine mychannels setengine pin pinned setdump
+delqr removeqr payments redeem setchat delchat mychannels testmode setengine pin pinned setdump
 deldump dump post native giveaway participants endgiveaway menu cmsg botcast unpin'''.split()
 
 
