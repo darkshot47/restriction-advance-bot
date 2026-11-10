@@ -339,16 +339,19 @@ class FakeDB:
                           has_private_access=None, has_models_access=None,
                           premium_expiry=None):
         """Mirror of database.add_premium — tier decides flags *and* source."""
-        from config import GRANT_TIERS
+        from config import GRANT_TIERS, LEGACY_TIER_ALIASES
         user = self.users.setdefault(user_id, self._new_user(user_id, "Tester", None))
-        definition = GRANT_TIERS.get(str(tier or "").strip().lower()) if tier else None
+        tier_key = str(tier or "").strip().lower()
+        tier_key = LEGACY_TIER_ALIASES.get(tier_key, tier_key)
+        definition = GRANT_TIERS.get(tier_key) if tier_key else None
         if definition:
             source = definition.get("source", source)
             if has_private_access is None:
                 has_private_access = definition["has_private_access"]
             if has_models_access is None:
-                has_models_access = definition["has_models_access"]
-            user["premium_tier"] = str(tier).strip().lower()
+                #: Round 22 — nothing grants the retired C++ Turbo flag.
+                has_models_access = bool(definition.get("has_models_access", False))
+            user["premium_tier"] = tier_key
         user["is_premium"] = True
         user["premium_source"] = source
         if premium_expiry is not None:

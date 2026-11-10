@@ -312,11 +312,11 @@ def payment_review_keyboard(user_id: int, plan: str | None = None,
                             turbo: bool = False) -> InlineKeyboardMarkup:
     """Owner-only approve / fake / ban buttons attached to a payment proof.
 
-    ``callback_data`` is ``payok:<user>[:<plan>][:turbo]`` — the ``turbo`` part
-    tells the approval handler to grant the C++ Turbo ``models`` permission too.
+    ``callback_data`` is ``payok:<user>[:<plan>]``.  ``turbo`` is accepted and
+    ignored: the add-on no longer exists, and an old proof must still approve.
     """
     plan_part = f":{plan}" if plan else ""
-    turbo_part = ":turbo" if turbo else ""
+    turbo_part = ""
     return keyboard([
         [
             button("✅ Approve", callback_data=f"payok:{user_id}{plan_part}{turbo_part}",
@@ -461,14 +461,13 @@ def refer_keyboard(link: str) -> InlineKeyboardMarkup:
 
 
 def help_keyboard() -> InlineKeyboardMarkup:
-    """The help screen carries the app page and the red engines page."""
+    """The help screen: login, premium, settings, feedback and the app."""
     return keyboard([
         [button("🔐 Login", callback_data="cmd_login", style="success"),
          button("💎 Premium", callback_data="cmd_premium", style="success")],
         [button("⚙️ Settings", callback_data="cmd_settings", style="primary"),
          button("💬 Feedback", callback_data="cmd_feedback", style="primary")],
         [app_menu_button()],
-        [models_architecture_button()],
         [home_button()],
     ])
 
@@ -645,8 +644,8 @@ def help_text() -> str:
         "**📥 Download:**\n"
         "Send a link or a range: `t.me/ch/1-20`\n"
         f"/app — the {APP_NAME} page · /apk — the app file in this chat\n\n"
-        "**🧠 Engines:**\n"
-        "/models — Python Standard ⚙️ or C++ Turbo 🚀\n"
+        "**🧠 Channels & speed:**\n"
+        "Fast downloads are automatic — nothing to switch or buy.\n"
         "/mychannels — your dump-channel dashboard\n\n"
         "**🎨 Customization:**\n"
         "/setcaption /delcaption\n"
@@ -1046,9 +1045,7 @@ def premium_activated_user_text(days, tier: str = "full", plan: str | None = Non
 def payment_approved_user_text(plan_title: str | None, days: int | None,
                                turbo: bool = False) -> str:
     detail = f"\n\n📦 {plan_title} • {days} days of full access" if plan_title and days else ""
-    engine = ("\n🚀 **C++ Turbo unlocked** — switch your engine any time with /models."
-              if turbo else "")
-    return "🎉 Payment Approved! Your premium has been activated." + detail + engine
+    return "🎉 Payment Approved! Your premium has been activated." + detail
 
 
 def payment_rejected_user_text() -> str:
@@ -1639,8 +1636,9 @@ def stale_button_text() -> str:
 # Keep headings styled with Telegram formatting rather than replacing letters
 # with inaccessible Unicode lookalikes. Button labels stay short on mobile.
 def premium_overview(premium, user):
+    """The one premium page: one product, one price, no add-ons."""
     from config import (FREE_DAILY_LIMIT, PREMIUM_SOURCE_PUBLIC,
-                        PREMIUM_SOURCE_REDEEM, REDEEM_LIMITATION, TURBO_BENEFITS)
+                        PREMIUM_SOURCE_REDEEM, REDEEM_LIMITATION)
     user = user or {}
     title = "💎 **PREMIUM ACTIVE**" if premium else "💎 **PREMIUM BENEFITS**"
     expiry = user.get("premium_expiry")
@@ -1652,26 +1650,20 @@ def premium_overview(premium, user):
     elif premium and source == PREMIUM_SOURCE_PUBLIC:
         access = "Public channels only — this grant does not include private or restricted links."
     else:
-        access = ("Private-channel access requires premium manually granted by the owner and your own "
+        access = ("Private-channel access requires premium from the owner and your own "
                   "authorized Telegram session. Payment screenshots alone do not unlock it.")
-    # The C++ Turbo add-on is a separate, per-user feature flag.
-    turbo = bool(user.get("has_models_access"))
-    turbo_line = ("🚀 **C++ Turbo engine:** unlocked — switch it with /models"
-                  if turbo else
-                  "🚀 **C++ Turbo engine:** add-on available on every plan")
-    turbo_benefits = "\n".join(f"✅ {item}" for item in TURBO_BENEFITS)
     return (f"{title}{status}\n\n"
             "✨ **What you get**\n"
             "✅ Unlimited downloads from public channels\n"
+            "✅ Private / restricted channels with your own session\n"
             "✅ Up to 2 GB per file\n"
             "✅ No extraction watermark\n"
             "✅ Priority support\n\n"
-            f"🚀 **C++ Turbo add-on**\n{turbo_line}\n{turbo_benefits}\n\n"
-            f"💰 **Available plans**\n{plans_table()}\n\n"
+            f"💰 **One price, no add-ons**\n{plans_table()}\n\n"
             f"🔐 **Access policy**\n{access}\n\n"
             f"🆓 Free users get **{FREE_DAILY_LIMIT} public extractions daily** — no referrals required.\n\n"
-            "👇 Tap **Buy Plan** to choose a duration and a Standard or C++ Turbo "
-            "price. You will see the payment QR before submitting proof.")
+            "👇 Tap **Buy Plan**, choose a duration, pay the amount shown and send the "
+            "screenshot. The engine that moves your file is picked automatically.")
 
 
 def premium_overview_keyboard(owner_id=None):
@@ -1684,20 +1676,19 @@ def premium_overview_keyboard(owner_id=None):
     return keyboard([
         [button("🛍 Buy Plan", callback_data="premium_plans", style="success")],
         [button("🎁 Earn Points", callback_data="cmd_refer", style="primary"), home_button()],
-        [button("🚀 C++ Turbo", callback_data="cmd_models", style="primary")],
         [owner_contact_button()],
     ])
 
 
 def plans_text():
-    """Plan list — built from config.PREMIUM_PLANS so prices never drift."""
+    """Plan list — one price per plan, straight from config.PREMIUM_PLANS."""
     from config import PAYMENT_CONTACT
     return ("🛍 **CHOOSE YOUR PLAN**\n\n"
-            "💰 **Tiered pricing — Standard or with the C++ Turbo add-on**\n"
+            "💰 **One price. Everything included.**\n"
             f"{plans_table()}\n\n"
-            "⚙️ **Standard** runs on the Python engine.\n"
-            "🚀 **With C++ Turbo** adds the multi-threaded, zero-copy engine and "
-            "the /models switcher for the whole plan duration.\n\n"
+            "Every plan includes public + private channels, up to 2 GB per file, "
+            "no watermark and priority support. There is no add-on and no second "
+            "tier to choose.\n\n"
             "📲 Select a plan to view the owner's QR. Pay the exact amount, tap "
             "**I've paid**, then upload a screenshot.\n\n"
             f"🔎 All payments are checked manually by @{PAYMENT_CONTACT} before "
@@ -1705,24 +1696,13 @@ def plans_text():
 
 
 def plans_keyboard():
-    """One row per plan: Standard price and, when it exists, the C++ Turbo price.
-
-    ``callback_data`` keeps the legacy ``buy:<plan>`` form for the Standard
-    price and adds ``buy:<plan>:turbo`` for the C++ Turbo add-on, so buttons
-    sent before this change still check out.  Both are plain ASCII.
-    """
-    from config import PREMIUM_PLANS, plan_addon_price, plan_base_price, plan_total_price
+    """One button per plan — the only price there is."""
+    from config import PREMIUM_PLANS, plan_base_price
     rows = []
     for key, plan in PREMIUM_PLANS.items():
         title = plan.get("title", key)
-        standard = button(f"💎 {title} · ₹{plan_base_price(plan)}",
-                          callback_data=f"buy:{key}", style="success")
-        if plan_addon_price(plan):
-            turbo = button(f"🚀 {title} · ₹{plan_total_price(plan)}",
-                           callback_data=f"buy:{key}:turbo", style="primary")
-            rows.append([standard, turbo])
-        else:
-            rows.append([standard])
+        rows.append([button(f"💎 {title} · ₹{plan_base_price(plan)}",
+                            callback_data=f"buy:{key}", style="success")])
     # Telegram Stars payment row
     rows.append([button("⭐ Pay with Telegram Stars", callback_data="stars_plans", style="success")])
     rows.append([button("⬅️ Benefits", callback_data="cmd_premium", style="primary"),
@@ -1732,31 +1712,25 @@ def plans_keyboard():
 
 
 def payment_text(plan, turbo: bool = False):
-    """Payment-proof wizard copy — the amount follows the chosen variant.
+    """Payment-proof wizard copy — one amount, the plan's price.
 
-    ``turbo=True`` charges the plan **plus** the C++ Turbo add-on and lists what
-    the add-on unlocks, so the screenshot the owner reviews matches the amount.
+    ``turbo`` is accepted and ignored so an old checkout that still passes it
+    renders the same single-price screen instead of failing.
     """
-    from config import PAYMENT_CONTACT, RUPEE, plan_addon_price, plan_base_price, plan_total_price
+    from config import PAYMENT_CONTACT, RUPEE, plan_base_price
     plan = plan or {}
-    amount = plan_total_price(plan) if turbo else plan_base_price(plan)
+    amount = plan_base_price(plan)
     title = plan.get("title", "Plan")
-    engine = ("🚀 **C++ Turbo** (multi-threaded, zero-copy) + /models switcher"
-              if turbo else "⚙️ **Python Standard** (single-stream)")
-    addon = plan_addon_price(plan)
-    breakdown = (f"\n🧩 Includes: {RUPEE}{plan_base_price(plan)} base + "
-                 f"{RUPEE}{addon} C++ Turbo add-on" if turbo and addon else "")
     return (f"💳 **PAYMENT DETAILS**\n\n"
             f"📦 Plan: **{title}**\n"
-            f"⚡ Engine: {engine}\n"
-            f"💰 Amount: **{RUPEE}{amount}**{breakdown}\n\n"
+            f"💰 Amount: **{RUPEE}{amount}**\n"
+            "🧾 One price — every feature included\n\n"
             "① Scan this QR in your payment app.\n"
             "② Check the recipient and pay the exact amount.\n"
             "③ Save a screenshot showing the successful transaction.\n"
             "④ Tap **I've paid** below, then send the screenshot here.\n\n"
             f"👤 Payment review: @{PAYMENT_CONTACT}\n"
             "⏳ Premium starts only after owner verification. Never share your PIN or OTP.")
-
 
 def payment_keyboard(token):
     """Proof-wizard actions — always with the explicit owner contact URL button."""
@@ -1824,7 +1798,9 @@ def split_text(text, limit):
 #  Dual execution engines — Python Standard ⚙️ / C++ Turbo 🚀
 #
 #  Every engine string a user sees is built here: the /start corner badge, the
-#  live telemetry HUD, the /models switcher and the red architecture page.
+#  live telemetry HUD and the owner's controller/diagnostics pages.  Round 22
+#  deleted the user-facing /models switcher and the add-on it sold: the engine
+#  is now chosen automatically for everybody.
 #  engines.py owns the routing decisions, this module owns the wording.
 # --------------------------------------------------------------------------- #
 
@@ -2024,150 +2000,8 @@ def channel_download_notice(percent=None, paused: bool = False, hud: str | None 
     return f"{hud}\n\n{body}" if hud else body
 
 
-# --------------------------------------------------------------------------- #
-#  /models and /engine — the user-facing engine switcher
-# --------------------------------------------------------------------------- #
-
-def models_switcher_keyboard(active=None, *, can_switch: bool = True) -> InlineKeyboardMarkup:
-    """``[ ⚙️ Python Standard ]`` / ``[ 🚀 C++ Turbo ]`` with the active one marked.
-
-    The active engine is green (success) and carries a ✅, the other stays blue.
-    When the global C++ lock is on, the choice is fixed and both buttons are
-    replaced by a single "back" row by the caller.
-    """
-    current = engine_key(active)
-
-    def pick(key: str, label: str):
-        selected = key == current
-        text = f"✅ {label}" if selected else label
-        return button(text, callback_data=f"engine_set:{key}",
-                      style="success" if selected else "primary")
-
-    rows = [
-        [pick("python", "⚙️ Python Standard")],
-        [pick("cpp", "🚀 C++ Turbo")],
-    ]
-    if not can_switch:
-        rows = []
-    rows.append([button("🧠 Architecture", callback_data="models_info", style="primary"),
-                 home_button()])
-    return keyboard(rows)
-
-
-def models_switcher_text(active=None, mode=None, *, concurrency: int = 0,
-                         peak: bool = False, threshold: int | None = None) -> str:
-    """Screen copy of the switcher for a user who holds the ``models`` feature."""
-    from engines import ENGINE_MODE_LABELS, normalize_mode
-    resolved = engine_key(active)
-    mode_key = normalize_mode(mode)
-    #: "Your Choice" only once the user actually picked an engine.
-    badge = "Your Choice" if active else ""
-    lines = [
-        "🧠 **ENGINE SWITCHER**",
-        "",
-        active_engine_status(resolved, badge),
-        "",
-        f"🎛 **Controller mode:** {ENGINE_MODE_LABELS.get(mode_key, mode_key)}",
-        f"📈 **Live traffic:** {int(concurrency)} concurrent"
-        + (f" (peak above {int(threshold)})" if threshold is not None else ""),
-        "",
-        "Pick the engine used for **all** your extractions — private chat and "
-        "dump channels alike. The choice is stored on your account.",
-        "",
-        "⚙️ **Python Standard** — single-stream, the reliable default.",
-        "🚀 **C++ Turbo** — multi-threaded workers with zero-copy stream piping.",
-    ]
-    if mode_key == "lock_cpp":
-        lines += ["", "🔒 The owner has locked **every** extraction to C++ Turbo, "
-                      "so the switcher is fixed right now."]
-    elif peak:
-        lines += ["", "⚡ Traffic is above the autoscaler threshold — requests are "
-                      "being pushed through C++ Turbo automatically."]
-    return "\n".join(lines)
-
-
-def models_locked_text(mode=None) -> str:
-    """Shown to a models holder while the global C++ lock removes the choice."""
-    from engines import ENGINE_MODE_LABELS, normalize_mode
-    return "\n".join([
-        "🧠 **ENGINE SWITCHER**",
-        "",
-        active_engine_status("cpp", "Global Lock"),
-        "",
-        f"🎛 **Controller mode:** {ENGINE_MODE_LABELS.get(normalize_mode(mode), 'Auto')}",
-        "",
-        "🔒 Every extraction on this bot is currently forced through the "
-        "**C++ Turbo** engine by the owner, so your personal preference is "
-        "already the fastest option. The switcher returns as soon as the global "
-        "lock is lifted.",
-    ])
-
-
-def models_upsell_text() -> str:
-    """Feature overview + add-on pricing for a user **without** the feature.
-
-    Every claim is engine-specific and true of this codebase: a parallel worker
-    pool on multi-item batches, zero-copy in-memory piping, an **uncapped**
-    transfer rate against Python Standard's ``ENGINE_PYTHON_SPEED_LIMIT_MBPS``
-    cap, and priority routing above ``ENGINE_PEAK_THRESHOLD``.
-    """
-    from config import (ENGINE_PEAK_THRESHOLD, ENGINE_PYTHON_SPEED_LIMIT_MBPS,
-                        ENGINE_TURBO_WORKERS, ENGINE_ZERO_COPY_MAX_MB,
-                        PREMIUM_PLANS, RUPEE, plan_addon_price, plan_base_price)
-    rows = []
-    for plan in PREMIUM_PLANS.values():
-        addon = plan_addon_price(plan)
-        base = plan_base_price(plan)
-        if not addon:
-            continue
-        rows.append(f"• **{plan['title']}** — {RUPEE}{base} Standard · "
-                    f"+{RUPEE}{addon} with C++ Turbo = **{RUPEE}{base + addon}**")
-    pricing = "\n".join(rows) or "• C++ Turbo is sold as an add-on on every plan."
-    workers = max(1, int(ENGINE_TURBO_WORKERS))
-    cap = speed_cap_label(ENGINE_PYTHON_SPEED_LIMIT_MBPS)
-    return "\n".join([
-        "🚀 **C++ TURBO ENGINE**",
-        "",
-        "Your account runs on the **Python Standard** engine. The C++ Turbo "
-        "engine is a paid add-on:",
-        "",
-        f"✅ Parallel worker pool — up to {workers} items of a multi-link, "
-        "range or channel batch run at once; Python Standard is single-stream",
-        f"✅ Zero-copy in-memory piping up to {int(ENGINE_ZERO_COPY_MAX_MB)} MB "
-        "— no temp file, no re-read",
-        f"✅ Uncapped speed, against Python Standard's {cap} cap",
-        f"✅ Priority routing above {int(ENGINE_PEAK_THRESHOLD)} concurrent "
-        "extractions",
-        "✅ Live telemetry HUD with speed, ETA and server load",
-        "",
-        "ℹ️ A single small file is one MTProto stream on both engines, so there "
-        "Turbo only adds the zero-copy path and the missing cap.",
-        "",
-        "💰 **Add-on pricing**",
-        pricing,
-        "",
-        "👇 Tap **Upgrade to C++ Turbo** to see the payment QR, or contact the "
-        "owner for a manual grant.",
-    ])
-
-
-def models_upsell_keyboard() -> InlineKeyboardMarkup:
-    return keyboard([
-        [button("🚀 Upgrade to C++ Turbo", callback_data="premium_plans", style="success")],
-        [button("🧠 Architecture", callback_data="models_info", style="primary"),
-         button("💎 Benefits", callback_data="cmd_premium", style="primary")],
-        [owner_contact_button()],
-        [home_button()],
-    ])
-
-
-def models_architecture_button() -> InlineKeyboardButton:
-    """The red footer button of /start (``ButtonStyle.DANGER``)."""
-    return button("🧠 Models Architecture", callback_data="models_info", style="danger")
-
-
 def speed_cap_label(mbps=None) -> str:
-    """``~3 MB/s`` for the Python Standard cap, ``uncapped`` when there is none."""
+    """``uncapped`` by default (Round 22), ``~3 MB/s`` if a cap is configured."""
     from config import ENGINE_PYTHON_SPEED_LIMIT_MBPS
     value = ENGINE_PYTHON_SPEED_LIMIT_MBPS if mbps is None else mbps
     try:
@@ -2180,87 +2014,51 @@ def speed_cap_label(mbps=None) -> str:
     return f"~{shown} MB/s"
 
 
-def models_architecture_text(active=None) -> str:
-    """The detailed Python vs C++ Turbo page opened by the red /start button.
+def engine_diagnostics_text(active=None) -> str:
+    """Owner-only engine page: what runs, why, and what it changes.
 
-    Every claim here is engine-specific and actually true of this codebase.
-    TgCrypto is deliberately **not** listed as a Turbo feature: the native C
-    cipher is installed for the whole bot, so both engines use it on every
-    MTProto chunk and it differentiates nothing.
+    The user-facing "Models Architecture" page and the C++ Turbo add-on it sold
+    are gone.  This stays for the owner as a live diagnostic, with no price and
+    no upgrade pitch, because the routing is automatic for everybody now.
     """
     from config import (ENGINE_PEAK_THRESHOLD, ENGINE_PYTHON_SPEED_LIMIT_MBPS,
-                        ENGINE_TURBO_WORKERS, ENGINE_ZERO_COPY_MAX_MB,
-                        PAYMENT_CONTACT, PREMIUM_PLANS, RUPEE, plan_addon_price,
-                        plan_base_price)
+                        ENGINE_TURBO_WORKERS, ENGINE_ZERO_COPY_MAX_MB)
     workers = max(1, int(ENGINE_TURBO_WORKERS))
     zero_copy_mb = max(0, int(ENGINE_ZERO_COPY_MAX_MB))
     cap = speed_cap_label(ENGINE_PYTHON_SPEED_LIMIT_MBPS)
-    prices = "\n".join(
-        f"• **{plan['title']}** — {RUPEE}{plan_base_price(plan)} Standard · "
-        f"{RUPEE}{plan_base_price(plan) + plan_addon_price(plan)} with C++ Turbo"
-        for plan in PREMIUM_PLANS.values()
-    )
-    lines = [
-        "🧠 **MODELS ARCHITECTURE**",
+    throughput = (f"Capped at {cap} (ENGINE_PYTHON_SPEED_LIMIT_MBPS)"
+                  if cap != "uncapped" else "No speed cap — line rate")
+    return "\n".join([
+        "🧠 **ENGINE DIAGNOSTICS** (owner only)",
         "",
         active_engine_status(active),
         "",
         "⚙️ **PYTHON STANDARD**",
         "• Single-thread, single-stream pipeline",
-        "• One item at a time per batch, strictly in the order you sent",
-        f"• Download throughput capped at {cap} by a token-bucket pacer",
-        "• Buffered transfer: streamed to disk, then re-uploaded",
-        "• Included in every plan, free tier included",
+        f"• Download throughput: {throughput}",
+        "• Streamed to disk, then re-uploaded",
         "",
         "🚀 **C++ TURBO**",
-        f"• Parallel worker pool — up to {workers} items of a multi-link, range "
-        "or channel batch run at the same time (Python Standard is single-stream)",
-        f"• Zero-copy in-memory piping: files up to {zero_copy_mb} MB are handed "
-        "to the uploader straight from memory — no temp file, no re-read",
-        "• Uncapped speed — no throughput limit at all, against Python "
-        f"Standard's {cap} cap",
-        f"• Priority routing above {int(ENGINE_PEAK_THRESHOLD)} concurrent "
-        "extractions",
-        "",
-        "📊 **TRAFFIC HANDLING**",
-        "• Python Standard: 1 stream per batch — queues grow with traffic",
-        f"• C++ Turbo: {workers} overlapping streams per batch — the download "
-        "and the upload of different files run at the same time",
-        "• Item starts stay spaced by the anti-ban gap on both engines, so "
-        "parallelism never turns into hammering Telegram",
-        "",
-        "🔍 **WHERE TURBO DOES NOT CHANGE ANYTHING**",
-        "A single small file is **one MTProto stream on both engines** — there "
-        "is nothing to parallelise, so the worker pool stays idle. The win on "
-        "that path is only the zero-copy piping (no temp file, no re-read) and "
-        "the missing speed cap. Turbo pays off on batches: multi-link posts, "
-        "ranges and dump-channel posts.",
+        f"• Parallel worker pool — up to {workers} items of a batch at once",
+        f"• Zero-copy piping up to {zero_copy_mb} MB — no temp file, no re-read",
+        "• Same uncapped throughput — the win is parallelism, not a bigger pipe",
+        f"• Priority routing above {int(ENGINE_PEAK_THRESHOLD)} concurrent extractions",
         "",
         "🤖 **AUTO MODE (default)**",
-        "The controller watches live concurrency. During a traffic spike every "
-        "request is routed to C++ Turbo so nothing queues; when traffic returns "
-        "to normal, free users go back to Python Standard automatically.",
+        "The controller watches live concurrency: a spike moves everything to "
+        "C++ Turbo so nothing queues, and normal traffic falls back to Python.",
         "",
-        "🔓 **HOW TO UNLOCK C++ TURBO**",
-        prices,
-        "",
-        f"Pay the add-on amount and send the screenshot, or tap **Contact Owner** "
-        f"below to reach @{PAYMENT_CONTACT} for a manual grant. The owner can also "
-        "grant it with /addpremium.",
-    ]
-    return "\n".join(lines)
+        "ℹ️ Users never pick an engine and nothing is sold as an add-on any "
+        "more — the routing above is the whole product. Use /setengine to force "
+        "a mode for the whole bot.",
+    ])
 
 
-def models_architecture_keyboard(active=None, *, has_models: bool = False) -> InlineKeyboardMarkup:
-    rows = []
-    if has_models:
-        rows.append([button("🎛 Open Switcher", callback_data="cmd_models", style="success")])
-    else:
-        rows.append([button("🚀 Upgrade to C++ Turbo", callback_data="premium_plans",
-                            style="success")])
-    rows.append([owner_contact_button()])
-    rows.append([home_button()])
-    return keyboard(rows)
+def engine_diagnostics_keyboard() -> InlineKeyboardMarkup:
+    return keyboard([
+        [button("🔁 Refresh", callback_data="cmd_setengine", style="primary")],
+        [home_button()],
+    ])
 
 
 # --------------------------------------------------------------------------- #
@@ -2282,6 +2080,7 @@ def engine_controller_keyboard(mode=None) -> InlineKeyboardMarkup:
         [pick("auto", "🤖 Auto (Autoscaler)")],
         [pick("lock_cpp", "🚀 Lock to C++ Turbo")],
         [pick("lock_python", "⚙️ Lock to Python")],
+        [button("🧠 Diagnostics", callback_data="engine_diag", style="primary")],
         [button("📊 Refresh", callback_data="cmd_setengine", style="primary"), home_button()],
     ])
 
@@ -2314,8 +2113,8 @@ def engine_controller_text(mode=None, snapshot=None) -> str:
         "VIP) run on C++ Turbo. The autoscaler is paused.",
         "",
         "**⚙️ Lock to Python** — global default locked to Python Standard and the "
-        "autoscaler disabled. Free users are locked to Python; premium users who "
-        "hold the **models** permission keep their own /models switch.",
+        "autoscaler disabled. A stored per-user engine preference still wins; "
+        "otherwise everybody runs on Python Standard.",
     ]
     return "\n".join(lines)
 
@@ -2345,34 +2144,12 @@ def owner_contact_button(label: str = "💬 Contact Owner") -> InlineKeyboardBut
     return button(label, url=contact_owner_url(), style="primary")
 
 
-def plan_addon_label(plan) -> str:
-    """``"+₹50 C++ Turbo"`` — empty when a plan carries no add-on."""
-    from config import RUPEE, plan_addon_price
-    addon = plan_addon_price(plan)
-    return f"+{RUPEE}{addon} C++ Turbo" if addon else ""
-
-
-def plan_price_labels(plan) -> tuple[str, str]:
-    """``("₹99", "₹149")`` — Standard price and price with the C++ add-on."""
-    from config import RUPEE, plan_addon_price, plan_base_price, plan_total_price
-    base = f"{RUPEE}{plan_base_price(plan)}"
-    if not plan_addon_price(plan):
-        return base, base
-    return base, f"{RUPEE}{plan_total_price(plan)}"
-
-
 def plans_table() -> str:
-    """Every plan as ``Standard`` / ``with C++ Turbo`` / ``Total`` lines."""
-    from config import PREMIUM_PLANS, RUPEE, plan_addon_price, plan_base_price
+    """Every plan as one ``title — price`` line."""
+    from config import PREMIUM_PLANS, RUPEE, plan_base_price
     lines = []
     for plan in PREMIUM_PLANS.values():
-        base, addon = plan_base_price(plan), plan_addon_price(plan)
-        title = plan.get("title", "Plan")
-        if addon:
-            lines.append(f"• **{title}** — {RUPEE}{base} Standard | "
-                         f"+{RUPEE}{addon} C++ Turbo = **{RUPEE}{base + addon}**")
-        else:
-            lines.append(f"• **{title}** — {RUPEE}{base}")
+        lines.append(f"• **{plan.get('title', 'Plan')}** — {RUPEE}{plan_base_price(plan)}")
     return "\n".join(lines)
 
 
@@ -2381,15 +2158,14 @@ def plans_table() -> str:
 # --------------------------------------------------------------------------- #
 
 def grant_tier_keyboard() -> InlineKeyboardMarkup:
-    """The four feature tiers, two per row, plus cancel.
+    """The two feature tiers, one per row, plus cancel.
 
     Labels stay inside the 28-character mobile budget — the full description of
     every tier is printed in :func:`grant_tier_text` instead of the button.
     """
     from config import GRANT_TIERS
-    order = ["public", "models", "private", "all"]
-    styles = {"public": "primary", "models": "success",
-              "private": "primary", "all": "success"}
+    order = ["public", "private"]
+    styles = {"public": "primary", "private": "success"}
     buttons = []
     for key in order:
         tier = GRANT_TIERS.get(key)
@@ -2414,7 +2190,7 @@ def grant_tier_text(user_id, name: str | None = None, days=None) -> str:
         "**Step 1 of 2 — choose the feature tier**",
         "",
     ]
-    for key in ("public", "models", "private", "all"):
+    for key in ("public", "private"):
         tier = GRANT_TIERS.get(key)
         if not tier:
             continue
@@ -2494,7 +2270,6 @@ def grant_done_text(user_id, tier: str, days=None, name: str | None = None) -> s
         f"👤 User: {who}",
         f"🎖 Tier: **{definition.get('number', '')} {definition.get('label', tier)}**".strip(),
         f"🔓 Private channels: **{'yes' if definition.get('has_private_access') else 'no'}**",
-        f"🚀 C++ Turbo models: **{'yes' if definition.get('has_models_access') else 'no'}**",
         "💎 Premium: **yes**",
         f"📅 Expiry: **{'lifetime — no expiry' if days is None else str(int(days)) + ' day(s)'}**",
         "",
@@ -2510,10 +2285,7 @@ def grant_activated_user_text(tier: str, days=None, name: str | None = None) -> 
     features = ["✅ Unlimited public-channel extractions"]
     if definition.get("has_private_access"):
         features.append("✅ Private and restricted channels (login required)")
-    if definition.get("has_models_access"):
-        features.append("✅ C++ Turbo engine switcher — /models")
-    else:
-        features.append("⚙️ Python Standard engine")
+    features.append("⚡ Automatic engine routing — no setup needed")
     expiry = ("♾ **Lifetime — no expiry**" if days is None
               else f"📅 Valid for **{int(days)} day(s)**")
     return "\n".join([
@@ -2525,21 +2297,18 @@ def grant_activated_user_text(tier: str, days=None, name: str | None = None) -> 
         *features,
         expiry,
         "",
-        "Open /start to use it. Tap 🧠 **Models Architecture** to see what the "
-        "C++ Turbo engine changes." if definition.get("has_models_access")
-        else "Open /start to use it.",
+        "Open /start to use it.",
     ])
 
 
 def grant_revoked_text(user_id, name: str | None = None) -> str:
     who = f"{name} (`{user_id}`)" if name else f"`{user_id}`"
     return (f"❌ **VIP REVOKED**\n\n👤 User: {who}\n\n"
-            "Premium, private-channel access and the C++ Turbo models "
-            "permission were all removed.")
+            "Premium and private-channel access were removed.")
 
 
 def grant_tier_unknown_text() -> str:
-    return "⚠️ **Unknown tier**\n\nRun /addpremium again and pick one of the four tiers."
+    return "⚠️ **Unknown tier**\n\nRun /addpremium again and pick one of the two tiers."
 
 
 # --------------------------------------------------------------------------- #
@@ -2796,6 +2565,7 @@ ADMIN_COMMAND_LABELS = {
     "delfsub": "Delete Force Sub",
     "setchat": "Channel Setup Wizard",
     "setengine": "Global Engine Controller (Lock / Auto)",
+    "testmode": "Walk the premium flow, no charges",
     "addpremium": "Granular VIP Grant",
     "removepremium": "Revoke VIP",
     "stats": "Global & Engine Analytics",
@@ -2851,7 +2621,7 @@ ADMIN_COMMAND_LABELS = {
 #: Emoji shown in front of each command in the panel text.
 ADMIN_COMMAND_ICONS = {
     "setfsub": "📢", "fsublist": "📋", "delfsub": "🗑️", "setchat": "⚙️",
-    "setengine": "🧠", "addpremium": "💎", "removepremium": "❌", "stats": "📊",
+    "setengine": "🧠", "testmode": "🧪", "addpremium": "💎", "removepremium": "❌", "stats": "📊",
     "broadcast": "📢", "botcast": "🤖", "cmsg": "🎨", "unpin": "📍",
     "ban": "🚫", "unban": "🚫", "payments": "💳",
     "maintenance": "🛠️", "users": "👥", "loggedusers": "🔐", "newusers": "🆕",
@@ -2908,8 +2678,6 @@ USER_MENU = (
     ("setchat", "📡", "Connect a channel to extract links in"),
     ("delchat", "🔌", "Disconnect a connected channel"),
     ("mychannels", "📺", "Manage your connected channels"),
-    ("models", "🧠", "Choose your download engine"),
-    ("engine", "🚀", "Switch between Python and C++ Turbo"),
     ("mystats", "📊", "See your download statistics"),
     ("myinfo", "👤", "View your profile and plan"),
     ("history", "📜", "Show your last 10 downloads"),
@@ -2934,6 +2702,7 @@ STAFF_MENU_EXTRA = {
     "giveawaystatus": ("📊", "Show the running giveaway"),
     "admin": ("🛡", "Open the admin panel"),
     "admins": ("🛡", "Open the admin panel"),
+    "testmode": ("🧪", "Preview the premium flow, no charges"),
     # The panel labels of these read badly as a one-line menu entry.
     "broadcast": ("📢", "Broadcast to bot users and your channels"),
     "ban": ("🚫", "Ban a user"),
@@ -3013,7 +2782,6 @@ def stats_text(stats, bookmarks: int = 0, engine_block: str | None = None) -> st
         "",
         "🔐 **Feature grants:**",
         f"├ Private channels: `{int(stats.get('private_access', 0))}`",
-        f"└ C++ Turbo models: `{int(stats.get('models_access', 0))}`",
         "",
         f"📥 Downloads: `{int(stats.get('total_downloads', 0))}`",
         f"🔖 Bookmarks: `{int(bookmarks)}`",
@@ -3045,25 +2813,21 @@ def admin_featured_text() -> str:
 
 def payment_review_owner_text(user_id, plan_title: str, amount, days, turbo: bool = False) -> str:
     """Caption the owner receives with a proof screenshot."""
-    engine = ("🚀 **C++ Turbo add-on included**" if turbo
-              else "⚙️ Standard plan (Python engine)")
     duration = "lifetime" if days is None else f"{int(days)} days"
     return (f"💳 **PAYMENT REVIEW**\n\n"
             f"👤 User: `{user_id}`\n"
             f"📦 Plan: **{plan_title}** • **{amount}**\n"
-            f"{engine}\n"
             f"📅 Duration: {duration}\n\n"
             "🔎 Verify this screenshot against your actual payment records.\n"
             f"👑 Owner approval: `/addpremium {user_id}` — or tap ✅ Approve, which "
-            "grants exactly this plan and engine.")
+            "grants exactly this plan.")
 
 
 def payment_submitted_text(plan_title: str, amount, turbo: bool = False) -> str:
     """Confirmation the buyer sees after uploading a screenshot."""
     from config import PAYMENT_CONTACT
-    engine = "🚀 C++ Turbo add-on" if turbo else "⚙️ Standard plan"
     return (f"✅ **Payment proof submitted**\n\n"
-            f"📦 {plan_title} • {amount} • {engine}\n"
+            f"📦 {plan_title} • {amount}\n"
             f"⏳ Awaiting verification by @{PAYMENT_CONTACT}. This is not an "
             "automatic payment confirmation.\n"
             "💎 The owner will activate your premium after checking payment.")
@@ -3954,9 +3718,8 @@ def giveaway_finished_text(winner_label: str | None, prize: str, total: int) -> 
 def giveaway_winner_dm_text(prize: str) -> str:
     return ("🎉 **YOU WON THE GIVEAWAY!**\n\n"
             f"🏆 **Prize:** {prize}\n\n"
-            "Your premium has been granted automatically — open /premium or "
-            "/models to see your access. Congratulations, and thank you for "
-            "taking part!")
+            "Your premium has been granted automatically — open /premium to see "
+            "your access. Congratulations, and thank you for taking part!")
 
 
 def giveaway_owner_ended_text(winner_label: str | None, total: int, granted: bool) -> str:

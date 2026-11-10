@@ -94,7 +94,7 @@ def test_the_channel_allow_list_is_explicit_and_small():
     assert set(main.ADMIN_PANEL_COMMANDS) <= allowed
     assert set(main.ADMIN_OWNER_COMMANDS) <= allowed
     #: Nothing personal sneaks in.
-    for personal in ("start", "premium", "models", "engine", "mychannels",
+    for personal in ("start", "premium", "testmode", "mychannels",
                      "setcaption", "delcaption", "myinfo", "history", "refer",
                      "redeem", "settings", "language", "login", "logout",
                      "bookmark", "favorites", "feedback", "mystats", "status"):

@@ -67,14 +67,25 @@ public class TgLinkTest {
     }
 
     @Test
-    public void usernameOnly() {
+    public void usernameRequiresExplicitAtPrefixNeverAutoPrependsAt() {
         TgLink link = TgLink.parse("@some_channel");
         assertTrue(link.valid);
         assertEquals("some_channel", link.username);
         assertEquals(0L, link.messageId);
+
+        TgLink withPost = TgLink.parse("@some_channel/145");
+        assertTrue(withPost.valid);
+        assertEquals("some_channel", withPost.username);
+        assertEquals(145L, withPost.messageId);
+
         TgLink plain = TgLink.parse("some_channel");
-        assertTrue(plain.valid);
-        assertEquals("some_channel", plain.username);
+        assertFalse(plain.valid);
+        assertEquals("", plain.username);
+
+        for (TgLink word : TgLink.parseAll(
+                "menu itna bada kyu kardiya hai uploading channel glitch samjhe")) {
+            assertFalse(word.valid);
+        }
     }
 
     @Test

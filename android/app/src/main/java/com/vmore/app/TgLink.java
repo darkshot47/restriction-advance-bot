@@ -143,15 +143,61 @@ public final class TgLink {
             value = value.substring(4);
             lower = value.toLowerCase(Locale.US);
         }
+        boolean hadTelegramHost = false;
         for (String host : new String[]{"t.me/", "telegram.me/", "telegram.dog/", "telegram.org/"}) {
             if (lower.startsWith(host)) {
                 value = value.substring(host.length());
                 lower = value.toLowerCase(Locale.US);
+                hadTelegramHost = true;
                 break;
             }
         }
         if (value.startsWith("/")) {
             value = value.substring(1);
+            lower = value.toLowerCase(Locale.US);
+        }
+
+        // Explicit @username, @username/145, or @username/10-20
+        if (value.startsWith("@")) {
+            String handleRest = value.substring(1);
+            if (handleRest.contains("/")) {
+                String[] parts = handleRest.split("/");
+                link.username = parts[0];
+                if (!isUsername(link.username)) {
+                    link.error = "that @username looks wrong";
+                    return link;
+                }
+                if (parts.length >= 2) {
+                    applyMessagePart(link, parts[1]);
+                }
+                link.valid = link.error.isEmpty();
+                return link;
+            }
+            link.username = handleRest;
+            link.valid = isUsername(link.username);
+            link.error = link.valid ? "" : "that @username looks wrong";
+            return link;
+        }
+
+        // Without a real Telegram host (t.me / telegram.me) or explicit @ prefix,
+        // NEVER guess or auto-prepend '@' onto plain words or ordinary sentences.
+        if (!hadTelegramHost) {
+            if (looksLikeMessagePart(value)) {
+                link.needsChatContext = true;
+                applyMessagePart(link, value);
+                link.valid = link.messageId > 0 && link.error.isEmpty();
+                if (link.messageId <= 0 && link.error.isEmpty()) {
+                    link.error = "that message number is not valid";
+                }
+                return link;
+            }
+            if (value.startsWith("-") && isNumber(value) && value.length() >= 8) {
+                link.chatId = parseLong(value);
+                link.valid = link.chatId != 0;
+                return link;
+            }
+            link.error = "paste a direct Telegram link (https://t.me/...) or @username";
+            return link;
         }
 
         // Invite links: t.me/+hash and t.me/joinchat/hash
@@ -186,39 +232,12 @@ public final class TgLink {
             if (!link.valid) {
                 link.error = "that private link has no chat id";
             } else if (link.error.isEmpty() && link.messageId <= 0) {
-                // A chat without a message is fine: the caller can scan it.
                 link.valid = true;
             }
             return link;
         }
 
-        // @username
-        if (value.startsWith("@")) {
-            link.username = value.substring(1);
-            link.valid = isUsername(link.username);
-            link.error = link.valid ? "" : "that username looks wrong";
-            return link;
-        }
-
-        // A bare number or range: the chat has to come from the screen.
-        if (looksLikeMessagePart(value)) {
-            link.needsChatContext = true;
-            applyMessagePart(link, value);
-            link.valid = link.messageId > 0 && link.error.isEmpty();
-            if (link.messageId <= 0 && link.error.isEmpty()) {
-                link.error = "that message number is not valid";
-            }
-            return link;
-        }
-
-        // A numeric chat id (groups and channels are negative).
-        if (isNumber(value) && (value.startsWith("-") || value.length() >= 8)) {
-            link.chatId = parseLong(value);
-            link.valid = link.chatId != 0;
-            return link;
-        }
-
-        // username/message or username/start-end
+        // t.me/username/message or t.me/username/start-end
         if (value.contains("/")) {
             String[] parts = value.split("/");
             link.username = parts[0];
@@ -233,7 +252,7 @@ public final class TgLink {
             return link;
         }
 
-        // A plain username.
+        // t.me/username
         link.username = value;
         link.valid = isUsername(value);
         link.error = link.valid ? "" : "that link was not understood";

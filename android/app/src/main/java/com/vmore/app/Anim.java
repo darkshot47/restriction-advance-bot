@@ -19,6 +19,21 @@ final class Anim {
     private Anim() {
     }
 
+    /** True when the user turned system animations off in Accessibility settings. */
+    static boolean motionOff(android.content.Context context) {
+        if (context == null) {
+            return false;
+        }
+        try {
+            float scale = android.provider.Settings.Global.getFloat(
+                    context.getContentResolver(),
+                    android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f);
+            return scale == 0f;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
     /** Content slides up and fades in when a screen appears. */
     static void pageIn(View root) {
         if (root == null) {

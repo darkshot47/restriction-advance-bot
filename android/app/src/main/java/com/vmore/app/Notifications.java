@@ -10,15 +10,16 @@ import android.os.Build;
 
 /**
  * Notification plumbing: the live progress of the queue (with Pause all and Stop
- * buttons) and the "job finished" note. Both stay in the shade when the app is
- * closed, because a batch keeps running in the background.
+ * buttons), the floating Smart feature status row, and the finished job note.
  */
 final class Notifications {
 
     static final String CHANNEL_PROGRESS = "vmore_queue";
     static final String CHANNEL_DONE = "vmore_done";
+    static final String CHANNEL_SMART = "vmore_smart";
     static final int ID_PROGRESS = 4101;
     static final int ID_DONE = 4102;
+    static final int ID_SMART = 4103;
 
     private Notifications() {
     }
@@ -43,6 +44,13 @@ final class Notifications {
                 NotificationManager.IMPORTANCE_DEFAULT);
         done.setDescription("Tells you when a job finished");
         manager.createNotificationChannel(done);
+
+        NotificationChannel smart = new NotificationChannel(CHANNEL_SMART,
+                context.getString(R.string.common_notification_channel_smart),
+                NotificationManager.IMPORTANCE_LOW);
+        smart.setDescription(" Keeps the floating Smart feature active above other apps");
+        smart.setShowBadge(false);
+        manager.createNotificationChannel(smart);
     }
 
     private static PendingIntent foregroundAction(Context context, String action, int code) {
@@ -54,6 +62,16 @@ final class Notifications {
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             return PendingIntent.getForegroundService(context, code, intent, flags);
+        }
+        return PendingIntent.getService(context, code, intent, flags);
+    }
+
+    private static PendingIntent smartAction(Context context, String action, int code) {
+        Intent intent = new Intent(context, SmartOverlayService.class);
+        intent.setAction(action);
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            flags |= PendingIntent.FLAG_IMMUTABLE;
         }
         return PendingIntent.getService(context, code, intent, flags);
     }
@@ -76,10 +94,35 @@ final class Notifications {
         return new Notification.Builder(context);
     }
 
+    /** Foreground notification for the floating Smart feature overlay. */
+    static Notification smart(Context context, String detail) {
+        ensureChannels(context);
+        Notification.Builder builder = base(context, CHANNEL_SMART);
+        builder.setContentTitle(context.getString(R.string.smart_service_label))
+                .setContentText(detail == null || detail.isEmpty()
+                        ? context.getString(R.string.smart_step_ready) : detail)
+                .setSmallIcon(R.drawable.ic_smart)
+                .setContentIntent(openApp(context))
+                .setOngoing(true)
+                .setOnlyAlertOnce(true)
+                .addAction(new Notification.Action.Builder(
+                        R.drawable.ic_smart,
+                        context.getString(R.string.smart_open_menu),
+                        smartAction(context, SmartOverlayService.ACTION_SHOW_MENU, 31))
+                        .build())
+                .addAction(new Notification.Action.Builder(
+                        R.drawable.ic_close,
+                        context.getString(R.string.smart_stop),
+                        smartAction(context, SmartOverlayService.ACTION_STOP, 32))
+                        .build());
+        return builder.build();
+    }
+
     /** The live queue notification: one row per running job. */
     static Notification progress(Context context, String name, String stage, long done, long total,
                                  boolean paused) {
-        int percent = Format.percent(done, total);
+        int rawPct = Format.percent(done, total);
+        int percent = QJob.UPLOADING.equals(stage) ? Math.min(99, rawPct) : rawPct;
         String label = stageLabel(context, stage);
         String size = total > 0
                 ? Format.size(done) + " / " + Format.size(total)
@@ -90,8 +133,6 @@ final class Notifications {
                 .setContentText(paused ? label + " • paused • " + size : label + " • " + size)
                 .setSmallIcon(R.drawable.ic_download)
                 .setContentIntent(openApp(context))
-                //: A paused queue is not holding the phone awake any more, so the
-                //: row may be swiped away once the service is gone.
                 .setOngoing(!paused)
                 .setOnlyAlertOnce(true)
                 .setProgress(100, percent, total <= 0);
@@ -118,8 +159,6 @@ final class Notifications {
         NotificationManager manager =
                 (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
         if (manager != null && !QueueService.running()) {
-            //: The service is not holding this row, so it has to be posted from
-            //: here to stay in the shade after the queue stopped.
             manager.notify(ID_PROGRESS, notification);
         }
         return notification;
@@ -131,6 +170,15 @@ final class Notifications {
                 (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
         if (manager != null) {
             manager.cancel(ID_PROGRESS);
+        }
+    }
+
+    /** Clears the Smart feature foreground notification when turned off. */
+    static void cancelSmart(Context context) {
+        NotificationManager manager =
+                (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager != null) {
+            manager.cancel(ID_SMART);
         }
     }
 
@@ -155,6 +203,8 @@ final class Notifications {
             return "";
         }
         switch (stage) {
+            case QJob.COPYING:
+                return context.getString(R.string.common_copying);
             case QJob.UPLOADING:
                 return context.getString(R.string.common_uploading);
             case QJob.RESOLVING:

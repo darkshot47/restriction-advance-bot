@@ -285,7 +285,7 @@ async def test_feedback_with_mentions_reaches_the_owner(db, fake_bot):
 
 
 # --------------------------------------------------------------------------- #
-# 4. /addpremium two-tier selection
+# 4. /addpremium two-tier selection (public / private — Round 22)
 # --------------------------------------------------------------------------- #
 
 @pytest.mark.asyncio
@@ -300,9 +300,11 @@ async def test_addpremium_asks_for_the_tier_first(db, monkeypatch):
     assert sc("GRANULAR VIP GRANT") in message.shown_text
     assert sc("Step 1 of 2") in message.shown_text
     assert message.button("grant_tier:public").text == sc("1️⃣ Only Public")
-    assert message.button("grant_tier:models").text == sc("2️⃣ Public + Models")
-    assert message.button("grant_tier:private").text == sc("3️⃣ Public + Private")
-    assert message.button("grant_tier:all").text == sc("4️⃣ All-in-One")
+    assert message.button("grant_tier:private").text == sc("2️⃣ Public + Private")
+    #: Round 22 — exactly two tiers; the models / all-in-one steps are gone.
+    for gone in ("grant_tier:models", "grant_tier:all"):
+        with pytest.raises(AssertionError):
+            message.button(gone)
     assert message.button("cancel_action").callback_data == "cancel_action"
     grant.assert_not_called()
     assert main.premium_tier_pending[main.OWNER_ID] == {"user_id": 2002, "days": 45}
@@ -323,11 +325,11 @@ async def test_addpremium_public_only_tier(db, press, fake_bot):
     assert user["has_private_access"] is False
     assert user["has_models_access"] is False
     assert not await main.private_access(2002)          # private links stay blocked
-    assert not await main.models_access(2002)           # no C++ Turbo switcher
     assert sc("Only Public") in message.shown_text
     notification = [m for m in fake_bot.sent if m["chat_id"] == 2002][-1]["text"]
     assert sc("VIP ACTIVATED") in notification
-    assert "python standard engine" in ui.plain_caps(notification)
+    #: Round 22 — the engine is automatic now, nothing to switch or buy.
+    assert "automatic engine routing" in ui.plain_caps(notification)
     assert not main.premium_tier_pending
 
 
@@ -337,21 +339,18 @@ async def test_addpremium_full_tier(db, press, fake_bot):
     message = FakeMessage(text="/addpremium 2002 90", user=FakeUser(main.OWNER_ID))
     await main.addpremium_handler(None, message)
 
-    await press(message, "grant_tier:all")
-    await press(message, "grant_dur:all:quarter")
+    await press(message, "grant_tier:private")
+    await press(message, "grant_dur:private:quarter")
 
     assert db.users[2002]["premium_source"] == "manual"
     assert db.users[2002]["has_private_access"] is True
-    assert db.users[2002]["has_models_access"] is True
     assert await main.private_access(2002)              # private extraction unlocked
-    assert await main.models_access(2002)               # C++ Turbo switcher unlocked
     import datetime as _dt
     assert db.users[2002]["premium_expiry"].date() == (
         _dt.datetime.now() + _dt.timedelta(days=90)).date()
-    assert sc("All-in-One") in message.shown_text
+    assert sc("Public + Private") in message.shown_text
     notification = [m for m in fake_bot.sent if m["chat_id"] == 2002][-1]["text"]
     assert "private and restricted channels" in ui.plain_caps(notification)
-    assert "c++ turbo engine switcher" in ui.plain_caps(notification)
 
 
 @pytest.mark.asyncio
@@ -1147,8 +1146,8 @@ def test_no_button_is_a_dead_end(db):
                      "buy:", "paid:", "users_page:", "loggedusers:",
                      "fsub:", "fsub_page:", "fsub_list_page:", "fsub_del:", "fsub_rename:",
                      "fsub_del_all",
-                     # Round 6: dual engine, granular grants, channel dashboard.
-                     "engine_set:", "engine_mode:", "grant_tier:", "grant_dur:",
+                     # Round 6: engine controller, granular grants, dashboard.
+                     "engine_mode:", "grant_tier:", "grant_dur:",
                      "grant_back:", "mych_test:", "mych_verify:", "mych_del:")
     direct_routes = {"home", "close", "cancel_login", "cancel_action", "redeem_points"}
     keyboards = [
@@ -1164,17 +1163,12 @@ def test_no_button_is_a_dead_end(db):
         ui.premium_upsell_keyboard(), ui.private_access_keyboard(), ui.daily_limit_keyboard(),
         ui.setchat_check_keyboard(), ui.premium_tier_keyboard(),
         ui.payment_review_keyboard(7, "month"), ui.payment_review_keyboard(7),
-        ui.payment_review_keyboard(7, "month", turbo=True),
+        ui.payment_review_keyboard(7, "month"),
         ui.admin_back_keyboard(),
-        # Round 6 keyboards.
-        ui.models_switcher_keyboard("cpp"), ui.models_switcher_keyboard("python"),
-        ui.models_switcher_keyboard("cpp", can_switch=False),
-        ui.models_upsell_keyboard(),
-        ui.models_architecture_keyboard("cpp", has_models=True),
-        ui.models_architecture_keyboard(None, has_models=False),
+        # Round 6 keyboards, minus the deleted Turbo switcher (Round 22).
         ui.engine_controller_keyboard("auto"), ui.engine_controller_keyboard("lock_cpp"),
-        ui.grant_tier_keyboard(), ui.grant_duration_keyboard("all"),
-        ui.grant_duration_keyboard("models", 45),
+        ui.engine_diagnostics_keyboard(),
+        ui.grant_tier_keyboard(), ui.grant_duration_keyboard("private"),
         ui.mychannels_keyboard(-100777), ui.mychannels_keyboard(None, connected=False),
     ]
     seen = set()

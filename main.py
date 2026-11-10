@@ -26,6 +26,7 @@ from pyrogram.errors import (
     UserAlreadyParticipant, ChatAdminRequired, PeerIdInvalid, UserNotParticipant
 )
 
+import testmode
 import ui
 import database
 import engines
@@ -525,9 +526,10 @@ TRANSFER_SLEEPER = asyncio.sleep
 def engine_speed_limit(decision) -> float:
     """MB/s cap of the resolved engine — ``0.0`` means "uncapped".
 
-    ⚙️ Python Standard is throttled to ``config.ENGINE_PYTHON_SPEED_LIMIT_MBPS``
-    (default 3 MB/s); 🚀 C++ Turbo is never capped.  Setting the constant to
-    ``0`` disables the cap for Python Standard too.
+    Since Round 22 the shipped default is ``0`` — **uncapped** — because the
+    3 MB/s ceiling existed only to make the deleted C++ Turbo add-on look
+    faster.  A deploy can still set ``ENGINE_PYTHON_SPEED_LIMIT_MBPS`` (for
+    example ``3``) to pace ⚙️ Python Standard; 🚀 C++ Turbo is never capped.
     """
     engine = getattr(decision, "engine", None) or decision
     if engines.normalize_engine(engine) != ENGINE_PYTHON:
@@ -1950,85 +1952,27 @@ async def cb_premium_plans(client, query):
 #  /models and /engine — the user's engine switcher
 # --------------------------------------------------------------------------- #
 
-async def show_models(source):
-    """The engine switcher for models holders, the pitch for everybody else.
+async def show_engine_diagnostics(source):
+    """Owner-only engine page: which engine runs, why, and at what load.
 
-    Three cases, all driven by the granular ``models`` permission and the
-    global controller mode:
-
-    * no permission → C++ Turbo feature overview + add-on pricing + upgrade CTA;
-    * permission + global C++ lock → the engine is already forced, say so;
-    * permission → the interactive ⚙️ / 🚀 switcher.
+    The old user-facing ``/models`` switcher (and the C++ Turbo add-on it sold)
+    is gone.  This page stays for the owner because it explains the automatic
+    routing, but it is not part of the product a user buys.
     """
-    uid = source.from_user.id
-    await ensure_user(source.from_user)
+    if source.from_user.id != OWNER_ID:
+        await render(source, "🚫 Owner only.")
+        return
     await ENGINE_CONTROLLER.load_mode()
-    mode = ENGINE_CONTROLLER.mode
-    if not await models_access(uid):
-        await render(source, ui.models_upsell_text(), ui.models_upsell_keyboard())
-        return
-    preference = await get_user_engine(uid)
-    decision = ENGINE_CONTROLLER.decide(has_models=True, preference=preference,
-                                       record=False)
-    if mode == ENGINE_MODE_LOCK_CPP:
-        await render(source, ui.models_locked_text(mode),
-                     ui.models_architecture_keyboard(decision.engine, has_models=True))
-        return
-    await render(
-        source,
-        ui.models_switcher_text(preference, mode,
-                                concurrency=ENGINE_CONTROLLER.concurrent,
-                                peak=ENGINE_CONTROLLER.peak,
-                                threshold=ENGINE_CONTROLLER.monitor.peak_threshold),
-        ui.models_switcher_keyboard(preference),
-    )
+    decision = await resolve_engine_for(source.from_user.id, record=False)
+    await render(source, ui.engine_diagnostics_text(decision.engine),
+                 ui.engine_diagnostics_keyboard())
 
 
-async def show_models_info(source):
-    """The red **🧠 Models Architecture** page from the /start footer."""
-    uid = source.from_user.id
-    decision = await resolve_engine_for(uid, record=False)
-    has_models = await models_access(uid)
-    await render(source, ui.models_architecture_text(decision.engine),
-                 ui.models_architecture_keyboard(decision.engine, has_models=has_models))
+@callback_action("engine_diag")
+async def cb_engine_diag(client, query):
+    """Owner: the plain-language diagnostics behind the automatic routing."""
+    await show_engine_diagnostics(query)
 
-
-@callback_action("cmd_models")
-async def cb_models(client, query):
-    await query.answer()
-    await show_models(query)
-
-
-@callback_action("models_info")
-async def cb_models_info(client, query):
-    await query.answer()
-    await show_models_info(query)
-
-
-async def apply_engine_choice(query, engine):
-    """Store the engine picked in the switcher and re-render it."""
-    uid = query.from_user.id
-    if not await models_access(uid):
-        # The permission is re-checked at press time: a revoked grant must stop
-        # working immediately, even on a keyboard that is still on screen.
-        await query.answer(ui_text("🔒 The C++ Turbo engine is a paid add-on."),
-                           show_alert=True)
-        await show_models(query)
-        return False
-    value = await set_engine_preference(uid, engine)
-    await query.answer(ui_text(f"✅ Engine set to {ui.engine_display(value)}"))
-    await show_models(query)
-    return True
-
-
-@callback_action("engine_set:python")
-async def cb_engine_set_python(client, query):
-    await apply_engine_choice(query, ENGINE_PYTHON)
-
-
-@callback_action("engine_set:cpp")
-async def cb_engine_set_cpp(client, query):
-    await apply_engine_choice(query, ENGINE_CPP)
 
 
 async def show_refer(source):
@@ -2576,7 +2520,7 @@ NEW_COMMAND_NAMES = [
     "setdump", "deldump", "dump", "post", "native",
     "giveaway", "participants", "endgiveaway", "giveawaystatus",
 ]
-COMMAND_NAMES = NEW_COMMAND_NAMES + ["start", "help", "app", "apk", "login", "logout", "status", "cancel", "setcaption", "delcaption", "setthumb", "delthumb", "setprefix", "setsuffix", "mystats", "myinfo", "history", "settings", "language", "refer", "bookmark", "bookmarks", "favorite", "favorites", "share", "feedback", "invite", "premium", "stats", "users", "loggedusers", "activeusers", "newusers", "topusers", "broadcast", "botcast", "superbroadcast", "menu", "cmsg", "unpin", "ban", "unban", "banlist", "finduser", "userinfo", "addpremium", "removepremium", "premiumlist", "addadmin", "removeadmin", "adminlist", "setfsub", "fsublist", "delfsub", "fsublabel", "fsubcheck", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export", "adminhelp", "admin", "admins", "addqr", "delqr", "removeqr", "payments", "redeem", "setchat", "delchat", "models", "engine", "mychannels", "setengine"]
+COMMAND_NAMES = NEW_COMMAND_NAMES + ["start", "help", "app", "apk", "login", "logout", "status", "cancel", "setcaption", "delcaption", "setthumb", "delthumb", "setprefix", "setsuffix", "mystats", "myinfo", "history", "settings", "language", "refer", "bookmark", "bookmarks", "favorite", "favorites", "share", "feedback", "invite", "premium", "stats", "users", "loggedusers", "activeusers", "newusers", "topusers", "broadcast", "botcast", "superbroadcast", "menu", "cmsg", "unpin", "ban", "unban", "banlist", "finduser", "userinfo", "addpremium", "removepremium", "premiumlist", "addadmin", "removeadmin", "adminlist", "setfsub", "fsublist", "delfsub", "fsublabel", "fsubcheck", "maintenance", "feedbacks", "sendmsg", "clearlogs", "export", "adminhelp", "admin", "admins", "addqr", "delqr", "removeqr", "payments", "redeem", "setchat", "delchat", "mychannels", "setengine", "testmode"]
 ABORT_GROUP = -1
 #: Runs before everything else: the one-time clean-up of a leftover picker keyboard.
 SWEEP_GROUP = -3
@@ -2590,6 +2534,7 @@ async def clear_pending_inputs(uid):
     aborted = bool(premium_tier_pending.pop(uid, None)) or aborted
     aborted = bool(setchat_pending.pop(uid, None)) or aborted
     aborted = bool(fsub_pending.pop(uid, None)) or aborted
+    aborted = bool(TESTMODE.pop(uid, None)) or aborted
     aborted = bool(GIVEAWAY_WIZARD.pop(uid, None)) or aborted
     aborted = bool(BUTTON_WIZARD.pop(uid, None)) or aborted
     aborted = bool(BUTTON_DRAFT.pop(uid, None)) or aborted
@@ -3009,10 +2954,146 @@ async def invite_handler(client, message):
 async def premium_handler(client, message):
     await show_premium(message)
 
-@bot.on_message(filters.command(["models", "engine"]) & filters.private)
-async def models_handler(client, message):
-    """/models and /engine — the C++ Turbo switcher (or its upgrade pitch)."""
-    await show_models(message)
+@bot.on_message(filters.command("testmode") & filters.private)
+async def testmode_handler(client, message):
+    """/testmode [amount] — the owner's dry run of the whole user journey.
+
+    ``/testmode`` starts at the first screen; ``/testmode 249`` jumps straight to
+    a payment screen for that amount.  Nothing is charged or saved either way.
+    """
+    parts = getattr(message, "command", None) or (message.text or "").split()
+    args = parts[1:]
+    await open_test_mode(message, amount=args[0] if args else None)
+
+
+# --------------------------------------------------------------------------- #
+#  /testmode — walk the user's journey without charging or saving anything
+# --------------------------------------------------------------------------- #
+
+#: owner_id -> {"step": key, "amount": rupees | None, "await": "amount" | None}
+TESTMODE = {}
+
+
+def _tm_guard(uid) -> bool:
+    """Only the owner may preview the flow."""
+    return bool(OWNER_ID) and uid == OWNER_ID
+
+
+def _tm_keyboard(rows):
+    """Turn ``(label, callback_data)`` rows into styled inline buttons."""
+    built = []
+    for row in rows:
+        line = []
+        for label, data in row:
+            if data == "tm:exit":
+                style = "danger"
+            elif data in {"tm:next", "tm:amount"}:
+                style = "success"
+            else:
+                style = "primary"
+            line.append(ui.button(label, callback_data=data, style=style))
+        built.append(line)
+    return ui.keyboard(built)
+
+
+def _tm_state(uid) -> dict:
+    state = TESTMODE.get(uid)
+    if state is None:
+        state = {"step": "start", "amount": None, "await": None}
+        TESTMODE[uid] = state
+    return state
+
+
+def _tm_screen_payload(uid, step=None, amount=..., state=None):
+    """``(text, keyboard)`` of one preview step, honouring the stored amount."""
+    state = state or _tm_state(uid)
+    step = step or state["step"]
+    if amount is ...:
+        amount = state.get("amount")
+    text, rows = testmode.screen(step, amount=amount)
+    return text, _tm_keyboard(rows)
+
+
+async def open_test_mode(source, amount=None):
+    """Open the owner's dry-run walkthrough (optionally on a custom amount)."""
+    message = source.message if is_callback(source) else source
+    user = getattr(message, "from_user", None)
+    uid = getattr(user, "id", None)
+    if not _tm_guard(uid):
+        await say(message, "👑 **Owner only.**\n\nThis preview shows the whole "
+                           "premium flow step by step, so it stays with the owner.")
+        return
+    try:
+        parsed = int(str(amount).strip()) if amount not in (None, "") else None
+    except (TypeError, ValueError):
+        parsed = None
+    state = {"step": "custom" if parsed else "start", "amount": parsed, "await": None}
+    TESTMODE[uid] = state
+    text, board = _tm_screen_payload(uid, state["step"], parsed, state)
+    await render(source, text, board)
+
+
+async def handle_testmode_callback(client, query, data):
+    """``tm:*`` buttons: next, back, a jump to any step, or a typed amount."""
+    uid = query.from_user.id
+    if not _tm_guard(uid):
+        await query.answer(ui_text("👑 Owner only."), show_alert=True)
+        return
+    state = _tm_state(uid)
+    state["await"] = None
+
+    if data == "tm:exit":
+        TESTMODE.pop(uid, None)
+        await render(query, "🧪 **TEST MODE CLOSED**\n\nNothing was saved, sent or "
+                            "charged. /start brings the normal bot back.",
+                     ui.start_keyboard(bool(OWNER_ID) and uid == OWNER_ID))
+        return
+
+    if data == "tm:list":
+        await render(query, testmode.list_text(), _tm_keyboard(testmode.list_rows()))
+        return
+
+    if data == "tm:amount":
+        state["await"] = "amount"
+        await render(query, "✏️ **TYPE AN AMOUNT**\n\n"
+                            "Send any number of rupees — for example `199`. "
+                            "You will see the payment screen with that exact "
+                            "amount and what the bot would do with it.\n\n"
+                            "Nothing is charged and nothing is saved.",
+                     _tm_keyboard([[("◀️ Back to the flow", "tm:s:payment")],
+                                   [("❌ Exit test mode", "tm:exit")]]))
+        return
+
+    if data == "tm:prev":
+        state["step"] = testmode.prev_key(state["step"])
+    elif data == "tm:next":
+        state["step"] = testmode.next_key(state["step"])
+    elif data.startswith("tm:s:"):
+        state["step"] = data.split(":", 2)[2]
+    else:
+        await query.answer(ui_text(ui.stale_button_text()), show_alert=True)
+        return
+
+    text, board = _tm_screen_payload(uid)
+    await render(query, text, board)
+
+
+async def handle_testmode_amount(message, text):
+    """The owner typed an amount while the preview waits for one."""
+    uid = message.from_user.id
+    cleaned = text.replace("₹", "").replace(",", "").strip()
+    try:
+        amount = int(float(cleaned))
+    except (TypeError, ValueError):
+        await say(message, "❌ Send a plain number of rupees, for example `199`.")
+        return
+    if amount <= 0:
+        await say(message, "❌ The amount must be more than zero.")
+        return
+    state = _tm_state(uid)
+    state.update({"amount": amount, "step": "custom", "await": None})
+    text_out, board = _tm_screen_payload(uid)
+    await render(message, text_out, board)
 
 @bot.on_message(filters.command("mychannels") & filters.private)
 async def mychannels_handler(client, message):
@@ -3471,11 +3552,14 @@ def _fold_tier_word(value) -> str:
     return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
 
 
-#: Human spellings of the four tiers, derived from the config labels so the two
-#: can never drift apart, plus the legacy two-button ids and a few synonyms.
+#: Human spellings of the two tiers, derived from the config labels so the two
+#: can never drift apart, plus every legacy id a stored record or an old button
+#: may still carry.  ``models``/``all`` were retired with the C++ Turbo add-on:
+#: they land on ``public``/``private`` instead of becoming dead ends.
 TIER_ALIASES = {
-    "all_in_one": "all", "allinone": "all", "everything": "all", "full_vip": "all",
-    "models_only": "models", "cpp": "models", "turbo": "models", "c": "models",
+    "all_in_one": "private", "allinone": "private", "everything": "private",
+    "full_vip": "private", "all": "private", "turbo": "private",
+    "models_only": "public", "cpp": "public", "models": "public", "c": "public",
     "private_only": "private", "public_only": "public", "standard": "public",
     "basic": "public",
 }
@@ -3583,7 +3667,7 @@ async def grant_premium_tier(source, tier: str, days=UNSET_DAYS):
         return False
     target = order["user_id"]
     duration = order.get("days", 30) if days is UNSET_DAYS else days
-    # The tier decides the flags *and* the premium_source, so a models-only
+    # The tier decides the flags *and* the premium_source, so a public-only
     # grant can never inherit the legacy "manual means private" meaning.
     await add_premium(target, duration, tier=resolved)
     name = await get_display_name(target)   # re-checked at grant time
@@ -4187,26 +4271,25 @@ async def handle_payment_review(client, query, data: str):
     except (ValueError, IndexError):
         await query.answer(ui_text("Unknown payment reference."), show_alert=True)
         return
-    #: ``payok:<user>[:<plan>][:turbo]`` — older proofs carry neither extra part.
-    extras = [part.strip().lower() for part in parts[1:] if part.strip()]
-    turbo = "turbo" in extras
-    plan_key = next((part for part in extras if part != "turbo"), None)
-    if not plan_key or not turbo:
+    #: ``payok:<user>[:<plan>]`` — older proofs may also carry a ``turbo`` part,
+    #: which is ignored: the add-on is gone and the same plan is granted.
+    extras = [part.strip().lower() for part in parts[1:]
+              if part.strip() and part.strip().lower() != "turbo"]
+    plan_key = extras[0] if extras else None
+    if not plan_key:
         note = await latest_payment_note(target) or {}
-        plan_key = plan_key or note.get("plan")
-        turbo = turbo or bool(note.get("turbo"))
+        plan_key = note.get("plan")
     plan = PREMIUM_PLANS.get(plan_key) if plan_key else None
     days = plan["days"] if plan else 30
     title = plan["title"] if plan else None
 
     if action == "payok":
-        # A Standard purchase grants public + private exactly as before; the
-        # C++ Turbo variant adds the granular ``models`` permission on top.
-        await add_premium(target, days, tier="all" if turbo else "private")
+        #: One product: every paid plan grants public + private.
+        await add_premium(target, days, tier="private")
         await mark_payment(target, "approved", reviewer=uid, plan=plan_key)
         await query.answer(ui_text("✅ Payment approved — premium activated."))
         await update_review_caption(query, ui.APPROVED_CAPTION)
-        user_text = ui.payment_approved_user_text(title, days, turbo=turbo)
+        user_text = ui.payment_approved_user_text(title, days)
     elif action == "payfake":
         await mark_payment(target, "rejected", reviewer=uid)
         await query.answer(ui_text("⚠️ Screenshot marked as fake."))
@@ -6019,14 +6102,11 @@ async def submit_payment_proof(message):
         await say(message, "⚠️ Checkout expired. Open /premium and choose your plan again.")
         return
     plan = PREMIUM_PLANS[order["plan"]]
-    #: The C++ Turbo variant charges base + add-on and grants the models flag.
-    turbo = bool(order.get("turbo"))
-    amount = plan_total_price(plan) if turbo else plan_base_price(plan)
+    amount = plan_base_price(plan)
     price_label = f"{RUPEE}{amount}"
     # Persist proof + plan + variant before attempting delivery to Telegram.
     saved = await add_payment(uid, message.photo.file_id, {
         "plan": order["plan"], "price": amount, "days": plan["days"],
-        "turbo": turbo,
         "message_id": message.id, "checkout": order["token"],
     })
     pending_action.pop(uid, None)
@@ -6036,8 +6116,8 @@ async def submit_payment_proof(message):
         return
     delivered = False
     caption = ui.payment_review_owner_text(uid, plan["title"], price_label,
-                                           plan["days"], turbo)
-    review_keyboard = ui.payment_review_keyboard(uid, order["plan"], turbo=turbo)
+                                           plan["days"])
+    review_keyboard = ui.payment_review_keyboard(uid, order["plan"])
     # A bot cannot initiate a private chat. OWNER_ID should belong to
     # @XyrDeveloper, who must /start this bot; the username is a best-effort copy.
     for recipient in dict.fromkeys([OWNER_ID, PAYMENT_CONTACT]):
@@ -6050,7 +6130,7 @@ async def submit_payment_proof(message):
         except Exception:
             continue
     if delivered:
-        text = ui.payment_submitted_text(plan["title"], price_label, turbo)
+        text = ui.payment_submitted_text(plan["title"], price_label)
     else:
         text = ui.payment_proof_saved_text()
     await say(message, text, reply_markup=ui.back_keyboard())
@@ -8478,8 +8558,7 @@ COMMAND_HANDLERS = {
     "feedback": feedback_handler,
     "invite": invite_handler,
     "premium": premium_handler,
-    "models": models_handler,
-    "engine": models_handler,
+    "testmode": testmode_handler,
     "mychannels": mychannels_handler,
     "redeem": redeem_handler,
     "stats": stats_handler,
@@ -8537,7 +8616,7 @@ CHANNEL_BLOCKED_COMMANDS = frozenset(COMMAND_HANDLERS) - CHANNEL_ALLOWED_COMMAND
 COMMAND_REGISTRATION_TASK = None
 
 #: Commands that only the owner may run, as far as the Telegram menu goes.
-MENU_OWNER_ONLY = frozenset(ADMIN_OWNER_COMMANDS) | {"giveawaystatus"}
+MENU_OWNER_ONLY = frozenset(ADMIN_OWNER_COMMANDS) | {"giveawaystatus", "testmode"}
 MENU_ROLES = ("user", "admin", "owner")
 
 
@@ -8867,6 +8946,10 @@ async def callback_handler(client, query):
         if not data.startswith("paid:"):
             payment_pending.pop(uid, None)
         fsub_pending.pop(uid, None)
+    if data.startswith("tm:"):
+        # Owner-only dry run of the premium flow: no writes, no charges.
+        await handle_testmode_callback(client, query, data)
+        return
     if data.startswith("dl:"):
         await handle_download_controls(query)
         return
@@ -8965,10 +9048,11 @@ async def callback_handler(client, query):
         await show_premium(query)
         return
     if data.startswith("buy:"):
-        #: ``buy:<plan>`` (Standard) or ``buy:<plan>:turbo`` (with the C++ add-on).
+        #: ``buy:<plan>`` — one price per plan.  An old ``buy:<plan>:turbo``
+        #: button (sent before the add-on was removed) still checks out, and
+        #: simply pays the single price.
         parts = data.split(":")[1:]
         plan_key = parts[0] if parts else ""
-        turbo = len(parts) > 1 and parts[1].strip().lower() == "turbo"
         plan = PREMIUM_PLANS.get(plan_key)
         if not plan:
             await query.answer(ui_text("Unknown plan"), show_alert=True)
@@ -8980,11 +9064,11 @@ async def callback_handler(client, query):
             return
         import secrets
         token = secrets.token_hex(6)
-        payment_pending[uid] = {"plan": plan_key, "token": token, "turbo": turbo}
+        payment_pending[uid] = {"plan": plan_key, "token": token}
         await query.answer(ui_text("💳 Your payment QR is ready."))
         try:
             await bot.send_photo(uid, qr,
-                                 caption=ui_text(ui.payment_text(plan, turbo=turbo)),
+                                 caption=ui_text(ui.payment_text(plan)),
                                  reply_markup=ui.payment_keyboard(token))
         except Exception:
             payment_pending.pop(uid, None)
@@ -9062,6 +9146,10 @@ async def text_handler(client, message):
     #: into this very chat.  Swallow it exactly once: it is the delivery, not a
     #: new request, and extracting it again is the loop this guard exists for.
     if consume_echo_guard(user_id, message):
+        return
+
+    if TESTMODE.get(user_id, {}).get("await") == "amount":
+        await handle_testmode_amount(message, text)
         return
 
     if user_id in fsub_pending and fsub_pending[user_id].get("step") == "await_label":

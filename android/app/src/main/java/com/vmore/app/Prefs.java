@@ -23,6 +23,13 @@ public final class Prefs {
     private static final String KEY_DEST_ID = "dest_chat_id";
     private static final String KEY_DEST_TITLE = "dest_title";
     private static final String KEY_ASK_DEST = "ask_destination";
+    /** Auto-copy (mirroring) is per account: a chat id only exists in one session. */
+    private static final String KEY_MIRROR_ON = "mirror_on";
+    private static final String KEY_MIRROR_SOURCE = "mirror_source_id";
+    private static final String KEY_MIRROR_SOURCE_TITLE = "mirror_source_title";
+    private static final String KEY_MIRROR_DEST = "mirror_dest_id";
+    private static final String KEY_MIRROR_DEST_TITLE = "mirror_dest_title";
+    private static final String KEY_MIRROR_LAST = "mirror_last_message_id";
 
     private static final String KEY_AUTO_UPLOAD = "auto_upload";
     private static final String KEY_AUTO_DELETE = "auto_delete_local";
@@ -342,6 +349,51 @@ public final class Prefs {
                 .apply();
     }
 
+    /**
+     * Points stored avatar paths at the file that actually exists.
+     *
+     * Older builds cached pictures under {@code cache/avatars}, so clearing
+     * the cache deleted the file while the preference kept pointing at it: the
+     * header fell back to an initial and never asked Telegram again (the owner
+     * card only refreshes when the owner changes his photo).  Pictures now live
+     * in User Data; this repairs a path left behind by the old location, for
+     * the current account and for the owner card, once at every start.
+     */
+    public static void repairAvatarPaths(Context context) {
+        if (context == null) {
+            return;
+        }
+        Context app = context.getApplicationContext();
+        String mine = avatarPath(app);
+        String fixedMine = existingAvatar(app, mine, LocalFiles.avatarFile(app));
+        if (fixedMine != null && !fixedMine.equals(mine)) {
+            saveAvatar(app, fixedMine, avatarFileId(app));
+        }
+        String owner = developerAvatar(app);
+        String fixedOwner = existingAvatar(app, owner, LocalFiles.developerAvatar(app));
+        if (fixedOwner != null && !fixedOwner.equals(owner)) {
+            saveDeveloper(app, developerName(app), developerBio(app), fixedOwner,
+                    developerAvatarFile(app));
+        }
+    }
+
+    /** The path that should be used for {@code newFile}, or null if none is on disk. */
+    private static String existingAvatar(Context context, String stored, java.io.File newFile) {
+        if (stored != null && !stored.isEmpty() && new java.io.File(stored).isFile()) {
+            return stored;
+        }
+        if (newFile != null && newFile.isFile()) {
+            return newFile.getAbsolutePath();
+        }
+        if (newFile != null) {
+            java.io.File legacy = LocalFiles.legacyAvatarNamed(context, newFile);
+            if (legacy.isFile()) {
+                return legacy.getAbsolutePath();
+            }
+        }
+        return null;
+    }
+
     // ---------------------------------------------------------------- skin //
 
     /** 0 = day, 1 = night, 2 = automatic (night between 18:00 and 06:00). */
@@ -490,21 +542,123 @@ public final class Prefs {
                 value == null ? "" : value.trim()).apply();
     }
 
+    /**
+     * Files shared into Vmore that have not been sent yet.
+     *
+     * The copies are already on disk, so this only has to remember where they
+     * are: a share that arrives before the account is signed in then survives
+     * the trip through the sign-in screen instead of being lost.
+     */
+    public static String shareBatch(Context context) {
+        String value = prefs(context).getString("share_batch", "");
+        return value == null ? "" : value;
+    }
+
+    public static void setShareBatch(Context context, String json) {
+        if (json == null || json.isEmpty()) {
+            prefs(context).edit().remove("share_batch").apply();
+            return;
+        }
+        prefs(context).edit().putString("share_batch", json).apply();
+    }
+
     // -------------------------------------------------------- destination //
 
+    /**
+     * The destination is remembered per account, never per phone.
+     *
+     * A chat id only means something inside the session that saw it: the
+     * channel saved on account 1 is a different chat — or no chat at all — on
+     * account 2.  Keeping one number for the whole phone is exactly how a file
+     * ends up "not found" after a switch, so every slot keeps its own.
+     */
     public static long destChatId(Context context) {
-        return prefs(context).getLong(KEY_DEST_ID, 0L);
+        SharedPreferences store = prefs(context);
+        long saved = store.getLong(KEY_DEST_ID + "_s" + activeSlot(context), 0L);
+        if (saved != 0L) {
+            return saved;
+        }
+        //: Older builds saved one destination for the phone; it belongs to the
+        //: first account, which is where it is copied now.
+        if (activeSlot(context) == 1) {
+            long legacy = store.getLong(KEY_DEST_ID, 0L);
+            if (legacy != 0L) {
+                saveDestination(context, legacy, store.getString(KEY_DEST_TITLE, ""));
+                return legacy;
+            }
+        }
+        return 0L;
     }
 
     public static String destTitle(Context context) {
-        return prefs(context).getString(KEY_DEST_TITLE, "");
+        return prefs(context).getString(KEY_DEST_TITLE + "_s" + activeSlot(context), "");
     }
 
     public static void saveDestination(Context context, long chatId, String title) {
         prefs(context).edit()
-                .putLong(KEY_DEST_ID, chatId)
-                .putString(KEY_DEST_TITLE, title == null ? "" : title)
+                .putLong(KEY_DEST_ID + "_s" + activeSlot(context), chatId)
+                .putString(KEY_DEST_TITLE + "_s" + activeSlot(context),
+                        title == null ? "" : title)
                 .apply();
+    }
+
+    // ------------------------------------------------------------- mirroring //
+
+    /** Copy new posts of one source chat into one destination, automatically. */
+    public static boolean mirrorEnabled(Context context) {
+        return prefs(context).getBoolean(slotKey(context, KEY_MIRROR_ON), false);
+    }
+
+    public static void setMirrorEnabled(Context context, boolean value) {
+        prefs(context).edit().putBoolean(slotKey(context, KEY_MIRROR_ON), value).apply();
+    }
+
+    public static long mirrorSourceId(Context context) {
+        return prefs(context).getLong(slotKey(context, KEY_MIRROR_SOURCE), 0L);
+    }
+
+    public static String mirrorSourceTitle(Context context) {
+        return prefs(context).getString(slotKey(context, KEY_MIRROR_SOURCE_TITLE), "");
+    }
+
+    public static long mirrorDestId(Context context) {
+        return prefs(context).getLong(slotKey(context, KEY_MIRROR_DEST), 0L);
+    }
+
+    public static String mirrorDestTitle(Context context) {
+        return prefs(context).getString(slotKey(context, KEY_MIRROR_DEST_TITLE), "");
+    }
+
+    /** The newest source message already copied, so nothing is sent twice. */
+    public static long mirrorLastId(Context context) {
+        return prefs(context).getLong(slotKey(context, KEY_MIRROR_LAST), 0L);
+    }
+
+    public static void setMirrorLastId(Context context, long messageId) {
+        prefs(context).edit().putLong(slotKey(context, KEY_MIRROR_LAST), messageId).apply();
+    }
+
+    public static void saveMirror(Context context, long sourceId, String sourceTitle,
+                                  long destId, String destTitle) {
+        prefs(context).edit()
+                .putLong(slotKey(context, KEY_MIRROR_SOURCE), sourceId)
+                .putString(slotKey(context, KEY_MIRROR_SOURCE_TITLE),
+                        sourceTitle == null ? "" : sourceTitle)
+                .putLong(slotKey(context, KEY_MIRROR_DEST), destId)
+                .putString(slotKey(context, KEY_MIRROR_DEST_TITLE),
+                        destTitle == null ? "" : destTitle)
+                .apply();
+    }
+
+    /**
+     * Starts the mirror from now on.
+     *
+     * The newest message in the source becomes the starting line, so switching
+     * auto-copy on never floods a chat with the source's whole back catalogue;
+     * the user picks an older starting point from the mirror screen instead.
+     */
+    public static void setMirrorStart(Context context, long newestMessageId) {
+        setMirrorLastId(context, newestMessageId);
     }
 
     public static boolean askDestination(Context context) {

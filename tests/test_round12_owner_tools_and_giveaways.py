@@ -690,7 +690,9 @@ async def test_the_winner_is_random_and_the_prize_is_granted(db, bot):
     assert 6000 <= winner_id < 6012
     granted = await db.get_user(winner_id)
     assert granted["is_premium"] is True
-    assert granted["has_private_access"] is True and granted["has_models_access"] is True
+    assert granted["has_private_access"] is True
+    #: Round 22 — the retired C++ Turbo flag is never granted.
+    assert granted["has_models_access"] is False
     assert sc("Giveaway closed by hand") in texts(message)
 
 

@@ -88,8 +88,14 @@ final class Developer {
                 if (value.bio != null && !value.bio.isEmpty()) {
                     profile.bio = value.bio;
                 }
+                //: A changed file id is not the only reason to fetch: an older
+                //: build kept the picture in the cache, so a "Clear Cache" could
+                //: delete it while the id stayed the same.  A missing file is a
+                //: change too, otherwise the card stays blank for ever.
+                final boolean photoMissing = profile.avatar == null || profile.avatar.isEmpty();
                 final boolean photoChanged = value.photoFileId != 0
-                        && value.photoFileId != Prefs.developerAvatarFile(context);
+                        && (photoMissing
+                        || value.photoFileId != Prefs.developerAvatarFile(context));
                 if (!photoChanged) {
                     Prefs.saveDeveloper(context, profile.name, profile.bio,
                             profile.avatar, value.photoFileId == 0

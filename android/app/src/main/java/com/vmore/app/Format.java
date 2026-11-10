@@ -121,6 +121,135 @@ public final class Format {
                 + calendar.get(java.util.Calendar.DAY_OF_YEAR);
     }
 
+    /**
+     * A caption turned into a file stem.
+     *
+     * Captions are how most Telegram posts name their media, so the first real
+     * line of the caption is the most honest file name available.  It is
+     * reduced to what every phone and Telegram itself can display: no path
+     * separators, no reserved characters, no runs of spaces, no trailing dots
+     * and no length beyond {@code limit}.
+     */
+    public static String stemFrom(String text, int limit) {
+        //: Only the first non-empty line names the file: a caption's second line
+        //: is usually a credit or a link, not part of the name.
+        String value = "";
+        if (text != null) {
+            for (String line : text.split("\n")) {
+                String trimmed = oneLine(line);
+                if (!trimmed.isEmpty()) {
+                    value = oneLine(trimmed);
+                    break;
+                }
+            }
+        }
+        if (value.isEmpty()) {
+            return "";
+        }
+        StringBuilder out = new StringBuilder(value.length());
+        boolean lastSpace = false;
+        for (int index = 0; index < value.length(); index++) {
+            char char0 = value.charAt(index);
+            boolean illegal = char0 < 0x20
+                    || char0 == '\\' || char0 == '/' || char0 == ':'
+                    || char0 == '?' || char0 == 0x22 || char0 == '<'
+                    || char0 == '>' || char0 == '|' || char0 == 0x2A;
+            if (illegal) {
+                continue;
+            }
+            boolean space = char0 == ' ';
+            if (space && lastSpace) {
+                continue;
+            }
+            lastSpace = space;
+            out.append(char0);
+        }
+        String stem = out.toString().trim();
+        while (stem.endsWith(".")) {
+            stem = stem.substring(0, stem.length() - 1).trim();
+        }
+        if (stem.length() > limit) {
+            stem = stem.substring(0, limit).trim();
+        }
+        //: A dot is allowed inside a caption but a leading one hides the file
+        //: on every phone, so a stem never starts with it.
+        while (stem.startsWith(".")) {
+            stem = stem.substring(1).trim();
+        }
+        return stem;
+    }
+
+    /**
+     * A readable name for media Telegram did not name itself.
+     *
+     * Photos, voice notes, video notes and plenty of forwarded documents carry
+     * no file name at all.  The old build filled that gap with an internal id
+     * ("vmore_4838") which then showed up in every chat the file was sent to.
+     * The date and time of the post is stable, unique enough and says something
+     * a person can read, so the fallback is "photo_2026-10-20_143012.jpg".
+     */
+    public static String datedName(String kind, long unixSeconds, String extension) {
+        String label = oneLine(kind).toLowerCase(Locale.US).replace(' ', '_');
+        if (label.isEmpty()) {
+            label = "file";
+        }
+        String suffix = extension == null || extension.isEmpty()
+                ? "" : (extension.charAt(0) == '.' ? extension : "." + extension);
+        java.util.Calendar stamp = java.util.Calendar.getInstance();
+        stamp.setTimeInMillis(unixSeconds > 0 ? unixSeconds * 1000L
+                : System.currentTimeMillis());
+        String when = String.format(Locale.US, "%04d-%02d-%02d_%02d%02d%02d",
+                stamp.get(java.util.Calendar.YEAR),
+                stamp.get(java.util.Calendar.MONTH) + 1,
+                stamp.get(java.util.Calendar.DAY_OF_MONTH),
+                stamp.get(java.util.Calendar.HOUR_OF_DAY),
+                stamp.get(java.util.Calendar.MINUTE),
+                stamp.get(java.util.Calendar.SECOND));
+        return label + "_" + when + suffix;
+    }
+
+    /**
+     * The name a chat should show for a file that has arrived from anywhere.
+     *
+     * Older builds wrote {@code vmore_4838.mp4} / {@code vmore_1729_now.jpg}
+     * into the upload path, and Telegram takes the file name straight from that
+     * path.  Anything that still carries the prefix is cleaned here, so a job
+     * that was queued before the fix is uploaded with a readable name too.
+     */
+    public static String displayName(String name, String fallback) {
+        String value = safeName(name, fallback);
+        String lower = value.toLowerCase(Locale.US);
+        if (lower.startsWith("vmore_")) {
+            String rest = value.substring("vmore_".length());
+            int cut = rest.indexOf('_');
+            //: "vmore_4838_holiday.mp4" → "holiday.mp4"
+            if (cut > 0 && cut < rest.length() - 1 && isDigits(rest.substring(0, cut))) {
+                String tail = rest.substring(cut + 1).trim();
+                if (!tail.isEmpty()) {
+                    return tail;
+                }
+            }
+            //: "vmore_4838.mp4" → "4838.mp4" (still better than the prefix)
+            if (rest.startsWith("vmore_")) {
+                return rest;
+            }
+            return rest.isEmpty() ? value : rest;
+        }
+        return value;
+    }
+
+    private static boolean isDigits(String text) {
+        if (text.isEmpty()) {
+            return false;
+        }
+        for (int index = 0; index < text.length(); index++) {
+            if (!Character.isDigit(text.charAt(index))) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /** A file name that is safe on every phone and readable in a chat. */
     public static String safeName(String name, String fallback) {
         String value = name == null ? "" : name.trim();
