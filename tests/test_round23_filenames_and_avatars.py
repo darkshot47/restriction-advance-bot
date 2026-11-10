@@ -131,6 +131,15 @@ def test_stored_paths_are_repaired_at_startup():
     assert app.index("Prefs.repairAvatarPaths(this);") < app.index("registerActivityLifecycleCallbacks")
 
 
+def test_a_lost_picture_is_fetched_again_even_if_its_id_is_unchanged():
+    """The owner's card must refill after an old build's cache clear."""
+    dev = _read(JAVA_DIR / "Developer.java")
+    assert "final boolean photoMissing = profile.avatar == null || profile.avatar.isEmpty();" in dev
+    assert "&& (photoMissing" in dev
+    #: cached() only reports a path that is really on disk.
+    assert 'new File(avatar).exists()' in dev
+
+
 def test_the_login_database_was_never_in_the_cache():
     """Clearing the cache must never log the account out either."""
     tg = _read(JAVA_DIR / "Tg.java")
