@@ -542,6 +542,11 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         }
         final List<ShareIntake.Item> items = ShareIntake.decode(Prefs.shareBatch(this));
         if (items.isEmpty()) {
+            //: Either nothing came in, or the copies were cleared by Android:
+            //: a batch with no files on disk is a batch that no longer exists.
+            if (!Prefs.shareBatch(this).isEmpty()) {
+                Prefs.setShareBatch(this, "");
+            }
             if (problem != null && !problem.isEmpty()) {
                 Ui.toast(this, getString(R.string.share_failed, problem));
             }
