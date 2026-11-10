@@ -582,6 +582,10 @@ public class QueueService extends Service {
         Live.DONE.set(job.done);
         Log.step(this, "job " + job.id + " " + job.method + " " + shortText(job.raw, 120));
         try {
+            if (QJob.METHOD_UPLOAD.equals(job.method)) {
+                uploadSharedFile(jobs, job);
+                return;
+            }
             if (QJob.METHOD_SCAN.equals(job.method)) {
                 scanIntoQueue(jobs, job);
                 return;
@@ -856,6 +860,111 @@ public class QueueService extends Service {
         }
         File copied = LocalFiles.copy(rawPath, target);
         return copied != null ? copied.getAbsolutePath() : rawPath;
+    }
+
+    /**
+     * A file that is already on this phone: one upload, no download.
+     *
+     * This is the "Share to Vmore" path.  There is no Telegram message behind
+     * the file, so nothing can be forwarded and nothing has to be downloaded:
+     * the copy the intake made is uploaded exactly as it is, named exactly as
+     * the app that shared it named it, and then deleted.  Everything the queue
+     * already does for an upload still applies — the live progress, the flood
+     * wait, the retries, the history entry and the "sent as message" note.
+     */
+    private void uploadSharedFile(Jobs jobs, QJob job) throws Exception {
+        File file = job.path == null || job.path.isEmpty() ? null : new File(job.path);
+        if (file == null || !file.isFile()) {
+            //: Retrying cannot bring a file back; the words make that fatal.
+            throw new Exception("the shared file was not found on the phone");
+        }
+        if (job.size <= 0L) {
+            job.size = file.length();
+        }
+        if ("video".equals(job.kind)) {
+            try {
+                long[] meta = MediaUtils.videoMeta(file);
+                job.durationSec = meta[0] / 1000L;
+                job.width = (int) meta[1];
+                job.height = (int) meta[2];
+            } catch (Exception ignored) {
+                //: The upload works without them; the player just gets no size.
+            }
+        } else if ("photo".equals(job.kind)) {
+            try {
+                int[] sides = MediaUtils.imageSize(file);
+                job.width = sides[0];
+                job.height = sides[1];
+            } catch (Exception ignored) {
+                //: Same: a photo without its pixel size still sends.
+            }
+        }
+        job.stage = QJob.UPLOADING;
+        job.uploaded = 0L;
+        final long started = System.currentTimeMillis();
+        Live.RUNNING.set(true);
+        Live.JOB_ID = job.id;
+        Live.NAME = job.title();
+        Live.STAGE = QJob.UPLOADING;
+        Live.ERROR = "";
+        Live.DONE.set(0L);
+        Live.TOTAL.set(job.size);
+        Live.SPEED = 0.0;
+        Live.ETA_MS = 0L;
+        Live.STARTED_AT = started;
+        jobs.update(job);
+        postProgress(false);
+        long sentId = Tg.get(this).sendBlocking(job, (done, total) -> {
+            long effectiveTotal = total > 0 ? total : job.size;
+            job.uploaded = done;
+            Live.DONE.set(done);
+            Live.TOTAL.set(effectiveTotal);
+            long elapsed = Math.max(1L, System.currentTimeMillis() - started);
+            Live.SPEED = done * 1000.0 / elapsed;
+            Live.ETA_MS = Live.SPEED > 0 && effectiveTotal > done
+                    ? (long) ((effectiveTotal - done) / Live.SPEED * 1000.0) : 0L;
+            jobs.ping();
+            showNotification(false);
+        }, cancelled);
+        if (abortIfInterrupted(jobs, job)) {
+            return;
+        }
+        job.uploaded = job.size;
+        job.note = "sent as message " + sentId;
+        Log.step(this, "shared " + shortText(job.name, 40) + " uploaded as message " + sentId);
+        History.get(this).record(job.title(), job.kind, job.size, job.destChatId,
+                job.destTitle, History.STATUS_UPLOADED, job.raw, "", "");
+        markFinished(job);
+        dropSharedCopy(job);
+        job.stage = QJob.DONE;
+        Live.STAGE = QJob.DONE;
+        jobs.update(job);
+        jobs.remove(job.id);
+    }
+
+    /** The shared copy was made for one send; it goes with that send. */
+    private void dropSharedCopy(QJob job) {
+        try {
+            File file = job.path == null || job.path.isEmpty() ? null : new File(job.path);
+            if (file == null) {
+                return;
+            }
+            //noinspection ResultOfMethodCallIgnored
+            file.delete();
+            File parent = file.getParentFile();
+            File root = LocalFiles.shareRoot(this);
+            if (parent != null && parent.getAbsolutePath().startsWith(root.getAbsolutePath())) {
+                String[] left = parent.list();
+                if (left == null || left.length == 0) {
+                    //noinspection ResultOfMethodCallIgnored
+                    parent.delete();
+                }
+            }
+            job.path = "";
+            job.done = 0;
+        } catch (Exception ignored) {
+            //: A copy that refuses to go is swept by the next cleanup.
+        }
     }
 
     private void scanIntoQueue(Jobs jobs, QJob job) throws Exception {

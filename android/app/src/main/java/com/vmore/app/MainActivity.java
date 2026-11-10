@@ -2,7 +2,9 @@ package com.vmore.app;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.Context;
 import android.content.Intent;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -66,6 +68,11 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
     /** Jobs waiting for a destination (the picker is open for them). */
     private final List<QJob> pending = new ArrayList<>();
 
+    /** True while the "send these shared files" sheet is on screen. */
+    private boolean shareSheetOpen;
+    /** The caption typed there, kept while the chat picker is open. */
+    private String shareCaptionDraft = "";
+
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable watcher = new Runnable() {
         @Override
@@ -98,6 +105,7 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         super.onCreate(savedInstanceState);
         Skin.prepare(this);
         captureShareIntent();
+        captureSharedFiles(getIntent());
         //: Not "is it ready right now": a fresh process is still rebuilding the
         //: session, and this check ran before onResume could ask for one.  The
         //: screen is built either way and onResume decides where to go, so a
@@ -225,6 +233,14 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
     }
 
     @Override
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        captureShareIntent();
+        captureSharedFiles(intent);
+    }
+
     protected void onResume() {
         super.onResume();
         //: The session is asked for first: in a fresh process it is still being
@@ -240,6 +256,8 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
             return;
         }
         takeSharedLink();
+        //: A share that arrived before sign-in waited on disk for exactly this.
+        showShareSheet("");
         Jobs.get(this).addListener(this);
         History.get(this).addListener(this);
         paintAccount();
@@ -468,6 +486,211 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
             Prefs.setPendingShare(this, value.trim());
         }
         intent.setAction(null);
+    }
+
+    /**
+     * A file (or several) shared from another app.
+     *
+     * The copy happens off the main thread — a 300 MB video is not something to
+     * copy while the screen is being built — and what was copied is written
+     * down as well as kept on disk, so a share that arrives before the account
+     * is signed in still reaches the chat afterwards.
+     */
+    private void captureSharedFiles(Intent intent) {
+        if (!ShareIntake.hasFiles(intent)) {
+            return;
+        }
+        final List<Uri> uris = ShareIntake.uris(intent);
+        //: The same intent must not be copied twice (rotation, coming back).
+        intent.removeExtra(Intent.EXTRA_STREAM);
+        if (uris.isEmpty()) {
+            return;
+        }
+        final Context app = getApplicationContext();
+        Ui.toast(this, getString(R.string.share_copying, uris.size()));
+        new Thread(() -> {
+            List<ShareIntake.Item> copied = new ArrayList<>();
+            String problem = "";
+            try {
+                copied.addAll(ShareIntake.copyInto(app, uris));
+            } catch (Exception error) {
+                problem = String.valueOf(error.getMessage());
+            }
+            final List<ShareIntake.Item> items = copied;
+            final String failure = problem;
+            runOnUiThread(() -> {
+                if (!items.isEmpty()) {
+                    Prefs.setShareBatch(MainActivity.this, ShareIntake.encode(items));
+                }
+                showShareSheet(failure);
+            });
+        }, "vmore-share-intake").start();
+    }
+
+    /**
+     * Asks where the shared files should go, with a caption and the real names.
+     *
+     * Nothing is queued until Send: a share is a copy on the phone, and a copy
+     * nobody sends is worth deleting rather than uploading by itself.
+     */
+    private void showShareSheet(String problem) {
+        if (isFinishing() || isDestroyed() || shareSheetOpen) {
+            if (problem != null && !problem.isEmpty()) {
+                Ui.toast(this, getString(R.string.share_failed, problem));
+            }
+            return;
+        }
+        final List<ShareIntake.Item> items = ShareIntake.decode(Prefs.shareBatch(this));
+        if (items.isEmpty()) {
+            if (problem != null && !problem.isEmpty()) {
+                Ui.toast(this, getString(R.string.share_failed, problem));
+            }
+            return;
+        }
+        if (!Tg.get(this).isReady()) {
+            //: Not signed in yet: the files stay on disk and this runs again
+            //: from onResume once the home screen has a session.
+            return;
+        }
+        long total = 0L;
+        StringBuilder names = new StringBuilder();
+        for (int index = 0; index < items.size(); index++) {
+            ShareIntake.Item item = items.get(index);
+            total += item.size;
+            if (index < 3) {
+                if (names.length() > 0) {
+                    names.append("\n");
+                }
+                names.append(item.name);
+            }
+        }
+        if (items.size() > 3) {
+            names.append("\n").append(getString(R.string.share_more, items.size() - 3));
+        }
+
+        LinearLayout holder = new LinearLayout(this);
+        holder.setOrientation(LinearLayout.VERTICAL);
+        holder.setPadding(Ui.dp(this, 20), Ui.dp(this, 8), Ui.dp(this, 20), 0);
+
+        TextView summary = new TextView(this);
+        summary.setText(getString(R.string.share_summary, items.size(), Format.size(total)));
+        summary.setTextColor(getColor(R.color.vmore_text));
+        summary.setTextSize(15f);
+        holder.addView(summary);
+
+        TextView list = new TextView(this);
+        list.setText(names.toString());
+        list.setTextColor(getColor(R.color.vmore_text_faint));
+        list.setTextSize(13f);
+        list.setPadding(0, Ui.dp(this, 6), 0, Ui.dp(this, 10));
+        holder.addView(list);
+
+        EditText caption = new EditText(this);
+        caption.setHint(R.string.share_caption_hint);
+        caption.setText(shareCaptionDraft);
+        caption.setSingleLine(true);
+        caption.setBackgroundResource(R.drawable.bg_field);
+        caption.setTextColor(getColor(R.color.vmore_text));
+        caption.setHintTextColor(getColor(R.color.vmore_text_faint));
+        caption.setTextSize(14f);
+        caption.setPadding(Ui.dp(this, 12), Ui.dp(this, 12), Ui.dp(this, 12), Ui.dp(this, 12));
+        holder.addView(caption);
+
+        long dest = Prefs.destChatId(this);
+        String destName = Prefs.destTitle(this);
+        TextView where = new TextView(this);
+        where.setText(dest == 0L || destName == null || destName.isEmpty()
+                ? getString(R.string.share_need_dest)
+                : getString(R.string.share_to, destName));
+        where.setTextColor(getColor(R.color.vmore_blue));
+        where.setTextSize(13f);
+        where.setPadding(0, Ui.dp(this, 10), 0, 0);
+        holder.addView(where);
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(R.string.share_title)
+                .setView(holder)
+                .setPositiveButton(R.string.share_send, null)
+                .setNeutralButton(R.string.share_change, null)
+                .setNegativeButton(R.string.common_cancel, null)
+                .create();
+        dialog.setOnShowListener(shown -> {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+                shareCaptionDraft = caption.getText().toString();
+                dialog.dismiss();
+                if (Prefs.destChatId(MainActivity.this) == 0L) {
+                    Ui.toast(MainActivity.this, getString(R.string.share_need_dest));
+                    pickDestination();
+                    return;
+                }
+                sendSharedFiles(ShareIntake.decode(Prefs.shareBatch(MainActivity.this)),
+                        shareCaptionDraft);
+            });
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
+                shareCaptionDraft = caption.getText().toString();
+                dialog.dismiss();
+                pickDestination();
+            });
+            dialog.getButton(AlertDialog.BUTTON_NEGATIVE).setOnClickListener(v -> {
+                dialog.dismiss();
+                dropSharedFiles();
+            });
+        });
+        dialog.setOnDismissListener(ignored -> shareSheetOpen = false);
+        shareSheetOpen = true;
+        dialog.show();
+    }
+
+    /** Queues one upload per shared file, and forgets the pending batch. */
+    private void sendSharedFiles(List<ShareIntake.Item> items, String caption) {
+        if (items == null || items.isEmpty()) {
+            return;
+        }
+        long dest = Prefs.destChatId(this);
+        if (dest == 0L) {
+            pickDestination();
+            return;
+        }
+        String destTitle = Prefs.destTitle(this);
+        List<QJob> batch = new ArrayList<>();
+        String batchId = UUID.randomUUID().toString();
+        String label = getString(R.string.share_batch_label);
+        for (ShareIntake.Item item : items) {
+            QJob job = new QJob();
+            job.batchId = batchId;
+            job.batchLabel = label;
+            job.method = QJob.METHOD_UPLOAD;
+            //: The name the sharing app gave it is the name Telegram shows.
+            job.raw = item.name;
+            job.name = item.name;
+            job.kind = item.kind;
+            job.size = item.size;
+            job.path = item.path;
+            job.caption = caption == null ? "" : caption.trim();
+            job.destChatId = dest;
+            job.destTitle = destTitle;
+            //: Only a picture, a video or a song may be sent "as" one; a PDF
+            //: shared into Vmore stays a document whatever the setting says.
+            job.sendAs = "document".equals(item.kind)
+                    ? Prefs.SEND_FILE : Prefs.sendAs(this);
+            job.uploadAfter = true;
+            job.deleteLocal = true;
+            job.stage = QJob.QUEUED;
+            batch.add(job);
+        }
+        Prefs.setShareBatch(this, "");
+        shareCaptionDraft = "";
+        Jobs.get(this).addBatch(batch);
+        QueueService.run(this);
+        Ui.toast(this, getString(R.string.share_queued, batch.size()));
+        paintLive();
+    }
+
+    /** Cancel: the copies were made for this send and nothing else. */
+    private void dropSharedFiles() {
+        ShareIntake.discard(ShareIntake.decode(Prefs.shareBatch(this)));
+        Prefs.setShareBatch(this, "");
+        shareCaptionDraft = "";
     }
 
     private void paintClipboard() {
@@ -764,6 +987,10 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         }
         if (requestCode == REQUEST_SCAN) {
             scanAndQueue(chatId, title);
+        }
+        //: A shared file waits for its chat: once one is chosen, ask again.
+        if (!Prefs.shareBatch(this).isEmpty()) {
+            handler.postDelayed(() -> showShareSheet(""), 300L);
         }
     }
 

@@ -31,6 +31,7 @@ final class Cleanup {
         Set<String> inUse = inUse(app);
         sweepFolder(LocalFiles.downloadsDir(app), inUse, freed, false);
         sweepFolder(LocalFiles.uploadScratchDir(app), inUse, freed, false);
+        sweepFolder(LocalFiles.shareRoot(app), inUse, freed, false);
         sweepFolder(LocalFiles.tdRootDir(app), inUse, freed, false);
 
         History.get(app).forgetMissingFiles();

@@ -533,6 +533,31 @@ Two things the app got wrong even when everything else worked:
   media stays in Cache, so *Clear Cache* still frees it; the Telegram login database was already in User
   Data and is untouched.
 
+### Sending a file that Telegram never had (`2.3.5`)
+
+Every transfer until now started at Telegram: Vmore downloaded a file and sent it on. The phone's own
+files had no way in — the only share filter was `text/plain`, so a gallery, a mail app or a recorder did
+not even offer Vmore, and a photo from the camera could never reach a chat.
+
+Now *Share → Vmore* accepts **files**, one or many, from any app:
+
+* **The name is the name.** The file keeps exactly what its owner called it (`IMG_20260420.jpg`, not a
+  made-up label); a stream with no name gets a readable dated one, and two files with the same name never
+  overwrite each other.
+* **A sheet, not a guess.** The sheet shows how many files, their total size, the first names, the
+  destination chat and a caption box. Nothing is sent until *Send*; *Change chat* goes through the same
+  picker the rest of the app uses; *Cancel* deletes the copies.
+* **One upload, no round trip.** The queue has a new `upload` method: the copy is uploaded once, with the
+  same live progress, flood waits, retries, history entry and "sent as message" note as everything else —
+  and **nothing is downloaded**.
+* **The copy is a one-shot.** Shared files are staged in their own folder inside Cache, one folder per
+  share, deleted the moment the upload lands (or when the sheet is cancelled), and swept by *Clear Cache*
+  if a job dies. A share never becomes a second library.
+* **A share that arrives before sign-in is not lost.** The copies are already on disk and remembered in
+  the preferences, so the sheet comes back after the account is signed in.
+* **Ceilings with a reason:** 2 GB (Telegram's limit for a normal account), 50 files (a share of five
+  hundred photos is a mistake, not a batch), and the phone's free space is checked before a copy starts.
+
 ### Everything the app does
 
 The list below is the whole feature set, all of it on the phone, none of it needing a server.
@@ -578,7 +603,11 @@ The list below is the whole feature set, all of it on the phone, none of it need
     session folder of its own so a closing session can never break the next sign-in.
 16. **Home-screen widget and Quick Settings tile** — the widget shows the job, the stage and the queue
     size with pause/resume and open; the Quick Settings tile does the same from the panel.
-17. **Delete the downloaded files only** — Settings → Downloaded data shows how much is on the phone
+17. **Share any file to Vmore** — *Share → Vmore* from the gallery, a file manager, a mail app or a
+    recorder queues a real upload: the file keeps its own name, the sheet shows the size, the chat and a
+    caption box, and the copy is deleted once it lands. The queue sends it with the same progress, flood
+    waits, retries and history as every other job — with no download in between.
+18. **Delete the downloaded files only** — Settings → Downloaded data shows how much is on the phone
     and **Delete downloaded files** removes those files in one go, after one confirmation.  Nothing else
     is touched: the history stays (each record simply stops offering a file that is gone), and the
     queue, every setting and the Telegram account stay signed in.  A file a waiting or running job
@@ -774,6 +803,7 @@ Seven further suites cover rounds 7-12 and the native engine on the same in-memo
 - `tests/test_round12_owner_tools_and_giveaways.py` — **the owner tools**: copy-before-download (and the Saved Messages guard), the share-URL deep link (minting, expiry, forgery, registration from inside the channel), the dump channel (/setdump, TTL deletion, queue, FloodWait pause, /deldump), `/pin` and `/pinned` in every form, the inline-button wizard end to end (cancel/skip/over-long label/bad link, broadcast formatting through the C++ pool, channel post + pin offer), and the giveaway engine (step wizard, single active giveaway, deep-link join once, live count, daily re-post, random winner granted, deadline draw) — plus the presentation budget re-checked over every new keyboard and screen.
 - `tests/test_round15_picker_dump_and_menu.py` — **the temporary picker keyboard, `/setdump`, the dump rule and the Telegram menu**: the bot rights of both choosers proved a subset of the user rights (as objects and on the MTProto wire), `/setdump` answering even when Telegram refuses the keyboard and a failed typed reference keeping the picker armed; the keyboard removed on every exit (finished setup by picker/typed/refused, `/cancel`, inline Cancel, another command, another button, a full channel list), kept for a retry, never pulled from a live flow, and a leftover from an older build swept exactly once; the dump used only for a user with a caption, prefix or suffix (text, media and native-copy paths, and never when the batch declined the caption), nothing mirrored, owner campaigns direct by default and staged behind `DUMP_STAGE_CAMPAIGNS`; and the menu — emoji-first descriptions, `/start` first, user vs admin vs owner lists inside Telegram's limits, per-chat scopes kept in sync by `/addadmin`, `/removeadmin` and `/start`, and publication at client start.
 - `tests/test_round23_filenames_and_avatars.py` — **file names and avatars (`2.3.4`)**: no internal id or upload-alias prefix can reach a chat (caption, post date and `displayName` are the only sources), unnamed photos/voice notes get a readable dated name and a real extension, the staged upload copy keeps the original basename, a job queued by an older build is cleaned, avatars are stored outside the cache with a one-time migration and stored-path repair, the login database stays in User Data, and the version is `2.3.4` / `versionCode 21`.
+- `tests/test_round24_share_files.py` — **share a file into Telegram (`2.3.5`)**: the manifest accepts one and many files without losing text links, the intake reads both stream extras and drops repeats, the file keeps its declared name (and gets a readable dated one when it has none), 2 GB / 50 files / free-space ceilings, copies live in a swept Cache folder and are deleted after the send or on cancel, the queue uploads with no download and records it in history, a missing copy is not retried four times, and a share that arrives before sign-in survives it.
 - `tests/test_round19_app_page_and_apk.py` — **the Vmore App page and the APK hand-over**: the 📱 button closing `/start` and sitting in `/help`, `/app` and `cmd_app` rendering the same page, the ♾️ button on the private-link pitch, `/apk` publishing the owner's document (or replying to one) without asking for anything, users receiving exactly that file in chat, no external-link fallback when nothing is published or sending fails, and every app screen checked for a server URL, a token wizard or a raw link.
 - The retired app API has no test left: `appapi.py`, `/api/v2` and their three test modules
   (`test_round16_vmore_app.py`, `test_round17_zero_transfer.py`, `test_round18_td_direct.py`) are gone

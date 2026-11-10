@@ -47,6 +47,27 @@ final class LocalFiles {
         return dir;
     }
 
+    /**
+     * Where files another app shared into Vmore wait for their upload.
+     *
+     * Inside Cache on purpose: a shared copy is raw material for one send, so
+     * *Clear Cache* may take it, and {@link Cleanup} leaves alone any copy a
+     * job still needs.
+     */
+    static File shareRoot(Context context) {
+        return new File(cacheRoot(context), "share");
+    }
+
+    /** One folder per share, so a whole share can be dropped in one call. */
+    static File shareInbox(Context context, long stamp) {
+        File root = shareRoot(context);
+        if (!root.exists()) {
+            //noinspection ResultOfMethodCallIgnored
+            root.mkdirs();
+        }
+        return new File(root, "u" + Math.max(1L, stamp));
+    }
+
     /** Root directory of all TDLib file caches across account slots. */
     static File tdRootDir(Context context) {
         File dir = new File(cacheRoot(context), "tdlib");

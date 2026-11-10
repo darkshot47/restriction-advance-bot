@@ -65,6 +65,19 @@
     <string name="home_nav_theme">Switch between day and night</string>
     <string name="home_profile_guest">Not signed in</string>
     <string name="home_error_label">Why it failed</string>
+    <!-- Sharing a file from another app into Telegram. -->
+    <string name="share_title">Send to Telegram</string>
+    <string name="share_copying">Copying %1$d files into Vmore...</string>
+    <string name="share_summary">%1$d files - %2$s</string>
+    <string name="share_more">and %1$d more</string>
+    <string name="share_caption_hint">Caption (optional)</string>
+    <string name="share_to">To: %1$s</string>
+    <string name="share_need_dest">Choose the chat these files should go to</string>
+    <string name="share_change">Change chat</string>
+    <string name="share_send">Send</string>
+    <string name="share_queued">%1$d files added to the queue</string>
+    <string name="share_failed">Could not prepare those files: %1$s</string>
+    <string name="share_batch_label">Shared from the phone</string>
     <string name="home_empty">Nothing here yet. Paste a Telegram link above and tap Start.</string>
     <string name="home_links_added">links added to the queue</string>
     <string name="home_no_link">Paste at least one Telegram link first</string>

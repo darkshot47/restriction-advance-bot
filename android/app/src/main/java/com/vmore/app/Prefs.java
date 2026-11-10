@@ -542,6 +542,26 @@ public final class Prefs {
                 value == null ? "" : value.trim()).apply();
     }
 
+    /**
+     * Files shared into Vmore that have not been sent yet.
+     *
+     * The copies are already on disk, so this only has to remember where they
+     * are: a share that arrives before the account is signed in then survives
+     * the trip through the sign-in screen instead of being lost.
+     */
+    public static String shareBatch(Context context) {
+        String value = prefs(context).getString("share_batch", "");
+        return value == null ? "" : value;
+    }
+
+    public static void setShareBatch(Context context, String json) {
+        if (json == null || json.isEmpty()) {
+            prefs(context).edit().remove("share_batch").apply();
+            return;
+        }
+        prefs(context).edit().putString("share_batch", json).apply();
+    }
+
     // -------------------------------------------------------- destination //
 
     /**

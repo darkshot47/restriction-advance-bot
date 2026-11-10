@@ -26,6 +26,15 @@ public final class QJob {
     public static final String METHOD_DOWNLOAD = "download";
     /** Let Telegram move the message itself: no bytes cross the phone. */
     public static final String METHOD_FORWARD = "forward";
+    /**
+     * A file that is already on this phone, shared into Vmore by another app.
+     *
+     * Nothing to download and no Telegram message behind it: the queue opens
+     * the file, uploads it once and deletes the copy, which is the one thing
+     * this app could not do until now (it could only send what it had
+     * downloaded from Telegram).
+     */
+    public static final String METHOD_UPLOAD = "upload";
     /** A link that names a chat but no message: take its recent files. */
     public static final String METHOD_SCAN = "scan";
 
