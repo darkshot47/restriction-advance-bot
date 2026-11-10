@@ -118,9 +118,9 @@ def test_smart_feature_chip_is_a_colourful_animated_crown():
     assert '<string name="smart_button">Smart feature</string>' in strings
 
 
-def test_version_is_2_3_3_with_new_version_code():
+def test_version_is_2_3_4_with_new_version_code():
     gradle = _read(REPO_ROOT / "android" / "app" / "build.gradle")
     vmore = _read(JAVA_DIR / "Vmore.java")
-    assert "versionCode 20" in gradle
-    assert 'versionName "2.3.3"' in gradle
-    assert 'VERSION = "2.3.3"' in vmore
+    assert "versionCode 21" in gradle
+    assert 'versionName "2.3.4"' in gradle
+    assert 'VERSION = "2.3.4"' in vmore

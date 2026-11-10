@@ -514,6 +514,25 @@ nothing of the kind to enter, because the app has no server.  Both commands are 
 menu (*Open the Vmore App page* / *Download the Vmore app*) and in the admin panel under
 **🎁 Owner Tools** (`/app — Vmore App Page`, `/apk — Send or Publish the APK`).
 
+### File names and profile pictures (`2.3.4`)
+
+Two things the app got wrong even when everything else worked:
+
+* **The name in the chat is the file's real name.** Telegram takes the uploaded file name from the local
+  path, so the old build's placeholders were visible to every recipient: unnamed media arrived as
+  `vmore_4838.mp4`, and the upload alias (`vmore_<millis>_name.mp4`) leaked the same prefix. A file is now
+  named from its **caption**, then from the **post's own date** (`photo_2026-10-20_143012.jpg`), and the
+  upload alias is staged in a one-shot folder so the basename is exactly the original — uniqueness no
+  longer costs the name. A job queued by an older build has the prefix stripped on the way out
+  (`Format.displayName`).
+* **A profile picture survives *Clear Cache*.** Pictures were cached under `cache/avatars`, so clearing the
+  cache deleted the account's photo *and* the owner's, and the header fell back to an initial — the owner
+  card only refreshes when the owner changes his photo, so it never came back. Avatars (a few KB each) now
+  live in the app's private **User Data** directory: the first start moves an older build's copies out of
+  the cache (`LocalFiles.migrateAvatars`) and repairs the stored paths (`Prefs.repairAvatarPaths`). All
+  media stays in Cache, so *Clear Cache* still frees it; the Telegram login database was already in User
+  Data and is untouched.
+
 ### Everything the app does
 
 The list below is the whole feature set, all of it on the phone, none of it needing a server.
@@ -754,6 +773,7 @@ Seven further suites cover rounds 7-12 and the native engine on the same in-memo
 
 - `tests/test_round12_owner_tools_and_giveaways.py` — **the owner tools**: copy-before-download (and the Saved Messages guard), the share-URL deep link (minting, expiry, forgery, registration from inside the channel), the dump channel (/setdump, TTL deletion, queue, FloodWait pause, /deldump), `/pin` and `/pinned` in every form, the inline-button wizard end to end (cancel/skip/over-long label/bad link, broadcast formatting through the C++ pool, channel post + pin offer), and the giveaway engine (step wizard, single active giveaway, deep-link join once, live count, daily re-post, random winner granted, deadline draw) — plus the presentation budget re-checked over every new keyboard and screen.
 - `tests/test_round15_picker_dump_and_menu.py` — **the temporary picker keyboard, `/setdump`, the dump rule and the Telegram menu**: the bot rights of both choosers proved a subset of the user rights (as objects and on the MTProto wire), `/setdump` answering even when Telegram refuses the keyboard and a failed typed reference keeping the picker armed; the keyboard removed on every exit (finished setup by picker/typed/refused, `/cancel`, inline Cancel, another command, another button, a full channel list), kept for a retry, never pulled from a live flow, and a leftover from an older build swept exactly once; the dump used only for a user with a caption, prefix or suffix (text, media and native-copy paths, and never when the batch declined the caption), nothing mirrored, owner campaigns direct by default and staged behind `DUMP_STAGE_CAMPAIGNS`; and the menu — emoji-first descriptions, `/start` first, user vs admin vs owner lists inside Telegram's limits, per-chat scopes kept in sync by `/addadmin`, `/removeadmin` and `/start`, and publication at client start.
+- `tests/test_round23_filenames_and_avatars.py` — **file names and avatars (`2.3.4`)**: no internal id or upload-alias prefix can reach a chat (caption, post date and `displayName` are the only sources), unnamed photos/voice notes get a readable dated name and a real extension, the staged upload copy keeps the original basename, a job queued by an older build is cleaned, avatars are stored outside the cache with a one-time migration and stored-path repair, the login database stays in User Data, and the version is `2.3.4` / `versionCode 21`.
 - `tests/test_round19_app_page_and_apk.py` — **the Vmore App page and the APK hand-over**: the 📱 button closing `/start` and sitting in `/help`, `/app` and `cmd_app` rendering the same page, the ♾️ button on the private-link pitch, `/apk` publishing the owner's document (or replying to one) without asking for anything, users receiving exactly that file in chat, no external-link fallback when nothing is published or sending fails, and every app screen checked for a server URL, a token wizard or a raw link.
 - The retired app API has no test left: `appapi.py`, `/api/v2` and their three test modules
   (`test_round16_vmore_app.py`, `test_round17_zero_transfer.py`, `test_round18_td_direct.py`) are gone

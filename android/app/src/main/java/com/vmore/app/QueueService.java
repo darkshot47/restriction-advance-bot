@@ -846,8 +846,11 @@ public class QueueService extends Service {
         if (job.uploadAfter && job.destChatId != 0L && job.deleteLocal) {
             return rawPath;
         }
+        //: The staged copy keeps the same readable name the chat will show; an
+        //: old job that still carries the retired "vmore_<id>" prefix is
+        //: cleaned here so it never reaches Telegram either.
         File target = new File(downloadsDir(),
-                Format.safeName(job.name, "vmore_" + job.messageId));
+                Format.displayName(job.name, "file_" + job.messageId));
         if (target.getAbsolutePath().equals(rawPath)) {
             return rawPath;
         }

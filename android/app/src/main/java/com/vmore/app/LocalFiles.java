@@ -78,14 +78,77 @@ final class LocalFiles {
         return dir;
     }
 
-    /** Cached profile and channel pictures — inside Cache. */
+    /**
+     * Profile pictures — the only media kept in User Data, on purpose.
+     *
+     * Everything else lives in Cache so "Clear Cache" really does free it, but
+     * a profile picture is not disposable: clearing the cache used to wipe the
+     * account's own photo and the owner's, and the header then showed an
+     * initial until Telegram happened to hand the picture over again (the owner
+     * card waited for the owner to change it).  A few KB per chat is a fair
+     * price for the avatar surviving a cache clear.
+     */
     static File avatarsDir(Context context) {
-        File dir = new File(cacheRoot(context), "avatars");
+        File dir = new File(userDataRoot(context), "avatars");
         if (!dir.exists()) {
             //noinspection ResultOfMethodCallIgnored
             dir.mkdirs();
         }
         return dir;
+    }
+
+    /** User Data root — everything that must outlive "Clear Cache". */
+    static File userDataRoot(Context context) {
+        File dir = context.getFilesDir();
+        if (dir != null && (dir.exists() || dir.mkdirs())) {
+            return dir;
+        }
+        return context.getFilesDir();
+    }
+
+    /** Where older builds kept the pictures, inside Cache. */
+    static File legacyAvatarsDir(Context context) {
+        return new File(cacheRoot(context), "avatars");
+    }
+
+    /**
+     * Moves pictures saved by an older build out of Cache, once.
+     *
+     * The copies are renamed into place, so a picture the user could already
+     * see is still on screen after the update — no re-download needed.
+     */
+    static void migrateAvatars(Context context) {
+        File legacy = legacyAvatarsDir(context);
+        if (legacy == null || !legacy.isDirectory()) {
+            return;
+        }
+        File[] children = legacy.listFiles();
+        if (children == null) {
+            return;
+        }
+        File target = avatarsDir(context);
+        for (File child : children) {
+            if (!child.isFile()) {
+                deleteTree(child);
+                continue;
+            }
+            File moved = new File(target, child.getName());
+            if (!moved.exists()) {
+                LocalFiles.copy(child.getAbsolutePath(), moved);
+            }
+            //noinspection ResultOfMethodCallIgnored
+            child.delete();
+        }
+        String[] left = legacy.list();
+        if (left != null && left.length == 0) {
+            //noinspection ResultOfMethodCallIgnored
+            legacy.delete();
+        }
+    }
+
+    /** Where a picture used to be cached, keyed by its file name. */
+    static File legacyAvatarNamed(Context context, File newFile) {
+        return new File(legacyAvatarsDir(context), newFile.getName());
     }
 
     static File targetFile(Context context, String name) {

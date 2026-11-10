@@ -349,6 +349,51 @@ public final class Prefs {
                 .apply();
     }
 
+    /**
+     * Points stored avatar paths at the file that actually exists.
+     *
+     * Older builds cached pictures under {@code cache/avatars}, so clearing
+     * the cache deleted the file while the preference kept pointing at it: the
+     * header fell back to an initial and never asked Telegram again (the owner
+     * card only refreshes when the owner changes his photo).  Pictures now live
+     * in User Data; this repairs a path left behind by the old location, for
+     * the current account and for the owner card, once at every start.
+     */
+    public static void repairAvatarPaths(Context context) {
+        if (context == null) {
+            return;
+        }
+        Context app = context.getApplicationContext();
+        String mine = avatarPath(app);
+        String fixedMine = existingAvatar(app, mine, LocalFiles.avatarFile(app));
+        if (fixedMine != null && !fixedMine.equals(mine)) {
+            saveAvatar(app, fixedMine, avatarFileId(app));
+        }
+        String owner = developerAvatar(app);
+        String fixedOwner = existingAvatar(app, owner, LocalFiles.developerAvatar(app));
+        if (fixedOwner != null && !fixedOwner.equals(owner)) {
+            saveDeveloper(app, developerName(app), developerBio(app), fixedOwner,
+                    developerAvatarFile(app));
+        }
+    }
+
+    /** The path that should be used for {@code newFile}, or null if none is on disk. */
+    private static String existingAvatar(Context context, String stored, java.io.File newFile) {
+        if (stored != null && !stored.isEmpty() && new java.io.File(stored).isFile()) {
+            return stored;
+        }
+        if (newFile != null && newFile.isFile()) {
+            return newFile.getAbsolutePath();
+        }
+        if (newFile != null) {
+            java.io.File legacy = LocalFiles.legacyAvatarNamed(context, newFile);
+            if (legacy.isFile()) {
+                return legacy.getAbsolutePath();
+            }
+        }
+        return null;
+    }
+
     // ---------------------------------------------------------------- skin //
 
     /** 0 = day, 1 = night, 2 = automatic (night between 18:00 and 06:00). */

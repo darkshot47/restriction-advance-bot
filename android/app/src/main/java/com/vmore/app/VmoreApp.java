@@ -33,6 +33,10 @@ public class VmoreApp extends Application implements Application.ActivityLifecyc
         super.onCreate();
         launchIntroPending = true;
         Skin.apply(this);
+        //: Profile pictures must survive "Clear Cache": move an older build's
+        //: copies out of the cache and repair the paths that pointed at them.
+        LocalFiles.migrateAvatars(this);
+        Prefs.repairAvatarPaths(this);
         registerActivityLifecycleCallbacks(this);
         Thread tidy = new Thread(() -> Tg.get(this).tidySessions(), "vmore-session-tidy");
         tidy.setDaemon(true);

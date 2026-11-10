@@ -2110,7 +2110,8 @@ public final class Tg {
             TdApi.VideoNote note = ((TdApi.MessageVideoNote) content).videoNote;
             media.kind = "video";
             file = note.video;
-            media.name = "video_note.mp4";
+            //: Named later from the caption or the post's date — never from an
+            //: internal id, which would show up in every chat it is sent to.
             media.mime = "video/mp4";
             media.durationSec = note.duration;
             media.width = note.length;
@@ -2126,7 +2127,6 @@ public final class Tg {
             TdApi.VoiceNote note = ((TdApi.MessageVoiceNote) content).voiceNote;
             media.kind = "audio";
             file = note.voice;
-            media.name = "voice_note.ogg";
             media.mime = note.mimeType;
             media.durationSec = note.duration;
         } else if (content instanceof TdApi.MessagePhoto) {
@@ -2138,7 +2138,6 @@ public final class Tg {
             TdApi.PhotoSize biggest = sizes[sizes.length - 1];
             media.kind = "photo";
             file = biggest.photo;
-            media.name = "photo.jpg";
             media.mime = "image/jpeg";
             media.width = biggest.width;
             media.height = biggest.height;
@@ -2155,7 +2154,8 @@ public final class Tg {
                 return null;
             }
             media.kind = "text";
-            media.name = Format.safeName(Format.oneLine(rawText), "message_" + media.messageId);
+            media.name = Format.safeName(Format.stemFrom(rawText, 60) + ".txt",
+                    Format.datedName("message", message.date, ".txt"));
             media.caption = rawText;
             media.size = rawText.getBytes().length;
             media.downloadable = true;
@@ -2173,13 +2173,43 @@ public final class Tg {
         boolean cached = file.local != null && file.local.isDownloadingCompleted;
         media.downloadable = cached || file.local == null || file.local.canBeDownloaded;
         media.caption = captionOf(content);
-        if (media.name == null || media.name.isEmpty()) {
-            media.name = "vmore_" + media.messageId + guessExtension(media.mime);
+        //: Telegram names its media inconsistently: photos and voice notes have
+        //: no name at all, forwarded documents often lose theirs.  The caption
+        //: is the closest thing a person would call the file, and the post's own
+        //: date is a stable, readable fallback — an internal message id is not,
+        //: because Telegram shows the local file name to every recipient.
+        String extension = guessExtension(media.mime);
+        if (extension.isEmpty()) {
+            extension = defaultExtension(media.kind);
         }
-        media.name = Format.safeName(media.name, "vmore_" + media.messageId);
+        if (media.name == null || media.name.isEmpty()) {
+            String stem = Format.stemFrom(media.caption, 48);
+            media.name = stem.isEmpty()
+                    ? Format.datedName(media.kind, message.date, extension)
+                    : stem + extension;
+        }
+        media.name = Format.displayName(media.name,
+                Format.datedName(media.kind, message.date, extension));
         media.mime = media.mime == null || media.mime.isEmpty()
                 ? "application/octet-stream" : media.mime;
         return media;
+    }
+
+    /** The extension a kind gets when Telegram reports no MIME type at all. */
+    private static String defaultExtension(String kind) {
+        if ("photo".equals(kind)) {
+            return ".jpg";
+        }
+        if ("video".equals(kind)) {
+            return ".mp4";
+        }
+        if ("audio".equals(kind)) {
+            return ".ogg";
+        }
+        if ("text".equals(kind)) {
+            return ".txt";
+        }
+        return "";
     }
 
     private static String guessExtension(String mime) {
@@ -2594,10 +2624,19 @@ public final class Tg {
                         }));
     }
 
+    /** Makes every staged upload folder unique inside the same millisecond. */
+    private static final java.util.concurrent.atomic.AtomicLong SCRATCH_SLOTS =
+            new java.util.concurrent.atomic.AtomicLong();
+
     /**
-     * Stages an independent copy under cache/upload with a fresh name so TDLib
-     * always treats the bytes as a brand-new upload instead of aliasing a
-     * protected source file's inode.
+     * Stages an independent copy under cache/upload so TDLib always treats the
+     * bytes as a brand-new upload instead of aliasing a protected source file.
+     *
+     * The copy keeps the original file name exactly: TDLib builds the name a
+     * chat shows straight from the local path, so anything this method adds to
+     * it (a timestamp, an internal id) would be visible to every recipient.
+     * Uniqueness comes from a one-shot directory instead of a name prefix —
+     * {@code cache/upload/u1729456123_42/holiday.mp4} uploads as "holiday.mp4".
      */
     private String freshNameFor(String path) {
         if (path == null || path.isEmpty()) {
@@ -2607,23 +2646,38 @@ public final class Tg {
         if (!source.isFile()) {
             return null;
         }
-        File dir = LocalFiles.uploadScratchDir(app);
-        File alias = new File(dir, "vmore_" + System.currentTimeMillis() + "_"
-                + source.getName());
+        String name = Format.displayName(source.getName(), source.getName());
+        File slot = new File(LocalFiles.uploadScratchDir(app),
+                "u" + System.currentTimeMillis() + "_" + (SCRATCH_SLOTS.incrementAndGet()));
+        if (!slot.exists() && !slot.mkdirs()) {
+            return null;
+        }
+        File alias = new File(slot, name);
         File copied = LocalFiles.copy(path, alias);
-        return copied == null ? null : copied.getAbsolutePath();
+        if (copied == null) {
+            //noinspection ResultOfMethodCallIgnored
+            slot.delete();
+            return null;
+        }
+        return copied.getAbsolutePath();
     }
 
-    /** Deletes a scratch name, never the file it points at. */
+    /** Deletes a staged copy and its one-shot folder, never the original file. */
     private static void drop(String path) {
         if (path == null || path.isEmpty()) {
             return;
         }
         File scratch = new File(path);
-        File uploadDir = scratch.getParentFile();
+        File folder = scratch.getParentFile();
+        if (folder == null) {
+            return;
+        }
+        //noinspection ResultOfMethodCallIgnored
+        scratch.delete();
+        File uploadDir = folder.getParentFile();
         if (uploadDir != null && "upload".equals(uploadDir.getName())) {
             //noinspection ResultOfMethodCallIgnored
-            scratch.delete();
+            folder.delete();
         }
     }
 
