@@ -131,7 +131,18 @@ public final class Format {
      * and no length beyond {@code limit}.
      */
     public static String stemFrom(String text, int limit) {
-        String value = oneLine(text);
+        //: Only the first non-empty line names the file: a caption's second line
+        //: is usually a credit or a link, not part of the name.
+        String value = "";
+        if (text != null) {
+            for (String line : text.split("\n")) {
+                String trimmed = oneLine(line);
+                if (!trimmed.isEmpty()) {
+                    value = oneLine(trimmed);
+                    break;
+                }
+            }
+        }
         if (value.isEmpty()) {
             return "";
         }

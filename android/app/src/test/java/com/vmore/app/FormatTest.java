@@ -27,7 +27,11 @@ public class FormatTest {
         assertEquals("report", Format.stemFrom("  report  ", 48));
         assertEquals("", Format.stemFrom("   ", 48));
         assertEquals("", Format.stemFrom(null, 48));
-        assertTrue(Format.stemFrom("x".repeat(200), 48).length() <= 48);
+        StringBuilder long0 = new StringBuilder();
+        for (int index = 0; index < 200; index++) {
+            long0.append('x');
+        }
+        assertTrue(Format.stemFrom(long0.toString(), 48).length() <= 48);
         assertFalse(Format.stemFrom("...hidden...", 48).startsWith("."));
     }
 
