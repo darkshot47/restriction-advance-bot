@@ -233,7 +233,6 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
     }
 
     @Override
-    @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         setIntent(intent);
@@ -241,6 +240,7 @@ public class MainActivity extends Activity implements Jobs.Listener, History.Lis
         captureSharedFiles(intent);
     }
 
+    @Override
     protected void onResume() {
         super.onResume();
         //: The session is asked for first: in a fresh process it is still being
